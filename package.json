@@ -1,0 +1,38 @@
+{
+  "name": "ether-memories",
+  "version": "0.3.0",
+  "description": "Civilian-grade, local-first memory primitives for Notes, Diary, Mind Graph, and deterministic AI-ready context transport.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "memory",
+    "ai",
+    "agents",
+    "rag",
+    "rlm",
+    "typescript",
+    "mind-graph",
+    "diary"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "graphology": "^0.26.0",
+    "graphology-types": "^0.24.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "files": [
+    "dist"
+  ]
+}
