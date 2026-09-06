@@ -1,10 +1,9 @@
-# Ether Memories v0.3.0 Release Manifest
+# Ether Memories v0.3.1 Release Manifest
 
-Version: 0.3.0
-Branch: main
-Commit: 3aba15fe883d3433b02b2889819602c9e5c65979
+Version: 0.3.1
+Branch: fix/v0.3.1-stability
 
-This manifest describes the published v0.3.0 release.
+This manifest describes the v0.3.1 stability hardening release.
 
 ## Canonical goals
 - Three foundations: Memory Notes, Diary, Mind Graph.
