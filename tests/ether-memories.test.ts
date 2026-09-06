@@ -86,4 +86,77 @@ describe("Ether Memories v0.3.0", () => {
     if (!c.ok) return;
     expect(c.value.retrieval.conflictFlags[0].reason).toBe("duplicate_claim_key");
   });
+  it("duplicate_edge_returns_conflict", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    e.graph.addNode({ id: "a", type: "test", data: {} });
+    e.graph.addNode({ id: "b", type: "test", data: {} });
+    expect(e.graph.addEdge("a", "b", "related_to").ok).toBe(true);
+    const duplicate = e.graph.addEdge("a", "b", "supports");
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.error.code).toBe("CONFLICT");
+  });
+
+  it("diary_text_enters_memory_context", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const entry = e.addDiaryEntry({ content: "Configured Termux during the train ride." });
+    expect(entry.ok).toBe(true);
+    if (!entry.ok) return;
+    const context = e.buildMemoryContext({ purpose: "debug", query: { text: "Termux", budget: { maxDiary: 2 } } });
+    expect(context.ok).toBe(true);
+    if (!context.ok) return;
+    expect(context.value.diary.map(item => item.entry.id)).toContain(entry.value.id);
+    expect(context.value.citations.map(c => c.ref)).toContain(`diary:${entry.value.id}`);
+  });
+
+  it("condensation_creates_graph_link", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const diary = e.addDiaryEntry({ content: "A source entry." });
+    expect(diary.ok).toBe(true);
+    if (!diary.ok) return;
+    const note = e.condensation.condense("A candidate distilled from the diary.", diary.value.id);
+    expect(note).toBeTruthy();
+    if (!note) return;
+    expect(note.status).toBe("candidate");
+    expect(note.provenance).toMatchObject({ kind: "diary_extract", parentDiaryId: diary.value.id });
+    expect(e.graph.getNode(`memory:${note.id}`)).toBeTruthy();
+    expect(e.graph.getNode(`diary:${diary.value.id}`)).toBeTruthy();
+    expect(e.graph.getAllEdges()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: `memory:${note.id}`, target: `diary:${diary.value.id}`, relationship: "derived_from" })
+    ]));
+  });
+
+  it("purge_expired_removes_graph_node", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const note = e.addMemory({ content: "Temporary linked fact", expiresAt: new Date(Date.now() - 1) });
+    expect(note.ok).toBe(true);
+    if (!note.ok) return;
+    e.graph.addNode({ id: "other", type: "test", data: {} });
+    expect(e.graph.addEdge(`memory:${note.value.id}`, "other").ok).toBe(true);
+    expect(e.graph.getNode(`memory:${note.value.id}`)).toBeTruthy();
+    expect(e.purgeExpired()).toBe(1);
+    expect(e.notes.get(note.value.id).ok).toBe(false);
+    expect(e.graph.getNode(`memory:${note.value.id}`)).toBeUndefined();
+    expect(e.graph.getAllEdges()).toHaveLength(0);
+  });
+
+  it("empty_query_returns_empty", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    e.addMemory({ content: "A durable fact", pinned: true, importance: 1 });
+    const result = e.queryMemories("");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toEqual([]);
+  });
+
+  it("matchedBy_only_reports_fired_evidence", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const note = e.addMemory({ content: "Termux setup instructions", importance: 1 });
+    expect(note.ok).toBe(true);
+    if (!note.ok) return;
+    const detailed = e.queryMemoriesDetailed("Termux");
+    expect(detailed.ok).toBe(true);
+    if (!detailed.ok) return;
+    expect(detailed.value[0].matchedBy).toContain("exact_phrase");
+    expect(detailed.value[0].matchedBy).not.toContain("importance");
+    expect(detailed.value[0].matchedBy).not.toContain("recency");
+  });
 });

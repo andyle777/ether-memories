@@ -40,7 +40,10 @@ export class EtherMemoriesCore {
     };
     this.retriever = new MemoryRetriever(() => this.notes.valuesUnsafe(), () => this.diary.valuesUnsafe());
     this.linker = new FoundationLinker(this.graph);
-    this.condensation = new CondensationEngine(this.notes);
+    this.condensation = new CondensationEngine(input => {
+      const result = this.addMemory(input);
+      return result.ok ? result.value : undefined;
+    });
     this.storage = options.storagePath ? new FsJsonStorage(options.storagePath) : undefined;
   }
 
@@ -68,6 +71,15 @@ export class EtherMemoriesCore {
     const result = this.notes.delete(id);
     if (result.ok) { this.linker.removeNote(id); this.touch(); }
     return result;
+  }
+
+  purgeExpired(forcePinned = false): number {
+    const now = Date.now();
+    const ids = this.notes.valuesUnsafe()
+      .filter(note => note.expiresAt && note.expiresAt.getTime() <= now && (!note.pinned || forcePinned))
+      .map(note => note.id);
+    for (const id of ids) this.deleteMemory(id);
+    return ids.length;
   }
 
   updateDiary(id: string, patch: Partial<Omit<DiaryEntry, "id" | "createdAt" | "updatedAt">>): Result<DiaryEntry> {

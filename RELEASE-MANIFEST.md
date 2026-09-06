@@ -1,6 +1,10 @@
 # Ether Memories v0.3.0 Release Manifest
 
-This archive is the clean v0.3.0 source package generated from the unified v0.3 design agreed by Andy, Leia, and Aether.
+Version: 0.3.0
+Branch: main
+Commit: 3aba15fe883d3433b02b2889819602c9e5c65979
+
+This manifest describes the published v0.3.0 release.
 
 ## Canonical goals
 - Three foundations: Memory Notes, Diary, Mind Graph.
@@ -12,8 +16,8 @@ This archive is the clean v0.3.0 source package generated from the unified v0.3 
 - Agent and RLM adapters without embedding an RLM or LLM in the core.
 - RAG-ready seam without vectors or embeddings.
 
-## Important
-The GitHub repository inspected immediately before archive creation still contained the shipped v0.2.0 source. This ZIP is therefore a clean generated v0.3.0 build from the agreed specification rather than a byte-for-byte recovery of an unavailable local v0.3 workspace.
+## Post-release hardening
+Post-release adversarial testing identified the v0.3.1 stability work: duplicate graph-edge handling, diary text retrieval in MemoryContext, FoundationLinker lifecycle coherence for condensation and expiry, truthful retrieval evidence, and bounded-context accounting clarification.
 
 Run:
 ```bash
