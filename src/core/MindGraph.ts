@@ -32,7 +32,11 @@ export class MindGraphManager {
     }
     const normalized = STARTER_RELATIONS.includes(relationship as GraphRelation) ? relationship : "related_to";
     const edgeId = createId("edge");
-    this.graph.addEdgeWithKey(edgeId, source, target, { relationship: normalized, data: { ...data, ...(normalized !== relationship ? { rawRelation: relationship } : {}) } });
+    try {
+      this.graph.addEdgeWithKey(edgeId, source, target, { relationship: normalized, data: { ...data, ...(normalized !== relationship ? { rawRelation: relationship } : {}) } });
+    } catch (cause) {
+      return err("CONFLICT", "A directed edge already exists between these graph endpoints.", cause);
+    }
     return ok({ id: edgeId, source, target, relationship: normalized, data: { ...data } });
   }
 

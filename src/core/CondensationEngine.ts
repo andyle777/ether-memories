@@ -1,13 +1,13 @@
 import type { MemoryNote } from "../types/index.js";
-import { MemoryNotes } from "./MemoryNotes.js";
+import type { AddNoteInput } from "./MemoryNotes.js";
 
 export class CondensationEngine {
-  constructor(private readonly notes: MemoryNotes) {}
+  constructor(private readonly createCandidate: (input: AddNoteInput) => MemoryNote | undefined) {}
 
   condense(input: string, parentDiaryId?: string): MemoryNote | undefined {
     if (!input.trim()) return undefined;
     const summary = input.length > 200 ? `${input.slice(0, 197)}...` : input;
-    const result = this.notes.add({
+    return this.createCandidate({
       content: summary,
       summary,
       source: "ai",
@@ -19,6 +19,5 @@ export class CondensationEngine {
       },
       confidence: parentDiaryId ? 0.8 : 0.75
     });
-    return result.ok ? result.value : undefined;
   }
 }

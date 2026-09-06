@@ -46,11 +46,19 @@ export class MemoryContextBuilder {
     } satisfies ContextNote));
 
     const diaryIds = q.diaryIds ?? [];
-    const diaries: ContextDiary[] = diaryIds
-      .map(id => this.getDiary().find(x => x.id === id))
-      .filter((x): x is NonNullable<typeof x> => !!x)
-      .slice(0, budget.maxDiary)
-      .map(entry => ({ entry, matchedBy: ["explicit_id"], cite: citation("diary", entry.id) } satisfies ContextDiary));
+    const selectedDiary = new Map<string, ContextDiary>();
+    for (const id of diaryIds) {
+      const entry = this.getDiary().find(x => x.id === id);
+      if (entry) selectedDiary.set(id, { entry, matchedBy: ["explicit_id"], cite: citation("diary", entry.id) });
+    }
+    if (q.text?.trim()) {
+      for (const entry of this.retriever.searchDiary(q.text, Math.max(budget.maxDiary * 4, 20))) {
+        if (!selectedDiary.has(entry.id)) {
+          selectedDiary.set(entry.id, { entry, matchedBy: ["exact_phrase"], cite: citation("diary", entry.id) });
+        }
+      }
+    }
+    const diaries = [...selectedDiary.values()].slice(0, budget.maxDiary);
 
     const depth = q.graph?.neighborhoodDepth ?? 1;
     const seedNodes = [
@@ -74,12 +82,15 @@ export class MemoryContextBuilder {
       depth
     };
 
+    const originalNoteChars = new Map(notes.map(item => [item.note.id, item.note.content.length]));
+    const originalDiaryChars = new Map(diaries.map(item => [item.entry.id, item.entry.content.length]));
     let usedChars = 0;
     if (budget.maxChars !== undefined) {
       for (const item of notes) {
         const remaining = Math.max(0, budget.maxChars - usedChars);
         if (item.note.content.length > remaining) {
-          item.excerpt = remaining > 0 ? item.note.content.slice(0, Math.max(0, remaining - 3)) + "..." : "";
+          item.excerpt = remaining >= 3 ? item.note.content.slice(0, remaining - 3) + "..." : item.note.content.slice(0, remaining);
+          item.note = { ...item.note, content: item.excerpt };
           usedChars += item.excerpt.length;
         } else {
           usedChars += item.note.content.length;
@@ -88,7 +99,8 @@ export class MemoryContextBuilder {
       for (const item of diaries) {
         const remaining = Math.max(0, budget.maxChars - usedChars);
         if (item.entry.content.length > remaining) {
-          item.excerpt = remaining > 0 ? item.entry.content.slice(0, Math.max(0, remaining - 3)) + "..." : "";
+          item.excerpt = remaining >= 3 ? item.entry.content.slice(0, remaining - 3) + "..." : item.entry.content.slice(0, remaining);
+          item.entry = { ...item.entry, content: item.excerpt };
           usedChars += item.excerpt.length;
         } else {
           usedChars += item.entry.content.length;
@@ -124,20 +136,19 @@ export class MemoryContextBuilder {
       conflictFlags
     };
 
-    const rawTextLength = notes.reduce((s, n) => s + n.note.content.length, 0)
-      + diaries.reduce((s, d) => s + d.entry.content.length, 0);
+    // This counts only text truncated from selected context items, not text from
+    // items omitted by another budget. It is therefore precise about its scope.
+    const charsOmitted = notes.reduce((s, n) => s + (originalNoteChars.get(n.note.id) ?? n.note.content.length) - n.note.content.length, 0)
+      + diaries.reduce((s, d) => s + (originalDiaryChars.get(d.entry.id) ?? d.entry.content.length) - d.entry.content.length, 0);
     const truncation: TruncationReport = {
       notesOmitted: Math.max(0, selected.size - notes.length),
-      diaryOmitted: Math.max(0, diaryIds.length - diaries.length),
+      diaryOmitted: Math.max(0, selectedDiary.size - diaries.length),
       nodesOmitted: Math.max(0, nodeMap.size - nodes.length),
       edgesOmitted: Math.max(0, edgeMap.size - edges.length),
-      charsOmitted: 0,
-      hitBudget: selected.size > notes.length || diaryIds.length > diaries.length || nodeMap.size > nodes.length || edgeMap.size > edges.length
+      charsOmitted,
+      hitBudget: selected.size > notes.length || selectedDiary.size > diaries.length || nodeMap.size > nodes.length || edgeMap.size > edges.length || charsOmitted > 0
     };
-    if (budget.maxChars !== undefined && rawTextLength > budget.maxChars) {
-      truncation.hitBudget = true;
-      truncation.charsOmitted = rawTextLength - Math.min(rawTextLength, budget.maxChars);
-    }
+
 
     return {
       schemaVersion: "ether.memory_context.v1",
