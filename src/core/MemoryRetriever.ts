@@ -40,7 +40,7 @@ export class MemoryRetriever {
       if (tokenHits) { score += tokenHits * 0.2; matchedBy.push("token"); }
       if (options.tags?.some(t => note.tags.includes(t))) { score += 0.3; matchedBy.push("tag"); }
       if (options.categories?.some(c => note.category === c)) { score += 0.3; matchedBy.push("category"); }
-      if (options.pinnedOnly) { score += 0.5; matchedBy.push("pinned"); }
+      if (options.pinnedOnly) score += 0.5;
       score += note.importance * 0.2;
       score += note.confidence * 0.1;
       score += Math.max(0, 0.1 - (now - note.updatedAt.getTime()) / (1000 * 60 * 60 * 24 * 365));

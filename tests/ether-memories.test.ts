@@ -159,4 +159,71 @@ describe("Ether Memories v0.3.0", () => {
     expect(detailed.value[0].matchedBy).not.toContain("importance");
     expect(detailed.value[0].matchedBy).not.toContain("recency");
   });
+
+  it("pinned_only_does_not_create_false_query_evidence", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    e.addMemory({ content: "Pinned fact", pinned: true });
+    const detailed = e.queryMemoriesDetailed("unrelated", { pinnedOnly: true });
+    expect(detailed.ok).toBe(true);
+    if (detailed.ok) expect(detailed.value).toEqual([]);
+  });
+
+  it("deduplicates_explicit_diary_ids", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const entry = e.addDiaryEntry({ content: "A repeated diary source." });
+    expect(entry.ok).toBe(true);
+    if (!entry.ok) return;
+    const context = e.buildMemoryContext({
+      purpose: "debug",
+      query: { diaryIds: [entry.value.id, entry.value.id], budget: { maxDiary: 2 } }
+    });
+    expect(context.ok).toBe(true);
+    if (context.ok) {
+      expect(context.value.diary).toHaveLength(1);
+      expect(context.value.truncation.diaryOmitted).toBe(0);
+    }
+  });
+
+  it("reports_diary_budget_truncation", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    e.addDiaryEntry({ content: "First matching diary entry." });
+    e.addDiaryEntry({ content: "Second matching diary entry." });
+    const context = e.buildMemoryContext({
+      purpose: "debug",
+      query: { text: "matching diary", budget: { maxDiary: 1 } }
+    });
+    expect(context.ok).toBe(true);
+    if (context.ok) {
+      expect(context.value.diary).toHaveLength(1);
+      expect(context.value.truncation.diaryOmitted).toBe(1);
+      expect(context.value.truncation.hitBudget).toBe(true);
+    }
+  });
+
+  it("accounts_for_character_budget_boundaries", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const note = e.addMemory({ content: "1234567890" });
+    expect(note.ok).toBe(true);
+    if (!note.ok) return;
+
+    const exact = e.buildMemoryContext({
+      purpose: "debug",
+      query: { noteIds: [note.value.id], budget: { maxChars: 10, maxNodes: 0, maxEdges: 0 } }
+    });
+    expect(exact.ok).toBe(true);
+    if (!exact.ok) return;
+    expect(exact.value.notes[0].note.content).toBe("1234567890");
+    expect(exact.value.truncation.charsOmitted).toBe(0);
+
+    const truncated = e.buildMemoryContext({
+      purpose: "debug",
+      query: { noteIds: [note.value.id], budget: { maxChars: 5, maxNodes: 0, maxEdges: 0 } }
+    });
+    expect(truncated.ok).toBe(true);
+    if (truncated.ok) {
+      expect(truncated.value.notes[0].note.content).toBe("12...");
+      expect(truncated.value.truncation.charsOmitted).toBe(5);
+      expect(truncated.value.truncation.hitBudget).toBe(true);
+    }
+  });
 });
