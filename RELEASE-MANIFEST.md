@@ -1,9 +1,9 @@
-# Ether Memories v0.3.1 Release Manifest
+# Ether Memories v0.3.2 Release Manifest
 
-Version: 0.3.1
-Branch: fix/v0.3.1-stability
+Version: 0.3.2
+Branch: fix/v0.3.2-forward-compat
 
-This manifest describes the v0.3.1 stability hardening release.
+This manifest describes the v0.3.2 forward-compatibility hardening release.
 
 ## Canonical goals
 - Three foundations: Memory Notes, Diary, Mind Graph.

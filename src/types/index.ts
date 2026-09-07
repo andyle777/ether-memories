@@ -1,3 +1,5 @@
+import type { MEMORY_CONTEXT_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
+
 export type MemorySource =
   | "user"
   | "conversation"
@@ -92,6 +94,7 @@ export type EtherErrorCode =
   | "NOT_FOUND"
   | "CONFLICT"
   | "USER_ID_MISMATCH"
+  | "UNSUPPORTED_SCHEMA"
   | "UNKNOWN_ERROR";
 
 export interface RetrievalMatch {
@@ -104,7 +107,7 @@ export interface RetrievalMatch {
   >;
 }
 
-export type MemoryContextSchemaVersion = "ether.memory_context.v1";
+export type MemoryContextSchemaVersion = typeof MEMORY_CONTEXT_SCHEMA_VERSION;
 
 export type MemoryContextPurpose =
   | "llm_turn"
@@ -216,7 +219,7 @@ export interface BuildMemoryContextInput {
 }
 
 export interface EtherSnapshot {
-  schemaVersion: "ether.memory_store.v0.3";
+  schemaVersion: typeof STORE_SCHEMA_VERSION;
   identity: UserIdentity;
   memoryNotes: MemoryNote[];
   diary: DiaryEntry[];

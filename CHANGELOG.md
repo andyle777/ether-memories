@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 — Forward-Compatibility Hardening
+
+- Centralized the current library and schema versions.
+- Rejected unsupported snapshot schemas before import state mutation.
+- Preserved v0.3 snapshot, identity, hydration, and persistence behavior.
+
 ## 0.3.0 — Three Rooms, One Transport
 
 - Restored persistent identity and user-ID conflict protection.

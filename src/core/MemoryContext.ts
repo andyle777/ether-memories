@@ -5,6 +5,7 @@ import type {
 } from "../types/index.js";
 import { MemoryRetriever } from "./MemoryRetriever.js";
 import { MindGraphManager } from "./MindGraph.js";
+import { MEMORY_CONTEXT_SCHEMA_VERSION } from "../version.js";
 
 export const DEFAULT_BUDGET: MemoryContextBudget = {
   maxNotes: 12, maxDiary: 4, maxNodes: 24, maxEdges: 32, maxChars: 12000
@@ -151,7 +152,7 @@ export class MemoryContextBuilder {
 
 
     return {
-      schemaVersion: "ether.memory_context.v1",
+      schemaVersion: MEMORY_CONTEXT_SCHEMA_VERSION,
       libraryVersion: this.libraryVersion,
       purpose: input.purpose,
       producedAt: new Date().toISOString(),

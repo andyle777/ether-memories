@@ -1,4 +1,4 @@
-# Ether Memories v0.3.1
+# Ether Memories v0.3.2
 
 **Civilian-grade, local-first memory infrastructure for humans and AI systems.**
 
@@ -10,7 +10,7 @@ Ether Memories has three foundations:
 
 Condensation is a **processing layer**, not a fourth foundation.
 
-## v0.3.1
+## v0.3.2
 
 v0.3 makes the three rooms one reload-safe system and adds an AI-native transport boundary without putting models inside the library.
 
