@@ -1,4 +1,4 @@
-import type { MEMORY_CONTEXT_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
+import type { MEMORY_CONTEXT_SCHEMA_VERSION, PORTABLE_RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 
 export type MemorySource =
   | "user"
@@ -163,6 +163,7 @@ export interface ContextNote {
   note: MemoryNote;
   score?: number;
   matchedBy?: RetrievalMatch["matchedBy"];
+  graphEvidence?: GraphEvidence;
   excerpt?: string;
   cite: ContextCitation;
 }
@@ -245,7 +246,7 @@ export interface StoragePort {
 }
 
 export interface PortableRecord {
-  schema: "ether.portable_record.v1";
+  schema: typeof PORTABLE_RECORD_SCHEMA_VERSION;
   id: string;
   kind: "note" | "diary";
   text: string;

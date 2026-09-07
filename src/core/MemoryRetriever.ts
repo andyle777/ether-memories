@@ -1,4 +1,4 @@
-import type { DiaryEntry, MemoryNote, RetrievalMatch } from "../types/index.js";
+import type { DiaryEntry, GraphEvidence, MemoryNote, RetrievalMatch } from "../types/index.js";
 import type { MindGraphManager } from "./MindGraph.js";
 
 export interface QueryOptions {
@@ -53,32 +53,27 @@ export class MemoryRetriever {
     const directIds = new Set(matches.map(m => m.memory.id));
     if (options.graphRecall?.enabled && this.graph) {
       const cfg = options.graphRecall, depth = Math.min(cfg.depth ?? 1, 2) as 0 | 1 | 2;
-      const seeds = matches.slice(0, options.limit ?? 50);
+      const seeds = [...matches].sort(compareMatches).slice(0, options.limit ?? 50);
+      const graphMatches = new Map<string, RetrievalMatch>();
       for (const seed of seeds) {
-        if (matches.filter(m => m.matchedBy.includes("graph_neighbor")).length >= (cfg.maxResults ?? 8)) break;
         const slice = this.graph.getNeighbors(`memory:${seed.memory.id}`, depth, cfg.relationAllowlist, cfg.direction ?? "both");
         for (const node of slice.nodes) {
           const id = node.id.startsWith("memory:") ? node.id.slice(7) : "";
-          if (!id || directIds.has(id) || matches.some(m => m.memory.id === id)) continue;
+          if (!id || directIds.has(id)) continue;
           const note = this.notes().find(n => n.id === id);
           if (!note || !passes(note, options, now)) continue;
           const path = findPath(`memory:${seed.memory.id}`, node.id, slice.edges, cfg.direction ?? "both");
-          matches.push({
-            memory: note, score: seed.score * (depth === 2 ? 0.25 : 0.5), matchedBy: ["graph_neighbor"],
-            graphEvidence: path ? {
-              seedMemoryId: seed.memory.id, depth: path.length as 1 | 2,
-              path: evidencePath(seed.memory.id, path, cfg.direction ?? "both")
-            } : undefined
-          });
-          if (matches.filter(m => m.matchedBy.includes("graph_neighbor")).length >= (cfg.maxResults ?? 8)) break;
+          if (!path || path.length > depth || path.length === 0) continue;
+          const evidence: GraphEvidence = { seedMemoryId: seed.memory.id, depth: path.length as 1 | 2, path: evidencePath(seed.memory.id, path, cfg.direction ?? "both") };
+          const candidate: RetrievalMatch = { memory: note, score: seed.score * (path.length === 1 ? 0.5 : 0.25), matchedBy: ["graph_neighbor"], graphEvidence: evidence };
+          const existing = graphMatches.get(id);
+          if (!existing || compareGraphCandidates(candidate, existing) < 0) graphMatches.set(id, candidate);
         }
       }
+      const neighbors = [...graphMatches.values()].sort(compareMatches).slice(0, cfg.maxResults ?? 8);
+      matches.push(...neighbors);
     }
-    return matches.sort((a, b) => {
-      const at = a.matchedBy.includes("graph_neighbor") ? 1 : 0;
-      const bt = b.matchedBy.includes("graph_neighbor") ? 1 : 0;
-      return at - bt || b.score - a.score || b.memory.updatedAt.getTime() - a.memory.updatedAt.getTime();
-    }).slice(0, options.limit ?? 50);
+    return matches.sort(compareMatches).slice(0, options.limit ?? 50);
   }
 
   searchDiary(text: string, limit = 20): DiaryEntry[] {
@@ -137,7 +132,23 @@ const evidencePath = (
       from: edge.source,
       to: edge.target
     };
+
     current = direction === "in" ? edge.source : outgoing ? edge.target : edge.source;
     return item;
   });
 };
+
+const compareMatches = (a: RetrievalMatch, b: RetrievalMatch): number => {
+  const ag = a.matchedBy.includes("graph_neighbor") ? 1 : 0;
+  const bg = b.matchedBy.includes("graph_neighbor") ? 1 : 0;
+  return ag - bg || b.score - a.score ||
+    b.memory.updatedAt.getTime() - a.memory.updatedAt.getTime() ||
+    a.memory.id.localeCompare(b.memory.id) ||
+    (a.graphEvidence?.seedMemoryId ?? "").localeCompare(b.graphEvidence?.seedMemoryId ?? "");
+};
+
+const compareGraphCandidates = (a: RetrievalMatch, b: RetrievalMatch): number =>
+  b.score - a.score ||
+  (a.graphEvidence?.depth ?? 0) - (b.graphEvidence?.depth ?? 0) ||
+  (a.graphEvidence?.seedMemoryId ?? "").localeCompare(b.graphEvidence?.seedMemoryId ?? "") ||
+  a.memory.id.localeCompare(b.memory.id);

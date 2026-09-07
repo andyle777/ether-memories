@@ -14,13 +14,16 @@ import { MemoryContextBuilder } from "./MemoryContext.js";
 import type { StoragePort } from "../types/index.js";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 
-export interface EtherMemoriesOptions {
+type EtherMemoriesBaseOptions = {
   userId: string;
   displayName?: string;
-  storagePath?: string;
-  storage?: StoragePort;
   preferences?: Record<string, unknown>;
-}
+};
+export type EtherMemoriesOptions = EtherMemoriesBaseOptions & (
+  | { storage?: StoragePort; storagePath?: never }
+  | { storagePath: string; storage?: never }
+  | { storage?: never; storagePath?: never }
+);
 
 export class EtherMemoriesCore {
   readonly notes = new MemoryNotes();
@@ -156,37 +159,6 @@ export class EtherMemoriesCore {
       } catch { /* best effort rollback */ }
       return err("INVALID_INPUT", e instanceof Error ? e.message : "Snapshot commit failed.");
     }
-    /*
-    if (raw.schemaVersion !== STORE_SCHEMA_VERSION) {
-      if (typeof raw.schemaVersion === "string") {
-        return err("UNSUPPORTED_SCHEMA", `Unsupported snapshot schema: ${raw.schemaVersion}. Expected ${STORE_SCHEMA_VERSION}.`);
-      }
-      return err("INVALID_INPUT", "Snapshot schemaVersion is required.");
-    }
-    if (!Array.isArray(raw.memoryNotes) || !Array.isArray(raw.diary) || !isRecord(raw.identity)) {
-      return err("INVALID_INPUT", "Invalid Ether Memories snapshot.");
-    }
-    const incomingUserId = typeof raw.identity.userId === "string" ? raw.identity.userId : undefined;
-    if (!incomingUserId) return err("INVALID_INPUT", "Snapshot identity.userId is required.");
-    if (incomingUserId !== this.identity.userId) {
-      return err("USER_ID_MISMATCH", `Snapshot belongs to ${incomingUserId}, not ${this.identity.userId}.`);
-    }
-
-    const notes: MemoryNote[] = raw.memoryNotes.map((n: any) => hydrateNote(n));
-    const diary: DiaryEntry[] = raw.diary.map((d: any) => hydrateDiary(d));
-    this.notes.replaceAll(notes);
-    this.diary.replaceAll(diary);
-    this.graph.clear();
-    const graph = isRecord(raw.graph) ? raw.graph : {};
-    const nodes = Array.isArray(graph.nodes) ? graph.nodes as MindGraphNode[] : [];
-    const edges = Array.isArray(graph.edges) ? graph.edges as MindGraphEdge[] : [];
-    for (const node of nodes) this.graph.addNode(node);
-    for (const edge of edges) this.graph.addEdge(edge.source, edge.target, edge.relationship, edge.data);
-    this.identity.createdAt = new Date(String(raw.identity.createdAt));
-    this.identity.lastActive = new Date(String(raw.identity.lastActive));
-    this.identity.displayName = typeof raw.identity.displayName === "string" ? raw.identity.displayName : this.identity.displayName;
-    this.identity.preferences = isRecord(raw.identity.preferences) ? { ...raw.identity.preferences } : {};
-    return ok(undefined); */
   }
 }
 
@@ -237,6 +209,8 @@ const prepareSnapshot = (raw: unknown, userId: string): Result<PreparedSnapshot>
   };
   const nids = ids(raw.memoryNotes, "Note"); if (!nids.ok) return nids;
   const dids = ids(raw.diary, "Diary"); if (!dids.ok) return dids;
+  if (raw.graph !== undefined && !isRecord(raw.graph)) return err("INVALID_INPUT", "Invalid graph snapshot.");
+  if (raw.graph !== undefined && (!Array.isArray(raw.graph.nodes) || !Array.isArray(raw.graph.edges))) return err("INVALID_INPUT", "Graph nodes and edges must be arrays.");
   const graph = isRecord(raw.graph) ? raw.graph : {};
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [], edges = Array.isArray(graph.edges) ? graph.edges : [];
   const gids = ids(nodes, "graph node"); if (!gids.ok) return gids;
@@ -259,7 +233,15 @@ const prepareSnapshot = (raw: unknown, userId: string): Result<PreparedSnapshot>
   const cleanNodes: MindGraphNode[] = [];
   for (const n of nodes) { if (!isRecord(n) || typeof n.id !== "string" || typeof n.type !== "string" || !isRecord(n.data)) return err("INVALID_INPUT", "Invalid graph node."); cleanNodes.push({ id: n.id, type: n.type, label: typeof n.label === "string" ? n.label : undefined, data: { ...n.data } }); }
   const cleanEdges: MindGraphEdge[] = [];
-  for (const e of edges) { if (!isRecord(e) || typeof e.id !== "string" || typeof e.source !== "string" || typeof e.target !== "string" || !nodeIds.has(e.source) || !nodeIds.has(e.target)) return err("INVALID_INPUT", "Invalid graph edge endpoint."); cleanEdges.push({ id: e.id, source: e.source, target: e.target, relationship: typeof e.relationship === "string" ? e.relationship : "related_to", data: isRecord(e.data) ? { ...e.data } : {} }); }
+  const endpoints = new Set<string>();
+  for (const e of edges) {
+    if (!isRecord(e) || typeof e.id !== "string" || typeof e.source !== "string" || typeof e.target !== "string" ||
+      !nodeIds.has(e.source) || !nodeIds.has(e.target) || (e.data !== undefined && !isRecord(e.data))) return err("INVALID_INPUT", "Invalid graph edge endpoint.");
+    const endpoint = `${e.source}\u0000${e.target}`;
+    if (endpoints.has(endpoint)) return err("INVALID_INPUT", "Duplicate directed graph edge endpoints.");
+    endpoints.add(endpoint);
+    cleanEdges.push({ id: e.id, source: e.source, target: e.target, relationship: typeof e.relationship === "string" ? e.relationship : "related_to", data: isRecord(e.data) ? { ...e.data } : {} });
+  }
   return ok({ identity: { userId, displayName: typeof raw.identity.displayName === "string" ? raw.identity.displayName : undefined, createdAt, lastActive, preferences: isRecord(raw.identity.preferences) ? { ...raw.identity.preferences } : {} }, notes, diary, nodes: cleanNodes, edges: cleanEdges });
 };
 const commitSnapshot = (core: EtherMemoriesCore, prepared: PreparedSnapshot): void => {

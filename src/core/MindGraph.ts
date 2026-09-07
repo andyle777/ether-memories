@@ -56,18 +56,19 @@ export class MindGraphManager {
 
   getNeighbors(id: string, depth: 0 | 1 | 2 = 1, relationAllowlist?: string[], direction: "in" | "out" | "both" = "both"): { nodes: MindGraphNode[]; edges: MindGraphEdge[] } {
     if (!this.graph.hasNode(id) || depth === 0) return { nodes: [], edges: [] };
-    const nodeIds = new Set<string>([id]);
+    const visited = new Set<string>([id]);
     let frontier = new Set<string>([id]);
     const edges = new Map<string, MindGraphEdge>();
     for (let d = 0; d < depth; d++) {
       const next = new Set<string>();
       for (const n of frontier) {
-      const visit = (_edgeKey: string, attrs: any, source: string, target: string) => {
+        const visit = (_edgeKey: string, attrs: any, source: string, target: string) => {
           const relationship = String(attrs.relationship ?? "related_to");
           if (relationAllowlist && !relationAllowlist.includes(relationship)) return;
           const neighbor = source === n ? target : source;
+          if (visited.has(neighbor)) return;
+          visited.add(neighbor);
           next.add(neighbor);
-          nodeIds.add(neighbor);
           edges.set(_edgeKey, {
             id: _edgeKey, source, target, relationship,
             data: cloneValue((attrs.data ?? {}) as Record<string, unknown>)
@@ -78,7 +79,7 @@ export class MindGraphManager {
       }
       frontier = next;
     }
-    const nodes = [...nodeIds].filter(x => x !== id).map(nodeId => this.getNode(nodeId)!).filter(Boolean);
+    const nodes = [...visited].filter(x => x !== id).map(nodeId => this.getNode(nodeId)!).filter(Boolean);
     return { nodes, edges: [...edges.values()] };
   }
 

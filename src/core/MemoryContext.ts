@@ -49,6 +49,7 @@ export class MemoryContextBuilder {
       note: cloneNote(m.memory),
       score: m.score,
       matchedBy: m.matchedBy,
+      graphEvidence: m.graphEvidence ? cloneGraphEvidence(m.graphEvidence) : undefined,
       cite: citation("note", m.memory.id)
     } satisfies ContextNote));
 
@@ -189,3 +190,8 @@ const cloneValue = <T>(value: T): T => {
   if (Array.isArray(value)) return value.map(item => cloneValue(item)) as T;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, cloneValue(v)])) as T;
 };
+const cloneGraphEvidence = (e: NonNullable<RetrievalMatch["graphEvidence"]>): NonNullable<RetrievalMatch["graphEvidence"]> => ({
+  seedMemoryId: e.seedMemoryId,
+  depth: e.depth,
+  path: e.path.map(step => ({ ...step }))
+});
