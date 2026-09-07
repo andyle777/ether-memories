@@ -26,3 +26,9 @@ npm test
 npm run build
 ```
 before publishing.
+## v0.4.0
+
+- Library: `0.4.0`
+- Store schema: `ether.memory_store.v0.3`
+- MemoryContext schema: `ether.memory_context.v1`
+- Portable record schema: `ether.portable_record.v1`

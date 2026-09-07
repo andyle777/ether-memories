@@ -29,7 +29,13 @@ export class MemoryContextBuilder {
     };
     const budget = q.budget;
     const noteMatches: RetrievalMatch[] = q.text
-      ? this.retriever.query(q.text, { ...q.filters, limit: Math.max(budget.maxNotes * 4, 50) })
+      ? this.retriever.query(q.text, {
+        ...q.filters, limit: Math.max(budget.maxNotes * 4, 50),
+        graphRecall: q.graph?.enabled ? {
+          enabled: true, depth: q.graph.neighborhoodDepth ?? 1, direction: q.graph.direction ?? "both",
+          maxResults: q.graph.maxResults ?? 8, relationAllowlist: q.graph.relationAllowlist
+        } : undefined
+      })
       : [];
     const explicit = q.noteIds ?? [];
     const selected = new Map<string, RetrievalMatch>();
@@ -40,7 +46,7 @@ export class MemoryContextBuilder {
     for (const m of noteMatches) if (!selected.has(m.memory.id)) selected.set(m.memory.id, m);
 
     const notes: ContextNote[] = [...selected.values()].slice(0, budget.maxNotes).map(m => ({
-      note: m.memory,
+      note: cloneNote(m.memory),
       score: m.score,
       matchedBy: m.matchedBy,
       cite: citation("note", m.memory.id)
@@ -50,12 +56,12 @@ export class MemoryContextBuilder {
     const selectedDiary = new Map<string, ContextDiary>();
     for (const id of diaryIds) {
       const entry = this.getDiary().find(x => x.id === id);
-      if (entry) selectedDiary.set(id, { entry, matchedBy: ["explicit_id"], cite: citation("diary", entry.id) });
+      if (entry)       selectedDiary.set(id, { entry: cloneDiary(entry), matchedBy: ["explicit_id"], cite: citation("diary", entry.id) });
     }
     if (q.text?.trim()) {
       for (const entry of this.retriever.searchDiary(q.text, Math.max(budget.maxDiary * 4, 20))) {
         if (!selectedDiary.has(entry.id)) {
-          selectedDiary.set(entry.id, { entry, matchedBy: ["exact_phrase"], cite: citation("diary", entry.id) });
+          selectedDiary.set(entry.id, { entry: cloneDiary(entry), matchedBy: ["exact_phrase"], cite: citation("diary", entry.id) });
         }
       }
     }
@@ -172,3 +178,5 @@ export class MemoryContextBuilder {
 const citation = (kind: ContextCitation["kind"], id: string): ContextCitation => ({
   ref: `${kind}:${id}`, kind, id
 });
+const cloneNote = (n: MemoryNote): MemoryNote => ({ ...n, tags: [...n.tags], provenance: { ...n.provenance }, metadata: { ...n.metadata }, createdAt: new Date(n.createdAt), updatedAt: new Date(n.updatedAt), expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined });
+const cloneDiary = (d: import("../types/index.js").DiaryEntry): import("../types/index.js").DiaryEntry => ({ ...d, tags: [...d.tags], metadata: { ...d.metadata }, createdAt: new Date(d.createdAt), updatedAt: new Date(d.updatedAt) });

@@ -18,6 +18,7 @@ export interface EtherMemoriesOptions {
   userId: string;
   displayName?: string;
   storagePath?: string;
+  storage?: StoragePort;
   preferences?: Record<string, unknown>;
 }
 
@@ -39,13 +40,14 @@ export class EtherMemoriesCore {
       lastActive: new Date(),
       preferences: { ...(options.preferences ?? {}) }
     };
-    this.retriever = new MemoryRetriever(() => this.notes.valuesUnsafe(), () => this.diary.valuesUnsafe());
+    this.retriever = new MemoryRetriever(() => this.notes.valuesUnsafe(), () => this.diary.valuesUnsafe(), this.graph);
     this.linker = new FoundationLinker(this.graph);
     this.condensation = new CondensationEngine(input => {
       const result = this.addMemory(input);
       return result.ok ? result.value : undefined;
     });
-    this.storage = options.storagePath ? new FsJsonStorage(options.storagePath) : undefined;
+    if (options.storagePath && options.storage) throw new TypeError("storage and storagePath are mutually exclusive.");
+    this.storage = options.storage ?? (options.storagePath ? new FsJsonStorage(options.storagePath) : undefined);
   }
 
   touch(): void { this.identity.lastActive = new Date(); }
@@ -96,11 +98,11 @@ export class EtherMemoriesCore {
   }
 
   queryMemories(text: string, options?: Parameters<MemoryRetriever["query"]>[1]): Result<MemoryNote[]> {
-    return ok(this.retriever.query(text, options).map(x => x.memory));
+    return ok(this.retriever.query(text, options).map(x => cloneNote(x.memory)));
   }
 
   queryMemoriesDetailed(text: string, options?: Parameters<MemoryRetriever["query"]>[1]) {
-    return ok(this.retriever.query(text, options));
+    return ok(this.retriever.query(text, options).map(x => ({ ...x, memory: cloneNote(x.memory), graphEvidence: x.graphEvidence ? { ...x.graphEvidence, path: x.graphEvidence.path.map(p => ({ ...p })) } : undefined })));
   }
 
   buildMemoryContext(input: BuildMemoryContextInput): Result<MemoryContext> {
@@ -120,8 +122,8 @@ export class EtherMemoriesCore {
     return {
       schemaVersion: STORE_SCHEMA_VERSION,
       identity: cloneIdentity(this.identity),
-      memoryNotes: this.notes.valuesUnsafe(),
-      diary: this.diary.valuesUnsafe(),
+      memoryNotes: this.notes.valuesUnsafe().map(cloneNote),
+      diary: this.diary.valuesUnsafe().map(cloneDiary),
       graph: { nodes: this.graph.getAllNodes(), edges: this.graph.getAllEdges() }
     };
   }
@@ -143,9 +145,18 @@ export class EtherMemoriesCore {
   }
 
   importData(raw: unknown): Result<void> {
-    if (!isRecord(raw)) {
-      return err("INVALID_INPUT", "Invalid Ether Memories snapshot.");
+    const prepared = prepareSnapshot(raw, this.identity.userId);
+    if (!prepared.ok) return prepared;
+    const before = this.exportData();
+    try { commitSnapshot(this, prepared.value); return ok(undefined); }
+    catch (e) {
+      try {
+        const rollback = prepareSnapshot(before, this.identity.userId);
+        if (rollback.ok) commitSnapshot(this, rollback.value);
+      } catch { /* best effort rollback */ }
+      return err("INVALID_INPUT", e instanceof Error ? e.message : "Snapshot commit failed.");
     }
+    /*
     if (raw.schemaVersion !== STORE_SCHEMA_VERSION) {
       if (typeof raw.schemaVersion === "string") {
         return err("UNSUPPORTED_SCHEMA", `Unsupported snapshot schema: ${raw.schemaVersion}. Expected ${STORE_SCHEMA_VERSION}.`);
@@ -175,7 +186,7 @@ export class EtherMemoriesCore {
     this.identity.lastActive = new Date(String(raw.identity.lastActive));
     this.identity.displayName = typeof raw.identity.displayName === "string" ? raw.identity.displayName : this.identity.displayName;
     this.identity.preferences = isRecord(raw.identity.preferences) ? { ...raw.identity.preferences } : {};
-    return ok(undefined);
+    return ok(undefined); */
   }
 }
 
@@ -205,11 +216,61 @@ const hydrateDiary = (d: any): DiaryEntry => ({
   updatedAt: new Date(String(d.updatedAt))
 });
 
+type PreparedSnapshot = { identity: UserIdentity; notes: MemoryNote[]; diary: DiaryEntry[]; nodes: MindGraphNode[]; edges: MindGraphEdge[] };
+const validDate = (v: unknown): Date | undefined => {
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return new Date(v);
+  if (typeof v === "number" && Number.isFinite(v)) { const d = new Date(v); return Number.isNaN(d.getTime()) ? undefined : d; }
+  if (typeof v === "string") { const d = new Date(v); return Number.isNaN(d.getTime()) ? undefined : d; }
+  return undefined;
+};
+const prepareSnapshot = (raw: unknown, userId: string): Result<PreparedSnapshot> => {
+  if (!isRecord(raw)) return err("INVALID_INPUT", "Invalid Ether Memories snapshot.");
+  if (raw.schemaVersion !== STORE_SCHEMA_VERSION) return err(typeof raw.schemaVersion === "string" ? "UNSUPPORTED_SCHEMA" : "INVALID_INPUT", `Unsupported snapshot schema: ${String(raw.schemaVersion)}.`);
+  if (!isRecord(raw.identity) || !Array.isArray(raw.memoryNotes) || !Array.isArray(raw.diary)) return err("INVALID_INPUT", "Invalid Ether Memories snapshot.");
+  if (raw.identity.userId !== userId) return err("USER_ID_MISMATCH", `Snapshot belongs to ${String(raw.identity.userId)}, not ${userId}.`);
+  const createdAt = validDate(raw.identity.createdAt), lastActive = validDate(raw.identity.lastActive);
+  if (!createdAt || !lastActive) return err("INVALID_INPUT", "Invalid identity timestamps.");
+  const ids = (items: unknown[], label: string): Result<void> => {
+    const seen = new Set<string>();
+    for (const item of items) { if (!isRecord(item) || typeof item.id !== "string" || !item.id || seen.has(item.id)) return err("INVALID_INPUT", `Invalid or duplicate ${label} id.`); seen.add(item.id); }
+    return ok(undefined);
+  };
+  const nids = ids(raw.memoryNotes, "Note"); if (!nids.ok) return nids;
+  const dids = ids(raw.diary, "Diary"); if (!dids.ok) return dids;
+  const graph = isRecord(raw.graph) ? raw.graph : {};
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [], edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const gids = ids(nodes, "graph node"); if (!gids.ok) return gids;
+  const eids = ids(edges, "graph edge"); if (!eids.ok) return eids;
+  const nodeIds = new Set(nodes.map((x: any) => x.id));
+  const notes: MemoryNote[] = [];
+  for (const n of raw.memoryNotes) {
+    if (!isRecord(n) || typeof n.content !== "string" || !Array.isArray(n.tags) || typeof n.importance !== "number" || !Number.isFinite(n.importance) || n.importance < 0 || n.importance > 1 || typeof n.confidence !== "number" || !Number.isFinite(n.confidence) || n.confidence < 0 || n.confidence > 1) return err("INVALID_INPUT", "Invalid note fields.");
+    const c = validDate(n.createdAt), u = validDate(n.updatedAt); if (!c || !u) return err("INVALID_INPUT", "Invalid note date.");
+    const ex = n.expiresAt == null ? undefined : validDate(n.expiresAt); if (n.expiresAt != null && !ex) return err("INVALID_INPUT", "Invalid note expiry date.");
+    notes.push(hydrateNote({ ...n, createdAt: c, updatedAt: u, expiresAt: ex }));
+  }
+  const diary: DiaryEntry[] = [];
+  for (const d of raw.diary) { if (!isRecord(d) || typeof d.content !== "string" || !Array.isArray(d.tags)) return err("INVALID_INPUT", "Invalid diary fields."); const c = validDate(d.createdAt), u = validDate(d.updatedAt); if (!c || !u) return err("INVALID_INPUT", "Invalid diary date."); diary.push(hydrateDiary({ ...d, createdAt: c, updatedAt: u })); }
+  const cleanNodes: MindGraphNode[] = [];
+  for (const n of nodes) { if (!isRecord(n) || typeof n.id !== "string" || typeof n.type !== "string" || !isRecord(n.data)) return err("INVALID_INPUT", "Invalid graph node."); cleanNodes.push({ id: n.id, type: n.type, label: typeof n.label === "string" ? n.label : undefined, data: { ...n.data } }); }
+  const cleanEdges: MindGraphEdge[] = [];
+  for (const e of edges) { if (!isRecord(e) || typeof e.id !== "string" || typeof e.source !== "string" || typeof e.target !== "string" || !nodeIds.has(e.source) || !nodeIds.has(e.target)) return err("INVALID_INPUT", "Invalid graph edge endpoint."); cleanEdges.push({ id: e.id, source: e.source, target: e.target, relationship: typeof e.relationship === "string" ? e.relationship : "related_to", data: isRecord(e.data) ? { ...e.data } : {} }); }
+  return ok({ identity: { userId, displayName: typeof raw.identity.displayName === "string" ? raw.identity.displayName : undefined, createdAt, lastActive, preferences: isRecord(raw.identity.preferences) ? { ...raw.identity.preferences } : {} }, notes, diary, nodes: cleanNodes, edges: cleanEdges });
+};
+const commitSnapshot = (core: EtherMemoriesCore, prepared: PreparedSnapshot): void => {
+  core.notes.replaceAll(prepared.notes); core.diary.replaceAll(prepared.diary); core.graph.clear();
+  for (const n of prepared.nodes) core.graph.addNode(n);
+  for (const e of prepared.edges) { const r = core.graph.addEdgeWithId(e.id, e.source, e.target, e.relationship, e.data); if (!r.ok) throw new Error(r.error.message); }
+  core.identity.createdAt = new Date(prepared.identity.createdAt); core.identity.lastActive = new Date(prepared.identity.lastActive); core.identity.displayName = prepared.identity.displayName; core.identity.preferences = { ...prepared.identity.preferences };
+};
+
 const cloneIdentity = (i: UserIdentity): UserIdentity => ({
   ...i,
   createdAt: new Date(i.createdAt),
   lastActive: new Date(i.lastActive),
   preferences: { ...i.preferences }
 });
+const cloneNote = (n: MemoryNote): MemoryNote => ({ ...n, tags: [...n.tags], provenance: { ...n.provenance }, metadata: { ...n.metadata }, createdAt: new Date(n.createdAt), updatedAt: new Date(n.updatedAt), expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined });
+const cloneDiary = (d: DiaryEntry): DiaryEntry => ({ ...d, tags: [...d.tags], metadata: { ...d.metadata }, createdAt: new Date(d.createdAt), updatedAt: new Date(d.updatedAt) });
 
 export type EtherMemories = EtherMemoriesCore;

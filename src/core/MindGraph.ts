@@ -23,7 +23,21 @@ export class MindGraphManager {
   }
 
   ensureNode(node: MindGraphNode): Result<MindGraphNode> {
+    if (this.graph.hasNode(node.id)) {
+      this.graph.mergeNodeAttributes(node.id, { type: node.type, label: node.label, data: { ...node.data } });
+      return ok({ ...node, data: { ...node.data } });
+    }
     return this.addNode(node);
+  }
+
+  addEdgeWithId(id: string, source: string, target: string, relationship = "related_to", data: Record<string, unknown> = {}): Result<MindGraphEdge> {
+    if (!this.graph.hasNode(source) || !this.graph.hasNode(target)) return err("NOT_FOUND", "Both graph endpoints must exist.");
+    if (this.graph.hasEdge(id)) return err("CONFLICT", `Graph edge already exists: ${id}`);
+    const normalized = STARTER_RELATIONS.includes(relationship as GraphRelation) ? relationship : "related_to";
+    try {
+      this.graph.addEdgeWithKey(id, source, target, { relationship: normalized, data: { ...data } });
+      return ok({ id, source, target, relationship: normalized, data: { ...data } });
+    } catch (cause) { return err("CONFLICT", "A directed edge already exists between these graph endpoints.", cause); }
   }
 
   addEdge(source: string, target: string, relationship: string = "related_to", data: Record<string, unknown> = {}): Result<MindGraphEdge> {
@@ -40,7 +54,7 @@ export class MindGraphManager {
     return ok({ id: edgeId, source, target, relationship: normalized, data: { ...data } });
   }
 
-  getNeighbors(id: string, depth: 0 | 1 | 2 = 1, relationAllowlist?: string[]): { nodes: MindGraphNode[]; edges: MindGraphEdge[] } {
+  getNeighbors(id: string, depth: 0 | 1 | 2 = 1, relationAllowlist?: string[], direction: "in" | "out" | "both" = "both"): { nodes: MindGraphNode[]; edges: MindGraphEdge[] } {
     if (!this.graph.hasNode(id) || depth === 0) return { nodes: [], edges: [] };
     const nodeIds = new Set<string>([id]);
     let frontier = new Set<string>([id]);
@@ -48,7 +62,7 @@ export class MindGraphManager {
     for (let d = 0; d < depth; d++) {
       const next = new Set<string>();
       for (const n of frontier) {
-        this.graph.forEachEdge(n, (_edgeKey, attrs, source, target) => {
+      const visit = (_edgeKey: string, attrs: any, source: string, target: string) => {
           const relationship = String(attrs.relationship ?? "related_to");
           if (relationAllowlist && !relationAllowlist.includes(relationship)) return;
           const neighbor = source === n ? target : source;
@@ -58,7 +72,9 @@ export class MindGraphManager {
             id: _edgeKey, source, target, relationship,
             data: { ...((attrs.data ?? {}) as Record<string, unknown>) }
           });
-        });
+        };
+        if (direction === "out" || direction === "both") this.graph.forEachOutEdge(n, visit);
+        if (direction === "in" || direction === "both") this.graph.forEachInEdge(n, visit);
       }
       frontier = next;
     }

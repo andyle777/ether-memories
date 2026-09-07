@@ -266,8 +266,8 @@ describe("Ether Memories v0.3.2", () => {
     const e = new EtherMemoriesCore({ userId: "u1" });
     const context = e.buildMemoryContext({ purpose: "debug" });
     expect(context.ok).toBe(true);
-    if (context.ok) expect(context.value.libraryVersion).toBe("0.3.2");
-    expect(LIBRARY_VERSION).toBe("0.3.2");
+    if (context.ok) expect(context.value.libraryVersion).toBe("0.4.0");
+    expect(LIBRARY_VERSION).toBe("0.4.0");
   });
 
   it("preserves_save_load_roundtrip", async () => {
