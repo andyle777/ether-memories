@@ -5,6 +5,11 @@ Branch: fix/v0.3.2-forward-compat
 
 This manifest describes the v0.3.2 forward-compatibility hardening release.
 
+## Release lineage
+- **v0.3.0** — Three rooms, one transport.
+- **v0.3.1** — Stability hardening for graph edges, Diary retrieval, lifecycle coherence, truthful retrieval evidence, and bounded-context accounting.
+- **v0.3.2** — Forward-compatibility hardening for versioned snapshot schemas.
+
 ## Canonical goals
 - Three foundations: Memory Notes, Diary, Mind Graph.
 - Condensation remains a processor.
@@ -16,7 +21,7 @@ This manifest describes the v0.3.2 forward-compatibility hardening release.
 - RAG-ready seam without vectors or embeddings.
 
 ## Post-release hardening
-Post-release adversarial testing identified the v0.3.1 stability work: duplicate graph-edge handling, diary text retrieval in MemoryContext, FoundationLinker lifecycle coherence for condensation and expiry, truthful retrieval evidence, and bounded-context accounting clarification.
+The v0.3.1 stability work is part of the release lineage above; it was completed before the v0.3.2 forward-compatibility hardening.
 
 Run:
 ```bash

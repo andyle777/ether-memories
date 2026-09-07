@@ -6,6 +6,14 @@
 - Rejected unsupported snapshot schemas before import state mutation.
 - Preserved v0.3 snapshot, identity, hydration, and persistence behavior.
 
+## 0.3.1 — Stability Hardening
+
+- Made duplicate directed graph edges return `CONFLICT` instead of throwing.
+- Added Diary text retrieval, duplicate-ID deduplication, budget enforcement, and correct citations to `MemoryContext`.
+- Routed condensation and expiry through the `FoundationLinker` lifecycle so generated memories and removals remain graph-coherent.
+- Kept retrieval evidence truthful by separating semantic matches from ranking and filter modifiers.
+- Clarified bounded-context character accounting and `charsOmitted` reporting.
+
 ## 0.3.0 — Three Rooms, One Transport
 
 - Restored persistent identity and user-ID conflict protection.
