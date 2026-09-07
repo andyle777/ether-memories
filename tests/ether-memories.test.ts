@@ -270,6 +270,53 @@ describe("Ether Memories v0.3.2", () => {
     expect(LIBRARY_VERSION).toBe("0.4.0");
   });
 
+  it("does not leak nested public state and preserves edge identity", () => {
+    const source = new EtherMemoriesCore({ userId: "u1" });
+    const note = source.addMemory({ content: "graph seed", metadata: { nested: { keep: true } } });
+    expect(note.ok).toBe(true);
+    if (!note.ok) return;
+    source.graph.addNode({ id: "custom", type: "custom", data: { nested: { keep: true } } });
+    const edge = source.graph.addEdgeWithId("stable-edge", `memory:${note.value.id}`, "custom");
+    expect(edge.ok).toBe(true);
+    const exported = source.exportData();
+    (exported.memoryNotes[0].metadata.nested as { keep: boolean }).keep = false;
+    (exported.graph.nodes.find(n => n.id === "custom")!.data.nested as { keep: boolean }).keep = false;
+    const stored = source.notes.get(note.value.id);
+    expect(stored.ok && stored.value.metadata.nested).toEqual({ keep: true });
+    expect(source.graph.getNode("custom")!.data.nested).toEqual({ keep: true });
+    const target = new EtherMemoriesCore({ userId: "u1" });
+    expect(target.importData(source.exportData()).ok).toBe(true);
+    expect(target.graph.getAllEdges()[0].id).toBe("stable-edge");
+  });
+
+  it("bounds graph recall and reports the actual path", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const a = e.addMemory({ content: "seed phrase" });
+    const b = e.addMemory({ content: "neighbor one" });
+    const c = e.addMemory({ content: "neighbor two" });
+    expect(a.ok && b.ok && c.ok).toBe(true);
+    if (!a.ok || !b.ok || !c.ok) return;
+    e.graph.addEdgeWithId("edge-ab", `memory:${a.value.id}`, `memory:${b.value.id}`, "supports");
+    e.graph.addEdgeWithId("edge-bc", `memory:${b.value.id}`, `memory:${c.value.id}`, "supports");
+    const result = e.queryMemoriesDetailed("seed phrase", { graphRecall: { enabled: true, depth: 2, maxResults: 1 } });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const neighbor = result.value.find(item => item.memory.id === b.value.id);
+      expect(neighbor?.graphEvidence?.path.map(edge => edge.edgeId)).toEqual(["edge-ab"]);
+      expect(result.value.filter(item => item.matchedBy.includes("graph_neighbor"))).toHaveLength(1);
+    }
+  });
+
+  it("rejects malformed imports without mutating existing notes", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    e.addMemory({ content: "keep" });
+    const malformed = e.exportData();
+    malformed.memoryNotes[0].tags = [42 as unknown as string];
+    const result = e.importData(malformed);
+    expect(result.ok).toBe(false);
+    expect(e.notes.getAll()[0].content).toBe("keep");
+  });
+
   it("preserves_save_load_roundtrip", async () => {
     const directory = await mkdtemp(join(tmpdir(), "ether-memories-"));
     const path = join(directory, "snapshot.json");

@@ -55,20 +55,19 @@ export class MemoryRetriever {
       const cfg = options.graphRecall, depth = Math.min(cfg.depth ?? 1, 2) as 0 | 1 | 2;
       const seeds = matches.slice(0, options.limit ?? 50);
       for (const seed of seeds) {
+        if (matches.filter(m => m.matchedBy.includes("graph_neighbor")).length >= (cfg.maxResults ?? 8)) break;
         const slice = this.graph.getNeighbors(`memory:${seed.memory.id}`, depth, cfg.relationAllowlist, cfg.direction ?? "both");
         for (const node of slice.nodes) {
           const id = node.id.startsWith("memory:") ? node.id.slice(7) : "";
           if (!id || directIds.has(id) || matches.some(m => m.memory.id === id)) continue;
           const note = this.notes().find(n => n.id === id);
           if (!note || !passes(note, options, now)) continue;
-          const edge = slice.edges[0];
+          const path = findPath(`memory:${seed.memory.id}`, node.id, slice.edges, cfg.direction ?? "both");
           matches.push({
             memory: note, score: seed.score * (depth === 2 ? 0.25 : 0.5), matchedBy: ["graph_neighbor"],
-            graphEvidence: edge ? {
-              seedMemoryId: seed.memory.id, depth: depth === 2 ? 2 : 1,
-              path: [{ edgeId: edge.id, relationship: edge.relationship,
-                direction: edge.source === `memory:${seed.memory.id}` ? "out" : "in",
-                from: edge.source, to: edge.target }]
+            graphEvidence: path ? {
+              seedMemoryId: seed.memory.id, depth: path.length as 1 | 2,
+              path: evidencePath(seed.memory.id, path, cfg.direction ?? "both")
             } : undefined
           });
           if (matches.filter(m => m.matchedBy.includes("graph_neighbor")).length >= (cfg.maxResults ?? 8)) break;
@@ -96,3 +95,49 @@ const passes = (note: MemoryNote, options: QueryOptions, now: number): boolean =
   (!options.pinnedOnly || note.pinned) &&
   (!options.tags?.length || options.tags.every(t => note.tags.includes(t))) &&
   (!options.categories?.length || (!!note.category && options.categories.includes(note.category)));
+
+const findPath = (
+  seed: string,
+  target: string,
+  edges: Array<{ id: string; source: string; target: string; relationship: string }>,
+  direction: "in" | "out" | "both"
+): Array<{ id: string; source: string; target: string; relationship: string }> | undefined => {
+  const queue: Array<{ node: string; path: typeof edges }> = [{ node: seed, path: [] }];
+  const seen = new Set([seed]);
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current.node === target) return current.path;
+    for (const edge of edges) {
+      const next = direction === "out" && edge.source === current.node ? edge.target
+        : direction === "in" && edge.target === current.node ? edge.source
+        : direction === "both" && edge.source === current.node ? edge.target
+        : direction === "both" && edge.target === current.node ? edge.source
+        : undefined;
+      if (next && !seen.has(next)) {
+        seen.add(next);
+        queue.push({ node: next, path: [...current.path, edge] });
+      }
+    }
+  }
+  return undefined;
+};
+
+const evidencePath = (
+  seedId: string,
+  path: Array<{ id: string; source: string; target: string; relationship: string }>,
+  direction: "in" | "out" | "both"
+) => {
+  let current = `memory:${seedId}`;
+  return path.map(edge => {
+    const outgoing = edge.source === current;
+    const item = {
+      edgeId: edge.id,
+      relationship: edge.relationship,
+      direction: outgoing ? "out" as const : "in" as const,
+      from: edge.source,
+      to: edge.target
+    };
+    current = direction === "in" ? edge.source : outgoing ? edge.target : edge.source;
+    return item;
+  });
+};

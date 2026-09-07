@@ -13,19 +13,22 @@ export class FsJsonStorage implements StoragePort {
   async save(snapshot: EtherSnapshot): Promise<void> {
     const dir = dirname(this.path);
     const temp = join(dir, `.${this.path.split(/[\\/]/).pop()}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-    const handle = await fs.open(temp, "w");
     try {
-      await handle.writeFile(JSON.stringify(snapshot, null, 2), "utf8");
-      await handle.sync();
-    } finally { await handle.close(); }
-    let last: unknown;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try { await fs.rename(temp, this.path); last = undefined; break; }
-      catch (e) { last = e; if (!(e instanceof Error && ["EPERM", "EBUSY"].includes((e as NodeJS.ErrnoException).code ?? ""))) throw e; await new Promise(r => setTimeout(r, 10 * (attempt + 1))); }
+      const handle = await fs.open(temp, "w");
+      try {
+        await handle.writeFile(JSON.stringify(snapshot, null, 2), "utf8");
+        await handle.sync();
+      } finally { await handle.close(); }
+      let last: unknown;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try { await fs.rename(temp, this.path); last = undefined; break; }
+        catch (e) { last = e; if (!(e instanceof Error && ["EPERM", "EBUSY"].includes((e as NodeJS.ErrnoException).code ?? ""))) throw e; await new Promise(r => setTimeout(r, 10 * (attempt + 1))); }
+      }
+      if (last) throw last;
+      try { const dh = await fs.open(dir, "r"); await dh.sync(); await dh.close(); } catch { /* directory fsync unsupported */ }
+    } finally {
+      await fs.rm(temp, { force: true });
     }
-    if (last) throw last;
-    try { const dh = await fs.open(dir, "r"); await dh.sync(); await dh.close(); } catch { /* directory fsync unsupported */ }
-    await fs.rm(temp, { force: true });
   }
 }
 

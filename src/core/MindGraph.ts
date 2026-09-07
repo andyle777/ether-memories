@@ -18,14 +18,14 @@ export class MindGraphManager {
 
   addNode(node: MindGraphNode): Result<MindGraphNode> {
     if (this.graph.hasNode(node.id)) return ok(node);
-    this.graph.addNode(node.id, { type: node.type, label: node.label, data: { ...node.data } });
-    return ok({ ...node, data: { ...node.data } });
+    this.graph.addNode(node.id, { type: node.type, label: node.label, data: cloneValue(node.data) });
+    return ok({ ...node, data: cloneValue(node.data) });
   }
 
   ensureNode(node: MindGraphNode): Result<MindGraphNode> {
     if (this.graph.hasNode(node.id)) {
-      this.graph.mergeNodeAttributes(node.id, { type: node.type, label: node.label, data: { ...node.data } });
-      return ok({ ...node, data: { ...node.data } });
+      this.graph.mergeNodeAttributes(node.id, { type: node.type, label: node.label, data: cloneValue(node.data) });
+      return ok({ ...node, data: cloneValue(node.data) });
     }
     return this.addNode(node);
   }
@@ -35,8 +35,8 @@ export class MindGraphManager {
     if (this.graph.hasEdge(id)) return err("CONFLICT", `Graph edge already exists: ${id}`);
     const normalized = STARTER_RELATIONS.includes(relationship as GraphRelation) ? relationship : "related_to";
     try {
-      this.graph.addEdgeWithKey(id, source, target, { relationship: normalized, data: { ...data } });
-      return ok({ id, source, target, relationship: normalized, data: { ...data } });
+      this.graph.addEdgeWithKey(id, source, target, { relationship: normalized, data: cloneValue(data) });
+      return ok({ id, source, target, relationship: normalized, data: cloneValue(data) });
     } catch (cause) { return err("CONFLICT", "A directed edge already exists between these graph endpoints.", cause); }
   }
 
@@ -47,11 +47,11 @@ export class MindGraphManager {
     const normalized = STARTER_RELATIONS.includes(relationship as GraphRelation) ? relationship : "related_to";
     const edgeId = createId("edge");
     try {
-      this.graph.addEdgeWithKey(edgeId, source, target, { relationship: normalized, data: { ...data, ...(normalized !== relationship ? { rawRelation: relationship } : {}) } });
+      this.graph.addEdgeWithKey(edgeId, source, target, { relationship: normalized, data: cloneValue({ ...data, ...(normalized !== relationship ? { rawRelation: relationship } : {}) }) });
     } catch (cause) {
       return err("CONFLICT", "A directed edge already exists between these graph endpoints.", cause);
     }
-    return ok({ id: edgeId, source, target, relationship: normalized, data: { ...data } });
+    return ok({ id: edgeId, source, target, relationship: normalized, data: cloneValue(data) });
   }
 
   getNeighbors(id: string, depth: 0 | 1 | 2 = 1, relationAllowlist?: string[], direction: "in" | "out" | "both" = "both"): { nodes: MindGraphNode[]; edges: MindGraphEdge[] } {
@@ -70,7 +70,7 @@ export class MindGraphManager {
           nodeIds.add(neighbor);
           edges.set(_edgeKey, {
             id: _edgeKey, source, target, relationship,
-            data: { ...((attrs.data ?? {}) as Record<string, unknown>) }
+            data: cloneValue((attrs.data ?? {}) as Record<string, unknown>)
           });
         };
         if (direction === "out" || direction === "both") this.graph.forEachOutEdge(n, visit);
@@ -85,7 +85,7 @@ export class MindGraphManager {
   getNode(id: string): MindGraphNode | undefined {
     if (!this.graph.hasNode(id)) return undefined;
     const a = this.graph.getNodeAttributes(id) as any;
-    return { id, type: String(a.type), label: a.label, data: { ...(a.data ?? {}) } };
+    return { id, type: String(a.type), label: a.label, data: cloneValue((a.data ?? {}) as Record<string, unknown>) };
   }
 
   listByType(type: string): MindGraphNode[] {
@@ -100,7 +100,7 @@ export class MindGraphManager {
     return this.graph.edges().map(id => {
       const a = this.graph.getEdgeAttributes(id) as any;
       const [source, target] = this.graph.extremities(id);
-      return { id, source, target, relationship: String(a.relationship ?? "related_to"), data: { ...(a.data ?? {}) } };
+      return { id, source, target, relationship: String(a.relationship ?? "related_to"), data: cloneValue((a.data ?? {}) as Record<string, unknown>) };
     });
   }
 
@@ -110,3 +110,10 @@ export class MindGraphManager {
 
   clear(): void { this.graph.clear(); }
 }
+
+const cloneValue = <T>(value: T): T => {
+  if (value === null || typeof value !== "object") return value;
+  if (value instanceof Date) return new Date(value) as T;
+  if (Array.isArray(value)) return value.map(item => cloneValue(item)) as T;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, cloneValue(v)])) as T;
+};

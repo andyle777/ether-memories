@@ -244,13 +244,18 @@ const prepareSnapshot = (raw: unknown, userId: string): Result<PreparedSnapshot>
   const nodeIds = new Set(nodes.map((x: any) => x.id));
   const notes: MemoryNote[] = [];
   for (const n of raw.memoryNotes) {
-    if (!isRecord(n) || typeof n.content !== "string" || !Array.isArray(n.tags) || typeof n.importance !== "number" || !Number.isFinite(n.importance) || n.importance < 0 || n.importance > 1 || typeof n.confidence !== "number" || !Number.isFinite(n.confidence) || n.confidence < 0 || n.confidence > 1) return err("INVALID_INPUT", "Invalid note fields.");
+    if (!isRecord(n) || typeof n.content !== "string" || !Array.isArray(n.tags) || n.tags.some(x => typeof x !== "string") ||
+      (n.source !== undefined && !["user", "conversation", "diary", "ai", "imported", "system"].includes(String(n.source))) ||
+      (n.status !== undefined && !["candidate", "active", "archived", "rejected"].includes(String(n.status))) ||
+      typeof n.importance !== "number" || !Number.isFinite(n.importance) || n.importance < 0 || n.importance > 1 ||
+      typeof n.confidence !== "number" || !Number.isFinite(n.confidence) || n.confidence < 0 || n.confidence > 1 ||
+      (n.metadata !== undefined && !isRecord(n.metadata)) || (n.provenance !== undefined && !isRecord(n.provenance))) return err("INVALID_INPUT", "Invalid note fields.");
     const c = validDate(n.createdAt), u = validDate(n.updatedAt); if (!c || !u) return err("INVALID_INPUT", "Invalid note date.");
     const ex = n.expiresAt == null ? undefined : validDate(n.expiresAt); if (n.expiresAt != null && !ex) return err("INVALID_INPUT", "Invalid note expiry date.");
     notes.push(hydrateNote({ ...n, createdAt: c, updatedAt: u, expiresAt: ex }));
   }
   const diary: DiaryEntry[] = [];
-  for (const d of raw.diary) { if (!isRecord(d) || typeof d.content !== "string" || !Array.isArray(d.tags)) return err("INVALID_INPUT", "Invalid diary fields."); const c = validDate(d.createdAt), u = validDate(d.updatedAt); if (!c || !u) return err("INVALID_INPUT", "Invalid diary date."); diary.push(hydrateDiary({ ...d, createdAt: c, updatedAt: u })); }
+  for (const d of raw.diary) { if (!isRecord(d) || typeof d.content !== "string" || !Array.isArray(d.tags) || d.tags.some(x => typeof x !== "string") || (d.metadata !== undefined && !isRecord(d.metadata))) return err("INVALID_INPUT", "Invalid diary fields."); const c = validDate(d.createdAt), u = validDate(d.updatedAt); if (!c || !u) return err("INVALID_INPUT", "Invalid diary date."); diary.push(hydrateDiary({ ...d, createdAt: c, updatedAt: u })); }
   const cleanNodes: MindGraphNode[] = [];
   for (const n of nodes) { if (!isRecord(n) || typeof n.id !== "string" || typeof n.type !== "string" || !isRecord(n.data)) return err("INVALID_INPUT", "Invalid graph node."); cleanNodes.push({ id: n.id, type: n.type, label: typeof n.label === "string" ? n.label : undefined, data: { ...n.data } }); }
   const cleanEdges: MindGraphEdge[] = [];
@@ -270,7 +275,13 @@ const cloneIdentity = (i: UserIdentity): UserIdentity => ({
   lastActive: new Date(i.lastActive),
   preferences: { ...i.preferences }
 });
-const cloneNote = (n: MemoryNote): MemoryNote => ({ ...n, tags: [...n.tags], provenance: { ...n.provenance }, metadata: { ...n.metadata }, createdAt: new Date(n.createdAt), updatedAt: new Date(n.updatedAt), expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined });
-const cloneDiary = (d: DiaryEntry): DiaryEntry => ({ ...d, tags: [...d.tags], metadata: { ...d.metadata }, createdAt: new Date(d.createdAt), updatedAt: new Date(d.updatedAt) });
+const cloneNote = (n: MemoryNote): MemoryNote => ({ ...n, tags: [...n.tags], provenance: cloneValue(n.provenance), metadata: cloneValue(n.metadata), createdAt: new Date(n.createdAt), updatedAt: new Date(n.updatedAt), expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined });
+const cloneDiary = (d: DiaryEntry): DiaryEntry => ({ ...d, tags: [...d.tags], metadata: cloneValue(d.metadata), createdAt: new Date(d.createdAt), updatedAt: new Date(d.updatedAt) });
+const cloneValue = <T>(value: T): T => {
+  if (value === null || typeof value !== "object") return value;
+  if (value instanceof Date) return new Date(value) as T;
+  if (Array.isArray(value)) return value.map(item => cloneValue(item)) as T;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, cloneValue(v)])) as T;
+};
 
 export type EtherMemories = EtherMemoriesCore;
