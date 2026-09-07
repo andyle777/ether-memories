@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EtherMemoriesCore } from "../src/core/EtherMemories.js";
 import { toAgentToolResult } from "../src/adapters/agentTool.js";
 import { toRlmEnv } from "../src/adapters/rlmEnv.js";
+import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../src/version.js";
 
-describe("Ether Memories v0.3.0", () => {
+describe("Ether Memories v0.3.2", () => {
   it("creates notes and links foundation nodes", () => {
     const e = new EtherMemoriesCore({ userId: "u1" });
     const r = e.addMemory({ content: "Andy is building Ether Memories.", tags: ["project"] });
@@ -224,6 +228,64 @@ describe("Ether Memories v0.3.0", () => {
       expect(truncated.value.notes[0].note.content).toBe("12...");
       expect(truncated.value.truncation.charsOmitted).toBe(5);
       expect(truncated.value.truncation.hitBudget).toBe(true);
+    }
+  });
+
+  it("loads_supported_v03_snapshot_schema", () => {
+    const source = new EtherMemoriesCore({ userId: "u1" });
+    const note = source.addMemory({ content: "Supported snapshot" });
+    expect(note.ok).toBe(true);
+    const target = new EtherMemoriesCore({ userId: "u1" });
+    const result = target.importData(source.exportData());
+    expect(result.ok).toBe(true);
+    expect(target.notes.getAll()[0].content).toBe("Supported snapshot");
+  });
+
+  it("rejects_unknown_schema_without_mutating_state", () => {
+    const target = new EtherMemoriesCore({ userId: "u1", displayName: "Before" });
+    const note = target.addMemory({ content: "Existing note" });
+    const diary = target.addDiaryEntry({ content: "Existing diary" });
+    expect(note.ok && diary.ok).toBe(true);
+    if (!note.ok || !diary.ok) return;
+    target.graph.addNode({ id: "custom", type: "custom", data: { keep: true } });
+    const before = JSON.stringify(target.exportData());
+
+    const incoming = target.exportData();
+    incoming.schemaVersion = "ether.memory_store.v0.4" as typeof STORE_SCHEMA_VERSION;
+    incoming.identity.displayName = "Should not load";
+    incoming.memoryNotes = [];
+    incoming.diary = [];
+    const result = target.importData(incoming);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("UNSUPPORTED_SCHEMA");
+    expect(JSON.stringify(target.exportData())).toBe(before);
+  });
+
+  it("reports_current_library_version_in_context", () => {
+    const e = new EtherMemoriesCore({ userId: "u1" });
+    const context = e.buildMemoryContext({ purpose: "debug" });
+    expect(context.ok).toBe(true);
+    if (context.ok) expect(context.value.libraryVersion).toBe("0.3.2");
+    expect(LIBRARY_VERSION).toBe("0.3.2");
+  });
+
+  it("preserves_save_load_roundtrip", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ether-memories-"));
+    const path = join(directory, "snapshot.json");
+    try {
+      const source = new EtherMemoriesCore({ userId: "u1", displayName: "Roundtrip", storagePath: path });
+      source.addMemory({ content: "Persisted note" });
+      source.addDiaryEntry({ content: "Persisted diary" });
+      expect((await source.save()).ok).toBe(true);
+
+      const target = new EtherMemoriesCore({ userId: "u1", storagePath: path });
+      expect((await target.load()).ok).toBe(true);
+      expect(target.getSystemState().displayName).toBe("Roundtrip");
+      expect(target.notes.getAll()[0].content).toBe("Persisted note");
+      expect(target.diary.getAll()[0].content).toBe("Persisted diary");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });

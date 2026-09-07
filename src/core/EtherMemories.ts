@@ -12,6 +12,7 @@ import { FoundationLinker } from "./FoundationLinker.js";
 import { CondensationEngine } from "./CondensationEngine.js";
 import { MemoryContextBuilder } from "./MemoryContext.js";
 import type { StoragePort } from "../types/index.js";
+import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 
 export interface EtherMemoriesOptions {
   userId: string;
@@ -105,7 +106,7 @@ export class EtherMemoriesCore {
   buildMemoryContext(input: BuildMemoryContextInput): Result<MemoryContext> {
     try {
       return ok(new MemoryContextBuilder(
-        "0.3.0", this.identity.userId, this.identity.displayName,
+        LIBRARY_VERSION, this.identity.userId, this.identity.displayName,
         this.retriever, this.graph, () => this.notes.valuesUnsafe(), () => this.diary.valuesUnsafe()
       ).build(input));
     } catch (e) {
@@ -117,7 +118,7 @@ export class EtherMemoriesCore {
 
   exportData(): EtherSnapshot {
     return {
-      schemaVersion: "ether.memory_store.v0.3",
+      schemaVersion: STORE_SCHEMA_VERSION,
       identity: cloneIdentity(this.identity),
       memoryNotes: this.notes.valuesUnsafe(),
       diary: this.diary.valuesUnsafe(),
@@ -142,7 +143,16 @@ export class EtherMemoriesCore {
   }
 
   importData(raw: unknown): Result<void> {
-    if (!isRecord(raw) || !Array.isArray(raw.memoryNotes) || !Array.isArray(raw.diary) || !isRecord(raw.identity)) {
+    if (!isRecord(raw)) {
+      return err("INVALID_INPUT", "Invalid Ether Memories snapshot.");
+    }
+    if (raw.schemaVersion !== STORE_SCHEMA_VERSION) {
+      if (typeof raw.schemaVersion === "string") {
+        return err("UNSUPPORTED_SCHEMA", `Unsupported snapshot schema: ${raw.schemaVersion}. Expected ${STORE_SCHEMA_VERSION}.`);
+      }
+      return err("INVALID_INPUT", "Snapshot schemaVersion is required.");
+    }
+    if (!Array.isArray(raw.memoryNotes) || !Array.isArray(raw.diary) || !isRecord(raw.identity)) {
       return err("INVALID_INPUT", "Invalid Ether Memories snapshot.");
     }
     const incomingUserId = typeof raw.identity.userId === "string" ? raw.identity.userId : undefined;

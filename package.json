@@ -1,6 +1,6 @@
 {
   "name": "ether-memories",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Civilian-grade, local-first memory primitives for Notes, Diary, Mind Graph, and deterministic AI-ready context transport.",
   "type": "module",
   "main": "./dist/index.js",

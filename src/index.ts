@@ -1,4 +1,5 @@
 export * from "./types/index.js";
+export * from "./version.js";
 export * from "./utils/result.js";
 export * from "./utils/persistence.js";
 export * from "./core/EtherMemories.js";
