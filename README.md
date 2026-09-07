@@ -1,4 +1,4 @@
-# Ether Memories v0.3.0
+# Ether Memories v0.3.1
 
 **Civilian-grade, local-first memory infrastructure for humans and AI systems.**
 
@@ -10,7 +10,7 @@ Ether Memories has three foundations:
 
 Condensation is a **processing layer**, not a fourth foundation.
 
-## v0.3.0
+## v0.3.1
 
 v0.3 makes the three rooms one reload-safe system and adds an AI-native transport boundary without putting models inside the library.
 
@@ -84,6 +84,8 @@ const result = ether.buildMemoryContext({
 ```
 
 ## Scope fence
+
+Ether Memories is a standalone public memory infrastructure project. Agent orchestration, distributed coordination, personality systems, autonomous self-modification, private framework integrations, and unrelated experimental architectures are intentionally outside project scope.
 
 Ether Memories is intentionally civilian-grade.
 
