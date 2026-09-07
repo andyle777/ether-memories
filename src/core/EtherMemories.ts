@@ -13,6 +13,7 @@ import { CondensationEngine } from "./CondensationEngine.js";
 import { MemoryContextBuilder } from "./MemoryContext.js";
 import type { StoragePort } from "../types/index.js";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
+import { cloneValue } from "../utils/clone.js";
 
 type EtherMemoriesBaseOptions = {
   userId: string;
@@ -41,7 +42,7 @@ export class EtherMemoriesCore {
       displayName: options.displayName,
       createdAt: new Date(),
       lastActive: new Date(),
-      preferences: { ...(options.preferences ?? {}) }
+      preferences: cloneValue(options.preferences ?? {})
     };
     this.retriever = new MemoryRetriever(() => this.notes.valuesUnsafe(), () => this.diary.valuesUnsafe(), this.graph);
     this.linker = new FoundationLinker(this.graph);
@@ -242,28 +243,22 @@ const prepareSnapshot = (raw: unknown, userId: string): Result<PreparedSnapshot>
     endpoints.add(endpoint);
     cleanEdges.push({ id: e.id, source: e.source, target: e.target, relationship: typeof e.relationship === "string" ? e.relationship : "related_to", data: isRecord(e.data) ? { ...e.data } : {} });
   }
-  return ok({ identity: { userId, displayName: typeof raw.identity.displayName === "string" ? raw.identity.displayName : undefined, createdAt, lastActive, preferences: isRecord(raw.identity.preferences) ? { ...raw.identity.preferences } : {} }, notes, diary, nodes: cleanNodes, edges: cleanEdges });
+  return ok({ identity: { userId, displayName: typeof raw.identity.displayName === "string" ? raw.identity.displayName : undefined, createdAt, lastActive,   preferences: isRecord(raw.identity.preferences) ? cloneValue(raw.identity.preferences) : {} }, notes, diary, nodes: cleanNodes, edges: cleanEdges });
 };
 const commitSnapshot = (core: EtherMemoriesCore, prepared: PreparedSnapshot): void => {
   core.notes.replaceAll(prepared.notes); core.diary.replaceAll(prepared.diary); core.graph.clear();
   for (const n of prepared.nodes) core.graph.addNode(n);
   for (const e of prepared.edges) { const r = core.graph.addEdgeWithId(e.id, e.source, e.target, e.relationship, e.data); if (!r.ok) throw new Error(r.error.message); }
-  core.identity.createdAt = new Date(prepared.identity.createdAt); core.identity.lastActive = new Date(prepared.identity.lastActive); core.identity.displayName = prepared.identity.displayName; core.identity.preferences = { ...prepared.identity.preferences };
+  core.identity.createdAt = new Date(prepared.identity.createdAt); core.identity.lastActive = new Date(prepared.identity.lastActive); core.identity.displayName = prepared.identity.displayName;   core.identity.preferences = cloneValue(prepared.identity.preferences);
 };
 
 const cloneIdentity = (i: UserIdentity): UserIdentity => ({
   ...i,
   createdAt: new Date(i.createdAt),
   lastActive: new Date(i.lastActive),
-  preferences: { ...i.preferences }
+  preferences: cloneValue(i.preferences)
 });
 const cloneNote = (n: MemoryNote): MemoryNote => ({ ...n, tags: [...n.tags], provenance: cloneValue(n.provenance), metadata: cloneValue(n.metadata), createdAt: new Date(n.createdAt), updatedAt: new Date(n.updatedAt), expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined });
 const cloneDiary = (d: DiaryEntry): DiaryEntry => ({ ...d, tags: [...d.tags], metadata: cloneValue(d.metadata), createdAt: new Date(d.createdAt), updatedAt: new Date(d.updatedAt) });
-const cloneValue = <T>(value: T): T => {
-  if (value === null || typeof value !== "object") return value;
-  if (value instanceof Date) return new Date(value) as T;
-  if (Array.isArray(value)) return value.map(item => cloneValue(item)) as T;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, cloneValue(v)])) as T;
-};
 
 export type EtherMemories = EtherMemoriesCore;

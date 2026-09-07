@@ -1,6 +1,7 @@
 import type { MemoryNote, MemoryStatus } from "../types/index.js";
 import { createId } from "../utils/ids.js";
 import { err, ok, type Result } from "../utils/result.js";
+import { cloneValue } from "../utils/clone.js";
 
 export interface AddNoteInput {
   content: string;
@@ -34,7 +35,7 @@ export class MemoryNotes {
       category: input.category,
       tags: [...(input.tags ?? [])],
       source: input.source ?? "user",
-      provenance: input.provenance ?? { kind: "user_explicit", lastEditKind: "user" },
+      provenance: cloneValue(input.provenance ?? { kind: "user_explicit", lastEditKind: "user" }),
       importance: clamp(input.importance ?? 0.5),
       confidence: clamp(input.confidence ?? 0.75),
       pinned: input.pinned ?? false,
@@ -42,7 +43,7 @@ export class MemoryNotes {
       expiresAt: input.expiresAt,
       createdAt: now,
       updatedAt: now,
-      metadata: { ...(input.metadata ?? {}) }
+      metadata: cloneValue(input.metadata ?? {})
     };
     this.notes.set(note.id, note);
     return ok(cloneNote(note));
@@ -76,13 +77,13 @@ export class MemoryNotes {
     if (input.category !== undefined) note.category = input.category;
     if (input.tags !== undefined) note.tags = [...input.tags];
     if (input.source !== undefined) note.source = input.source;
-    if (input.provenance !== undefined) note.provenance = { ...input.provenance };
+    if (input.provenance !== undefined) note.provenance = cloneValue(input.provenance);
     if (input.importance !== undefined) note.importance = clamp(input.importance);
     if (input.confidence !== undefined) note.confidence = clamp(input.confidence);
     if (input.pinned !== undefined) note.pinned = input.pinned;
     if (input.status !== undefined) note.status = input.status;
     if (input.expiresAt !== undefined) note.expiresAt = input.expiresAt;
-    if (input.metadata !== undefined) note.metadata = { ...input.metadata };
+    if (input.metadata !== undefined) note.metadata = cloneValue(input.metadata);
     note.updatedAt = new Date();
     note.provenance = { ...note.provenance, lastEditKind: "user" };
     return ok(cloneNote(note));
@@ -128,8 +129,8 @@ const clamp = (n: number) => Math.max(0, Math.min(1, n));
 const cloneNote = (n: MemoryNote): MemoryNote => ({
   ...n,
   tags: [...n.tags],
-  provenance: { ...n.provenance },
-  metadata: { ...n.metadata },
+  provenance: cloneValue(n.provenance),
+  metadata: cloneValue(n.metadata),
   createdAt: new Date(n.createdAt),
   updatedAt: new Date(n.updatedAt),
   expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined

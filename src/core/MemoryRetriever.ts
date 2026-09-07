@@ -56,13 +56,13 @@ export class MemoryRetriever {
       const seeds = [...matches].sort(compareMatches).slice(0, options.limit ?? 50);
       const graphMatches = new Map<string, RetrievalMatch>();
       for (const seed of seeds) {
-        const slice = this.graph.getNeighbors(`memory:${seed.memory.id}`, depth, cfg.relationAllowlist, cfg.direction ?? "both");
+        const slice = this.graph.getRecallNeighbors(`memory:${seed.memory.id}`, depth, cfg.maxResults ?? 8, cfg.relationAllowlist, cfg.direction ?? "both");
         for (const node of slice.nodes) {
           const id = node.id.startsWith("memory:") ? node.id.slice(7) : "";
           if (!id || directIds.has(id)) continue;
           const note = this.notes().find(n => n.id === id);
           if (!note || !passes(note, options, now)) continue;
-          const path = findPath(`memory:${seed.memory.id}`, node.id, slice.edges, cfg.direction ?? "both");
+          const path = slice.paths.get(node.id);
           if (!path || path.length > depth || path.length === 0) continue;
           const evidence: GraphEvidence = { seedMemoryId: seed.memory.id, depth: path.length as 1 | 2, path: evidencePath(seed.memory.id, path, cfg.direction ?? "both") };
           const candidate: RetrievalMatch = { memory: note, score: seed.score * (path.length === 1 ? 0.5 : 0.25), matchedBy: ["graph_neighbor"], graphEvidence: evidence };

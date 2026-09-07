@@ -7,6 +7,7 @@ const Graph = require("graphology") as GraphConstructor;
 import type { GraphRelation, MindGraphEdge, MindGraphNode } from "../types/index.js";
 import { createId } from "../utils/ids.js";
 import { err, ok, type Result } from "../utils/result.js";
+import { cloneValue } from "../utils/clone.js";
 
 export const STARTER_RELATIONS: GraphRelation[] = [
   "related_to", "mentions", "derived_from", "supports",
@@ -61,26 +62,68 @@ export class MindGraphManager {
     const edges = new Map<string, MindGraphEdge>();
     for (let d = 0; d < depth; d++) {
       const next = new Set<string>();
-      for (const n of frontier) {
+      for (const n of [...frontier].sort()) {
         const visit = (_edgeKey: string, attrs: any, source: string, target: string) => {
           const relationship = String(attrs.relationship ?? "related_to");
           if (relationAllowlist && !relationAllowlist.includes(relationship)) return;
           const neighbor = source === n ? target : source;
-          if (visited.has(neighbor)) return;
-          visited.add(neighbor);
-          next.add(neighbor);
           edges.set(_edgeKey, {
             id: _edgeKey, source, target, relationship,
             data: cloneValue((attrs.data ?? {}) as Record<string, unknown>)
           });
+          if (visited.has(neighbor)) return;
+          visited.add(neighbor);
+          next.add(neighbor);
         };
         if (direction === "out" || direction === "both") this.graph.forEachOutEdge(n, visit);
         if (direction === "in" || direction === "both") this.graph.forEachInEdge(n, visit);
       }
       frontier = next;
     }
-    const nodes = [...visited].filter(x => x !== id).map(nodeId => this.getNode(nodeId)!).filter(Boolean);
-    return { nodes, edges: [...edges.values()] };
+    const nodes = [...visited].filter(x => x !== id).sort().map(nodeId => this.getNode(nodeId)!).filter(Boolean);
+    return {
+      nodes,
+      edges: [...edges.values()].filter(edge => visited.has(edge.source) && visited.has(edge.target)).sort((a, b) => a.id.localeCompare(b.id))
+    };
+  }
+
+  /** Recall traversal is intentionally capped and does not re-expand visited nodes. */
+  getRecallNeighbors(id: string, depth: 0 | 1 | 2 = 1, maxNodes = 8, relationAllowlist?: string[], direction: "in" | "out" | "both" = "both"): {
+    nodes: MindGraphNode[];
+    edges: MindGraphEdge[];
+    paths: Map<string, MindGraphEdge[]>;
+  } {
+    const paths = new Map<string, MindGraphEdge[]>();
+    if (!this.graph.hasNode(id) || depth === 0 || maxNodes <= 0) return { nodes: [], edges: [], paths };
+    const visited = new Set([id]);
+    let frontier = [id];
+    const edges = new Map<string, MindGraphEdge>();
+    for (let level = 0; level < depth && frontier.length && visited.size - 1 < maxNodes; level++) {
+      const next: string[] = [];
+      for (const current of frontier.sort()) {
+        const candidates: MindGraphEdge[] = [];
+        const collect = (key: string, attrs: any, source: string, target: string) => {
+          const relationship = String(attrs.relationship ?? "related_to");
+          if (!relationAllowlist || relationAllowlist.includes(relationship)) {
+            candidates.push({ id: key, source, target, relationship, data: cloneValue((attrs.data ?? {}) as Record<string, unknown>) });
+          }
+        };
+        if (direction === "out" || direction === "both") this.graph.forEachOutEdge(current, collect);
+        if (direction === "in" || direction === "both") this.graph.forEachInEdge(current, collect);
+        for (const edge of candidates.sort((a, b) => a.id.localeCompare(b.id))) {
+          const neighbor = direction === "in" ? edge.source : edge.source === current ? edge.target : edge.source;
+          if (visited.has(neighbor)) continue;
+          visited.add(neighbor);
+          next.push(neighbor);
+          edges.set(edge.id, edge);
+          paths.set(neighbor, [...(paths.get(current) ?? []), edge]);
+          if (visited.size - 1 >= maxNodes) break;
+        }
+        if (visited.size - 1 >= maxNodes) break;
+      }
+      frontier = next;
+    }
+    return { nodes: [...visited].filter(node => node !== id).sort().map(node => this.getNode(node)!).filter(Boolean), edges: [...edges.values()].sort((a, b) => a.id.localeCompare(b.id)), paths };
   }
 
   getNode(id: string): MindGraphNode | undefined {
@@ -111,10 +154,3 @@ export class MindGraphManager {
 
   clear(): void { this.graph.clear(); }
 }
-
-const cloneValue = <T>(value: T): T => {
-  if (value === null || typeof value !== "object") return value;
-  if (value instanceof Date) return new Date(value) as T;
-  if (Array.isArray(value)) return value.map(item => cloneValue(item)) as T;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, cloneValue(v)])) as T;
-};
