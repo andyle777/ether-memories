@@ -40,7 +40,7 @@ export class MemoryNotes {
       confidence: clamp(input.confidence ?? 0.75),
       pinned: input.pinned ?? false,
       status: input.status ?? "active",
-      expiresAt: input.expiresAt,
+      expiresAt: input.expiresAt ? new Date(input.expiresAt) : undefined,
       createdAt: now,
       updatedAt: now,
       metadata: cloneValue(input.metadata ?? {})
@@ -82,7 +82,7 @@ export class MemoryNotes {
     if (input.confidence !== undefined) note.confidence = clamp(input.confidence);
     if (input.pinned !== undefined) note.pinned = input.pinned;
     if (input.status !== undefined) note.status = input.status;
-    if (input.expiresAt !== undefined) note.expiresAt = input.expiresAt;
+    if (input.expiresAt !== undefined) note.expiresAt = input.expiresAt ? new Date(input.expiresAt) : undefined;
     if (input.metadata !== undefined) note.metadata = cloneValue(input.metadata);
     note.updatedAt = new Date();
     note.provenance = { ...note.provenance, lastEditKind: "user" };
@@ -120,7 +120,7 @@ export class MemoryNotes {
   }
 
   valuesUnsafe(): MemoryNote[] {
-    return [...this.notes.values()];
+    return [...this.notes.values()].map(cloneNote);
   }
 }
 

@@ -43,7 +43,7 @@ export class DiarySystem {
     Object.assign(e, patch, {
       content: patch.content?.trim() ?? e.content,
       tags: patch.tags ? [...patch.tags] : e.tags,
-      metadata: patch.metadata ? cloneValue(patch.metadata) : e.metadata,
+      metadata: patch.metadata !== undefined ? cloneValue(patch.metadata) : e.metadata,
       updatedAt: new Date()
     });
     return ok(cloneEntry(e));
@@ -60,7 +60,7 @@ export class DiarySystem {
   }
 
   valuesUnsafe(): DiaryEntry[] {
-    return [...this.entries.values()];
+    return [...this.entries.values()].map(cloneEntry);
   }
 }
 
