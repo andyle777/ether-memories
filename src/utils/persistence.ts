@@ -34,6 +34,10 @@ export class FsJsonStorage implements StoragePort {
 
 export const hydrateDate = (value: unknown): Date | undefined => {
   if (value == null) return undefined;
-  const d = new Date(String(value));
+  const d = value instanceof Date
+    ? new Date(value.getTime())
+    : typeof value === "number"
+      ? new Date(value)
+      : new Date(String(value));
   return Number.isNaN(d.getTime()) ? undefined : d;
 };

@@ -164,6 +164,11 @@ export class EtherMemoriesCore {
 }
 
 const isRecord = (x: unknown): x is Record<string, any> => !!x && typeof x === "object" && !Array.isArray(x);
+const hydrateTimestamp = (value: unknown): Date => {
+  if (value instanceof Date) return new Date(value.getTime());
+  if (typeof value === "number") return new Date(value);
+  return new Date(String(value));
+};
 
 const hydrateNote = (n: any): MemoryNote => ({
   ...n,
@@ -176,17 +181,17 @@ const hydrateNote = (n: any): MemoryNote => ({
   confidence: typeof n.confidence === "number" ? n.confidence : 0.75,
   pinned: !!n.pinned,
   metadata: isRecord(n.metadata) ? n.metadata : {},
-  createdAt: new Date(String(n.createdAt)),
-  updatedAt: new Date(String(n.updatedAt)),
-  expiresAt: n.expiresAt ? new Date(String(n.expiresAt)) : undefined
+  createdAt: hydrateTimestamp(n.createdAt),
+  updatedAt: hydrateTimestamp(n.updatedAt),
+  expiresAt: n.expiresAt ? hydrateTimestamp(n.expiresAt) : undefined
 });
 
 const hydrateDiary = (d: any): DiaryEntry => ({
   ...d,
   tags: Array.isArray(d.tags) ? d.tags : [],
   metadata: isRecord(d.metadata) ? d.metadata : {},
-  createdAt: new Date(String(d.createdAt)),
-  updatedAt: new Date(String(d.updatedAt))
+  createdAt: hydrateTimestamp(d.createdAt),
+  updatedAt: hydrateTimestamp(d.updatedAt)
 });
 
 type PreparedSnapshot = { identity: UserIdentity; notes: MemoryNote[]; diary: DiaryEntry[]; nodes: MindGraphNode[]; edges: MindGraphEdge[] };

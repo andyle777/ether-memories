@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { EtherMemoriesCore } from "../src/core/EtherMemories.js";
 import { toAgentToolResult } from "../src/adapters/agentTool.js";
 import { toRlmEnv } from "../src/adapters/rlmEnv.js";
@@ -331,6 +332,43 @@ describe("Ether Memories v0.3.2", () => {
       expect(target.getSystemState().displayName).toBe("Roundtrip");
       expect(target.notes.getAll()[0].content).toBe("Persisted note");
       expect(target.diary.getAll()[0].content).toBe("Persisted diary");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves millisecond timestamps across export-import-export", () => {
+    const source = new EtherMemoriesCore({ userId: "u1" });
+    const note = source.addMemory({ content: "Precise note", expiresAt: new Date(1_700_000_000_123) });
+    const diary = source.addDiaryEntry({ content: "Precise diary" });
+    expect(note.ok && diary.ok).toBe(true);
+    if (!note.ok || !diary.ok) return;
+    const exported = source.exportData();
+    exported.identity.createdAt = new Date(1_700_000_000_101);
+    exported.identity.lastActive = new Date(1_700_000_000_102);
+    exported.memoryNotes[0].createdAt = new Date(1_700_000_000_103);
+    exported.memoryNotes[0].updatedAt = new Date(1_700_000_000_104);
+    exported.memoryNotes[0].expiresAt = new Date(1_700_000_000_105);
+    exported.diary[0].createdAt = new Date(1_700_000_000_106);
+    exported.diary[0].updatedAt = new Date(1_700_000_000_107);
+    const target = new EtherMemoriesCore({ userId: "u1" });
+    expect(target.importData(JSON.parse(JSON.stringify(exported))).ok).toBe(true);
+    expect(JSON.stringify(target.exportData())).toBe(JSON.stringify(exported));
+  });
+
+  it("keeps filesystem save-load-save timestamps byte-stable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ether-memories-"));
+    const path = join(directory, "snapshot.json");
+    try {
+      const source = new EtherMemoriesCore({ userId: "u1", storagePath: path });
+      source.addMemory({ content: "Stable timestamps", expiresAt: new Date(1_700_000_000_123) });
+      source.addDiaryEntry({ content: "Stable diary" });
+      expect((await source.save()).ok).toBe(true);
+      const first = await readFile(path, "utf8");
+      const loaded = new EtherMemoriesCore({ userId: "u1", storagePath: path });
+      expect((await loaded.load()).ok).toBe(true);
+      expect((await loaded.save()).ok).toBe(true);
+      expect(await readFile(path, "utf8")).toBe(first);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
