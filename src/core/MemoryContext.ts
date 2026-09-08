@@ -29,7 +29,13 @@ export class MemoryContextBuilder {
     };
     const budget = q.budget;
     const noteMatches: RetrievalMatch[] = q.text
-      ? this.retriever.query(q.text, { ...q.filters, limit: Math.max(budget.maxNotes * 4, 50) })
+      ? this.retriever.query(q.text, {
+        ...q.filters, limit: Math.max(budget.maxNotes * 4, 50),
+        graphRecall: q.graph?.enabled ? {
+          enabled: true, depth: q.graph.neighborhoodDepth ?? 1, direction: q.graph.direction ?? "both",
+          maxResults: q.graph.maxResults ?? 8, relationAllowlist: q.graph.relationAllowlist
+        } : undefined
+      })
       : [];
     const explicit = q.noteIds ?? [];
     const selected = new Map<string, RetrievalMatch>();
@@ -40,9 +46,10 @@ export class MemoryContextBuilder {
     for (const m of noteMatches) if (!selected.has(m.memory.id)) selected.set(m.memory.id, m);
 
     const notes: ContextNote[] = [...selected.values()].slice(0, budget.maxNotes).map(m => ({
-      note: m.memory,
+      note: cloneNote(m.memory),
       score: m.score,
       matchedBy: m.matchedBy,
+      graphEvidence: m.graphEvidence ? cloneGraphEvidence(m.graphEvidence) : undefined,
       cite: citation("note", m.memory.id)
     } satisfies ContextNote));
 
@@ -50,12 +57,12 @@ export class MemoryContextBuilder {
     const selectedDiary = new Map<string, ContextDiary>();
     for (const id of diaryIds) {
       const entry = this.getDiary().find(x => x.id === id);
-      if (entry) selectedDiary.set(id, { entry, matchedBy: ["explicit_id"], cite: citation("diary", entry.id) });
+      if (entry)       selectedDiary.set(id, { entry: cloneDiary(entry), matchedBy: ["explicit_id"], cite: citation("diary", entry.id) });
     }
     if (q.text?.trim()) {
       for (const entry of this.retriever.searchDiary(q.text, Math.max(budget.maxDiary * 4, 20))) {
         if (!selectedDiary.has(entry.id)) {
-          selectedDiary.set(entry.id, { entry, matchedBy: ["exact_phrase"], cite: citation("diary", entry.id) });
+          selectedDiary.set(entry.id, { entry: cloneDiary(entry), matchedBy: ["exact_phrase"], cite: citation("diary", entry.id) });
         }
       }
     }
@@ -71,12 +78,15 @@ export class MemoryContextBuilder {
     for (const seed of seedNodes) {
       const root = this.graph.getNode(seed);
       if (root) nodeMap.set(root.id, root);
-      const slice = this.graph.getNeighbors(seed, depth, q.graph?.relationAllowlist);
+      const slice = this.graph.getNeighbors(seed, depth, q.graph?.relationAllowlist, q.graph?.direction ?? "both");
       for (const n of slice.nodes) nodeMap.set(n.id, n);
       for (const e of slice.edges) edgeMap.set(e.id, e);
     }
     const nodes = [...nodeMap.values()].slice(0, budget.maxNodes);
-    const edges = [...edgeMap.values()].slice(0, budget.maxEdges);
+    const includedNodeIds = new Set(nodes.map(n => n.id));
+    const edges = [...edgeMap.values()]
+      .filter(edge => includedNodeIds.has(edge.source) && includedNodeIds.has(edge.target))
+      .slice(0, budget.maxEdges);
     const graph: ContextGraphSlice = {
       nodes, edges,
       policy: seedNodes.length ? "neighborhood" : "none",
@@ -171,4 +181,17 @@ export class MemoryContextBuilder {
 
 const citation = (kind: ContextCitation["kind"], id: string): ContextCitation => ({
   ref: `${kind}:${id}`, kind, id
+});
+const cloneNote = (n: MemoryNote): MemoryNote => ({ ...n, tags: [...n.tags], provenance: cloneValue(n.provenance), metadata: cloneValue(n.metadata), createdAt: new Date(n.createdAt), updatedAt: new Date(n.updatedAt), expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined });
+const cloneDiary = (d: import("../types/index.js").DiaryEntry): import("../types/index.js").DiaryEntry => ({ ...d, tags: [...d.tags], metadata: cloneValue(d.metadata), createdAt: new Date(d.createdAt), updatedAt: new Date(d.updatedAt) });
+const cloneValue = <T>(value: T): T => {
+  if (value === null || typeof value !== "object") return value;
+  if (value instanceof Date) return new Date(value) as T;
+  if (Array.isArray(value)) return value.map(item => cloneValue(item)) as T;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, cloneValue(v)])) as T;
+};
+const cloneGraphEvidence = (e: NonNullable<RetrievalMatch["graphEvidence"]>): NonNullable<RetrievalMatch["graphEvidence"]> => ({
+  seedMemoryId: e.seedMemoryId,
+  depth: e.depth,
+  path: e.path.map(step => ({ ...step }))
 });

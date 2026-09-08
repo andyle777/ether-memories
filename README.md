@@ -1,4 +1,4 @@
-# Ether Memories v0.3.2
+# Ether Memories v0.4.0
 
 **Civilian-grade, local-first memory infrastructure for humans and AI systems.**
 
@@ -10,9 +10,9 @@ Ether Memories has three foundations:
 
 Condensation is a **processing layer**, not a fourth foundation.
 
-## v0.3.2
+## v0.4.0
 
-v0.3 makes the three rooms one reload-safe system and adds an AI-native transport boundary without putting models inside the library.
+v0.4 makes the three rooms one reload-safe system and adds a portable recall boundary without putting models inside the library.
 
 ### Core improvements
 
@@ -27,6 +27,9 @@ v0.3 makes the three rooms one reload-safe system and adds an AI-native transpor
 - Candidate promotion and expiry purge.
 - `MemoryContext`: bounded, citeable, explainable transport.
 - Pure Agent Tool and RLM environment adapters.
+- Validated transactional imports with stable graph-edge identities.
+- Injectable storage and crash-safer filesystem replacement.
+- Clone-on-read results, opt-in graph-assisted recall, and portable records.
 - No LLM, embedding, vector database, autonomous agent, or network dependency.
 
 ## Architecture
@@ -50,7 +53,7 @@ The core is provider-neutral. OpenAI, Anthropic, Gemini, local models, agent hos
 
 ### RAG boundary
 
-v0.3 is retrieval-native but deliberately does **not** require embeddings or a vector database. A future RAG adapter can turn `MemoryContext` records into chunks; semantic/vector implementations are planned for a later release.
+v0.4 is retrieval-native but deliberately does **not** require embeddings or a vector database. A future RAG adapter can turn `MemoryContext` records into chunks; semantic/vector implementations are planned for a later release.
 
 ### RLM boundary
 

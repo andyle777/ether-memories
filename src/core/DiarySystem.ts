@@ -1,6 +1,7 @@
 import type { DiaryEntry } from "../types/index.js";
 import { createId } from "../utils/ids.js";
 import { err, ok, type Result } from "../utils/result.js";
+import { cloneValue } from "../utils/clone.js";
 
 export interface AddDiaryInput {
   content: string;
@@ -20,7 +21,7 @@ export class DiarySystem {
       createdAt: now,
       updatedAt: now,
       tags: [...(input.tags ?? [])],
-      metadata: { ...(input.metadata ?? {}) }
+      metadata: cloneValue(input.metadata ?? {})
     };
     this.entries.set(entry.id, entry);
     return ok(cloneEntry(entry));
@@ -42,7 +43,7 @@ export class DiarySystem {
     Object.assign(e, patch, {
       content: patch.content?.trim() ?? e.content,
       tags: patch.tags ? [...patch.tags] : e.tags,
-      metadata: patch.metadata ? { ...patch.metadata } : e.metadata,
+      metadata: patch.metadata !== undefined ? cloneValue(patch.metadata) : e.metadata,
       updatedAt: new Date()
     });
     return ok(cloneEntry(e));
@@ -59,14 +60,14 @@ export class DiarySystem {
   }
 
   valuesUnsafe(): DiaryEntry[] {
-    return [...this.entries.values()];
+    return [...this.entries.values()].map(cloneEntry);
   }
 }
 
 const cloneEntry = (e: DiaryEntry): DiaryEntry => ({
   ...e,
   tags: [...e.tags],
-  metadata: { ...e.metadata },
+  metadata: cloneValue(e.metadata),
   createdAt: new Date(e.createdAt),
   updatedAt: new Date(e.updatedAt)
 });

@@ -24,3 +24,8 @@
 - Condensation demoted to processing layer.
 - Deterministic retrieval.
 - Local JSON persistence.
+## 0.4.0
+
+- Added the Portable Recall Layer, validated snapshot imports, injectable storage,
+  crash-safer filesystem writes, clone-on-read, graph recall, and portable records.
+- v0.4 import validation is stricter than historical v0.3.2 runtime writes; invalid enum values may require repair.

@@ -1,4 +1,4 @@
-import type { MEMORY_CONTEXT_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
+import type { MEMORY_CONTEXT_SCHEMA_VERSION, PORTABLE_RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 
 export type MemorySource =
   | "user"
@@ -105,6 +105,13 @@ export interface RetrievalMatch {
     | "graph_neighbor" | "recency" | "pinned"
     | "importance" | "explicit_id"
   >;
+  graphEvidence?: GraphEvidence;
+}
+
+export interface GraphEvidence {
+  seedMemoryId: string;
+  depth: 1 | 2;
+  path: Array<{ edgeId: string; relationship: string; direction: "in" | "out"; from: string; to: string }>;
 }
 
 export type MemoryContextSchemaVersion = typeof MEMORY_CONTEXT_SCHEMA_VERSION;
@@ -137,7 +144,10 @@ export interface MemoryContextQuery {
     pinnedOnly?: boolean;
   };
   graph?: {
+    enabled?: boolean;
     neighborhoodDepth?: 0 | 1 | 2;
+    direction?: "in" | "out" | "both";
+    maxResults?: number;
     relationAllowlist?: string[];
   };
   budget: MemoryContextBudget;
@@ -153,6 +163,7 @@ export interface ContextNote {
   note: MemoryNote;
   score?: number;
   matchedBy?: RetrievalMatch["matchedBy"];
+  graphEvidence?: GraphEvidence;
   excerpt?: string;
   cite: ContextCitation;
 }
@@ -232,4 +243,19 @@ export interface EtherSnapshot {
 export interface StoragePort {
   load(): Promise<unknown>;
   save(snapshot: EtherSnapshot): Promise<void>;
+}
+
+export interface PortableRecord {
+  schema: typeof PORTABLE_RECORD_SCHEMA_VERSION;
+  id: string;
+  kind: "note" | "diary";
+  text: string;
+  citation: ContextCitation;
+  tags: string[];
+  category?: string;
+  source?: string;
+  status?: MemoryStatus;
+  confidence?: number;
+  createdAt: string;
+  updatedAt: string;
 }
