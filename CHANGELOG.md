@@ -1,10 +1,23 @@
 # Changelog
 
+## 0.4.0 — Portable Recall
+
+- Added validated transactional snapshot imports and stable graph-edge identities.
+- Added injectable storage, crash-safer filesystem replacement, clone-on-read results,
+  opt-in graph-assisted recall, and provider-neutral portable records.
+
 ## 0.3.2 — Forward-Compatibility Hardening
 
 - Centralized the current library and schema versions.
 - Rejected unsupported snapshot schemas before import state mutation.
 - Preserved v0.3 snapshot, identity, hydration, and persistence behavior.
+
+## 0.3.1 — Stability Hardening
+
+- Hardened duplicate graph-edge handling.
+- Added Diary text retrieval to `MemoryContext`.
+- Kept FoundationLinker lifecycle state coherent through condensation and expiry.
+- Corrected retrieval evidence and clarified bounded-context accounting.
 
 ## 0.3.0 — Three Rooms, One Transport
 
@@ -24,8 +37,3 @@
 - Condensation demoted to processing layer.
 - Deterministic retrieval.
 - Local JSON persistence.
-## 0.4.0
-
-- Added the Portable Recall Layer, validated snapshot imports, injectable storage,
-  crash-safer filesystem writes, clone-on-read, graph recall, and portable records.
-- v0.4 import validation is stricter than historical v0.3.2 runtime writes; invalid enum values may require repair.

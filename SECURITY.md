@@ -2,7 +2,7 @@
 
 Ether Memories is a local memory library, not an authentication or authorization system.
 
-## v0.3 boundaries
+## Boundaries
 
 - `provenance` describes origin; it is **not authentication**.
 - `userId` mismatch protection prevents accidental cross-user imports; it is not access control.
