@@ -8,7 +8,7 @@ import { toAgentToolResult } from "../src/adapters/agentTool.js";
 import { toRlmEnv } from "../src/adapters/rlmEnv.js";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../src/version.js";
 
-describe("Ether Memories v0.3.2", () => {
+describe("Ether Memories v0.4.0", () => {
   it("creates notes and links foundation nodes", () => {
     const e = new EtherMemoriesCore({ userId: "u1" });
     const r = e.addMemory({ content: "Andy is building Ether Memories.", tags: ["project"] });

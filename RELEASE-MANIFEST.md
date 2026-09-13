@@ -1,9 +1,11 @@
 # Ether Memories v0.4.0 Release Manifest
 
 Version: 0.4.0
-Branch: feat/v0.4.0-portable-recall
+Tag: v0.4.0
+Lineage: v0.3.2 → v0.4.0
+Status: Final release
 
-This manifest describes the v0.4.0 release candidate.
+This manifest describes the final v0.4.0 release.
 
 ## Canonical goals
 - Three foundations: Memory Notes, Diary, Mind Graph.
@@ -22,7 +24,7 @@ This manifest describes the v0.4.0 release candidate.
 
 Run:
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm test
 npm run build
