@@ -14,3 +14,4 @@ export * from "./adapters/json.js";
 export * from "./adapters/agentTool.js";
 export * from "./adapters/rlmEnv.js";
 export * from "./adapters/portable.js";
+export * from "./adapters/portableImport.js";

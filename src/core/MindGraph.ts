@@ -8,6 +8,7 @@ import type { GraphRelation, MindGraphEdge, MindGraphNode } from "../types/index
 import { createId } from "../utils/ids.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { cloneValue } from "../utils/clone.js";
+import { codeUnitCompare } from "./Tokenizer.js";
 
 export const STARTER_RELATIONS: GraphRelation[] = [
   "related_to", "mentions", "derived_from", "supports",
@@ -83,7 +84,7 @@ export class MindGraphManager {
     const nodes = [...visited].filter(x => x !== id).sort().map(nodeId => this.getNode(nodeId)!).filter(Boolean);
     return {
       nodes,
-      edges: [...edges.values()].filter(edge => visited.has(edge.source) && visited.has(edge.target)).sort((a, b) => a.id.localeCompare(b.id))
+      edges: [...edges.values()].filter(edge => visited.has(edge.source) && visited.has(edge.target)).sort((a, b) => codeUnitCompare(a.id, b.id))
     };
   }
 
@@ -110,20 +111,28 @@ export class MindGraphManager {
         };
         if (direction === "out" || direction === "both") this.graph.forEachOutEdge(current, collect);
         if (direction === "in" || direction === "both") this.graph.forEachInEdge(current, collect);
-        for (const edge of candidates.sort((a, b) => a.id.localeCompare(b.id))) {
+        for (const edge of candidates.sort((a, b) => codeUnitCompare(a.id, b.id))) {
           const neighbor = direction === "in" ? edge.source : edge.source === current ? edge.target : edge.source;
-          if (visited.has(neighbor)) continue;
+          const candidatePath = [...(paths.get(current) ?? []), edge];
+          const existingPath = paths.get(neighbor);
+          if (existingPath) {
+            if (candidatePath.length === existingPath.length && comparePathIds(candidatePath, existingPath) < 0) {
+              paths.set(neighbor, candidatePath);
+              edges.set(edge.id, edge);
+            }
+            continue;
+          }
           visited.add(neighbor);
           next.push(neighbor);
           edges.set(edge.id, edge);
-          paths.set(neighbor, [...(paths.get(current) ?? []), edge]);
+          paths.set(neighbor, candidatePath);
           if (visited.size - 1 >= maxNodes) break;
         }
         if (visited.size - 1 >= maxNodes) break;
       }
       frontier = next;
     }
-    return { nodes: [...visited].filter(node => node !== id).sort().map(node => this.getNode(node)!).filter(Boolean), edges: [...edges.values()].sort((a, b) => a.id.localeCompare(b.id)), paths };
+    return { nodes: [...visited].filter(node => node !== id).sort().map(node => this.getNode(node)!).filter(Boolean), edges: [...edges.values()].sort((a, b) => codeUnitCompare(a.id, b.id)), paths };
   }
 
   getNode(id: string): MindGraphNode | undefined {
@@ -154,3 +163,12 @@ export class MindGraphManager {
 
   clear(): void { this.graph.clear(); }
 }
+
+const comparePathIds = (a: MindGraphEdge[], b: MindGraphEdge[]): number => {
+  const length = Math.min(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    const comparison = codeUnitCompare(a[i].id, b[i].id);
+    if (comparison !== 0) return comparison;
+  }
+  return a.length - b.length;
+};

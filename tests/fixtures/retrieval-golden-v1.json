@@ -1,0 +1,159 @@
+{
+  "corpus": "tests/fixtures/store-v0.3.json",
+  "semanticBaseline": "v0.5 deterministic retrieval classes and scores",
+  "queries": {
+    "default": [
+      {
+        "id": "alpha",
+        "score": 0.9825,
+        "matchClass": "exact_phrase",
+        "matchedBy": [
+          "exact_phrase",
+          "token"
+        ]
+      }
+    ],
+    "allFilters": [
+      {
+        "id": "alpha",
+        "score": 0.9825,
+        "matchClass": "exact_phrase",
+        "matchedBy": [
+          "exact_phrase",
+          "token"
+        ]
+      },
+      {
+        "id": "candidate",
+        "score": 0.9550000000000001,
+        "matchClass": "exact_phrase",
+        "matchedBy": [
+          "exact_phrase",
+          "token"
+        ]
+      },
+      {
+        "id": "archived",
+        "score": 0.9475,
+        "matchClass": "exact_phrase",
+        "matchedBy": [
+          "exact_phrase",
+          "token"
+        ]
+      },
+      {
+        "id": "expired",
+        "score": 0.9400000000000001,
+        "matchClass": "exact_phrase",
+        "matchedBy": [
+          "exact_phrase",
+          "token"
+        ]
+      }
+    ],
+    "graph": [
+      {
+        "id": "alpha",
+        "score": 0.9825,
+        "matchClass": "exact_phrase",
+        "matchedBy": [
+          "exact_phrase",
+          "token"
+        ]
+      },
+      {
+        "id": "beta",
+        "score": 0.53625,
+        "matchClass": "graph_only",
+        "matchedBy": [
+          "graph_neighbor"
+        ],
+        "graphEvidence": {
+          "seedMemoryId": "alpha",
+          "depth": 1,
+          "path": [
+            {
+              "edgeId": "edge-alpha-beta",
+              "relationship": "supports",
+              "direction": "out",
+              "from": "memory:alpha",
+              "to": "memory:beta"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "context": {
+    "noteIds": [
+      "alpha",
+      "beta"
+    ],
+    "diaryIds": [
+      "diary-one"
+    ],
+    "graphNodeIds": [
+      "memory:alpha",
+      "memory:beta",
+      "diary:diary-one"
+    ],
+    "graphEdgeIds": [
+      "edge-alpha-beta"
+    ],
+    "citations": [
+      {
+        "ref": "note:alpha",
+        "kind": "note",
+        "id": "alpha"
+      },
+      {
+        "ref": "note:beta",
+        "kind": "note",
+        "id": "beta"
+      },
+      {
+        "ref": "diary:diary-one",
+        "kind": "diary",
+        "id": "diary-one"
+      },
+      {
+        "ref": "node:memory:alpha",
+        "kind": "node",
+        "id": "memory:alpha"
+      },
+      {
+        "ref": "node:memory:beta",
+        "kind": "node",
+        "id": "memory:beta"
+      },
+      {
+        "ref": "node:diary:diary-one",
+        "kind": "node",
+        "id": "diary:diary-one"
+      },
+      {
+        "ref": "edge:edge-alpha-beta",
+        "kind": "edge",
+        "id": "edge-alpha-beta"
+      }
+    ],
+    "truncation": {
+      "notesOmitted": 0,
+      "diaryOmitted": 0,
+      "nodesOmitted": 0,
+      "edgesOmitted": 0,
+      "charsOmitted": 0,
+      "hitBudget": false
+    }
+  },
+  "portableRecordSchema": [
+    "ether.portable_record.v1",
+    "ether.portable_record.v1",
+    "ether.portable_record.v1"
+  ],
+  "portableRecordIds": [
+    "alpha",
+    "beta",
+    "diary-one"
+  ]
+}

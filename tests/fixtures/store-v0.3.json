@@ -1,0 +1,192 @@
+{
+  "schemaVersion": "ether.memory_store.v0.3",
+  "identity": {
+    "userId": "fixture-user",
+    "displayName": "Fixture User",
+    "createdAt": "2020-01-01T00:00:00.000Z",
+    "lastActive": "2020-01-02T00:00:00.000Z",
+    "preferences": {
+      "theme": "light"
+    }
+  },
+  "memoryNotes": [
+    {
+      "id": "alpha",
+      "content": "TypeScript project memory",
+      "summary": "TypeScript project",
+      "category": "project",
+      "tags": [
+        "project",
+        "typescript"
+      ],
+      "source": "user",
+      "provenance": {
+        "kind": "user_explicit",
+        "lastEditKind": "user"
+      },
+      "importance": 0.8,
+      "confidence": 0.9,
+      "pinned": false,
+      "status": "active",
+      "createdAt": "2020-01-03T00:00:00.000Z",
+      "updatedAt": "2020-01-03T00:00:00.000Z",
+      "metadata": {
+        "claimKey": "language"
+      }
+    },
+    {
+      "id": "beta",
+      "content": "Architecture memory",
+      "summary": "Architecture",
+      "category": "project",
+      "tags": [
+        "architecture"
+      ],
+      "source": "user",
+      "provenance": {
+        "kind": "user_explicit",
+        "lastEditKind": "user"
+      },
+      "importance": 0.5,
+      "confidence": 0.8,
+      "pinned": false,
+      "status": "active",
+      "createdAt": "2020-01-04T00:00:00.000Z",
+      "updatedAt": "2020-01-04T00:00:00.000Z",
+      "metadata": {}
+    },
+    {
+      "id": "candidate",
+      "content": "TypeScript candidate",
+      "tags": [
+        "typescript"
+      ],
+      "source": "ai",
+      "provenance": {
+        "kind": "condensed",
+        "lastEditKind": "system"
+      },
+      "importance": 0.4,
+      "confidence": 0.6,
+      "pinned": false,
+      "status": "candidate",
+      "createdAt": "2020-01-05T00:00:00.000Z",
+      "updatedAt": "2020-01-05T00:00:00.000Z",
+      "metadata": {}
+    },
+    {
+      "id": "archived",
+      "content": "TypeScript archived",
+      "tags": [
+        "typescript"
+      ],
+      "source": "user",
+      "provenance": {
+        "kind": "user_explicit",
+        "lastEditKind": "user"
+      },
+      "importance": 0.3,
+      "confidence": 0.5,
+      "pinned": false,
+      "status": "archived",
+      "createdAt": "2020-01-06T00:00:00.000Z",
+      "updatedAt": "2020-01-06T00:00:00.000Z",
+      "metadata": {}
+    },
+    {
+      "id": "expired",
+      "content": "TypeScript expired",
+      "tags": [
+        "typescript"
+      ],
+      "source": "user",
+      "provenance": {
+        "kind": "user_explicit",
+        "lastEditKind": "user"
+      },
+      "importance": 0.2,
+      "confidence": 0.4,
+      "pinned": false,
+      "status": "active",
+      "expiresAt": "2020-01-07T00:00:00.000Z",
+      "createdAt": "2020-01-07T00:00:00.000Z",
+      "updatedAt": "2020-01-07T00:00:00.000Z",
+      "metadata": {}
+    }
+  ],
+  "diary": [
+    {
+      "id": "diary-one",
+      "content": "TypeScript diary entry",
+      "createdAt": "2020-01-08T00:00:00.000Z",
+      "updatedAt": "2020-01-08T00:00:00.000Z",
+      "tags": [
+        "typescript"
+      ],
+      "metadata": {
+        "day": 1
+      }
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {
+        "id": "memory:alpha",
+        "type": "memory",
+        "label": "TypeScript project",
+        "data": {
+          "status": "active"
+        }
+      },
+      {
+        "id": "memory:beta",
+        "type": "memory",
+        "label": "Architecture",
+        "data": {
+          "status": "active"
+        }
+      },
+      {
+        "id": "memory:candidate",
+        "type": "memory",
+        "label": "TypeScript candidate",
+        "data": {
+          "status": "candidate"
+        }
+      },
+      {
+        "id": "memory:archived",
+        "type": "memory",
+        "label": "TypeScript archived",
+        "data": {
+          "status": "archived"
+        }
+      },
+      {
+        "id": "memory:expired",
+        "type": "memory",
+        "label": "TypeScript expired",
+        "data": {
+          "status": "active"
+        }
+      },
+      {
+        "id": "diary:diary-one",
+        "type": "diary",
+        "label": "TypeScript diary entry",
+        "data": {}
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge-alpha-beta",
+        "source": "memory:alpha",
+        "target": "memory:beta",
+        "relationship": "supports",
+        "data": {
+          "origin": "fixture"
+        }
+      }
+    ]
+  }
+}

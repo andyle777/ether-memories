@@ -8,7 +8,7 @@ import { toAgentToolResult } from "../src/adapters/agentTool.js";
 import { toRlmEnv } from "../src/adapters/rlmEnv.js";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../src/version.js";
 
-describe("Ether Memories v0.4.0", () => {
+describe("Ether Memories v0.5.0", () => {
   it("creates notes and links foundation nodes", () => {
     const e = new EtherMemoriesCore({ userId: "u1" });
     const r = e.addMemory({ content: "Andy is building Ether Memories.", tags: ["project"] });
@@ -267,8 +267,8 @@ describe("Ether Memories v0.4.0", () => {
     const e = new EtherMemoriesCore({ userId: "u1" });
     const context = e.buildMemoryContext({ purpose: "debug" });
     expect(context.ok).toBe(true);
-    if (context.ok) expect(context.value.libraryVersion).toBe("0.4.0");
-    expect(LIBRARY_VERSION).toBe("0.4.0");
+    if (context.ok) expect(context.value.libraryVersion).toBe("0.5.0");
+    expect(LIBRARY_VERSION).toBe("0.5.0");
   });
 
   it("does not leak nested public state and preserves edge identity", () => {

@@ -14,6 +14,8 @@ import { MemoryContextBuilder } from "./MemoryContext.js";
 import type { StoragePort } from "../types/index.js";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 import { cloneValue } from "../utils/clone.js";
+import { preparePortableImport, type PortableImportInput, type PortableImportLimits } from "../adapters/portableImport.js";
+import type { PortableImportReceipt } from "../types/index.js";
 
 type EtherMemoriesBaseOptions = {
   userId: string;
@@ -44,7 +46,13 @@ export class EtherMemoriesCore {
       lastActive: new Date(),
       preferences: cloneValue(options.preferences ?? {})
     };
-    this.retriever = new MemoryRetriever(() => this.notes.valuesUnsafe(), () => this.diary.valuesUnsafe(), this.graph);
+    this.retriever = new MemoryRetriever(
+      () => this.notes.valuesUnsafe(),
+      () => this.diary.valuesUnsafe(),
+      this.graph,
+      () => this.notes.revision,
+      () => this.diary.revision
+    );
     this.linker = new FoundationLinker(this.graph);
     this.condensation = new CondensationEngine(input => {
       const result = this.addMemory(input);
@@ -80,6 +88,12 @@ export class EtherMemoriesCore {
     return result;
   }
 
+  promoteCandidate(id: string): Result<MemoryNote> {
+    const result = this.notes.promoteCandidate(id);
+    if (result.ok) { this.linker.linkNote(result.value); this.touch(); }
+    return result;
+  }
+
   purgeExpired(forcePinned = false): number {
     const now = Date.now();
     const ids = this.notes.valuesUnsafe()
@@ -106,7 +120,13 @@ export class EtherMemoriesCore {
   }
 
   queryMemoriesDetailed(text: string, options?: Parameters<MemoryRetriever["query"]>[1]) {
-    return ok(this.retriever.query(text, options).map(x => ({ ...x, memory: cloneNote(x.memory), graphEvidence: x.graphEvidence ? { ...x.graphEvidence, path: x.graphEvidence.path.map(p => ({ ...p })) } : undefined })));
+    return ok(this.retriever.query(text, options).map(x => ({
+      ...x,
+      memory: cloneNote(x.memory),
+      matchedBy: [...x.matchedBy],
+      evidence: cloneRetrievalEvidence(x.evidence),
+      graphEvidence: x.graphEvidence ? { ...x.graphEvidence, path: x.graphEvidence.path.map(p => ({ ...p })) } : undefined
+    })));
   }
 
   buildMemoryContext(input: BuildMemoryContextInput): Result<MemoryContext> {
@@ -146,6 +166,21 @@ export class EtherMemoriesCore {
     } catch (e) {
       return err("STORAGE_ERROR", e instanceof Error ? e.message : "Load failed.");
     }
+  }
+
+  async importPortableRecords(input: PortableImportInput, limits?: Partial<PortableImportLimits>): Promise<PortableImportReceipt> {
+      const prepared = await preparePortableImport(
+        input,
+        new Set(this.notes.valuesUnsafe().map(note => note.id)),
+        new Set(this.diary.valuesUnsafe().map(entry => entry.id)),
+        limits
+      );
+      if (prepared.receipt.issues.some(issue => issue.blocking)) return prepared.receipt;
+      this.notes.replaceAll([...this.notes.valuesUnsafe(), ...prepared.notes]);
+      this.diary.replaceAll([...this.diary.valuesUnsafe(), ...prepared.diary]);
+      for (const note of prepared.notes) this.linker.linkNote(note);
+      for (const entry of prepared.diary) this.linker.linkDiary(entry);
+      return prepared.receipt;
   }
 
   importData(raw: unknown): Result<void> {
@@ -265,5 +300,13 @@ const cloneIdentity = (i: UserIdentity): UserIdentity => ({
 });
 const cloneNote = (n: MemoryNote): MemoryNote => ({ ...n, tags: [...n.tags], provenance: cloneValue(n.provenance), metadata: cloneValue(n.metadata), createdAt: new Date(n.createdAt), updatedAt: new Date(n.updatedAt), expiresAt: n.expiresAt ? new Date(n.expiresAt) : undefined });
 const cloneDiary = (d: DiaryEntry): DiaryEntry => ({ ...d, tags: [...d.tags], metadata: cloneValue(d.metadata), createdAt: new Date(d.createdAt), updatedAt: new Date(d.updatedAt) });
+const cloneRetrievalEvidence = (e: import("../types/index.js").RetrievalEvidence): import("../types/index.js").RetrievalEvidence => ({
+  ...e,
+  matchedTokens: [...e.matchedTokens],
+  tags: [...e.tags],
+  metadataFields: [...e.metadataFields],
+  graph: e.graph ? { ...e.graph, edgeIds: [...e.graph.edgeIds], path: e.graph.path.map(step => ({ ...step })) } : undefined,
+  contributions: { ...e.contributions }
+});
 
 export type EtherMemories = EtherMemoriesCore;
