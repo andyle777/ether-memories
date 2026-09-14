@@ -11,6 +11,9 @@ export interface AddDiaryInput {
 
 export class DiarySystem {
   private readonly entries = new Map<string, DiaryEntry>();
+  private mutationRevision = 0;
+
+  get revision(): number { return this.mutationRevision; }
 
   add(input: AddDiaryInput): Result<DiaryEntry> {
     if (!input.content?.trim()) return err("INVALID_INPUT", "Diary content cannot be empty.");
@@ -24,6 +27,7 @@ export class DiarySystem {
       metadata: cloneValue(input.metadata ?? {})
     };
     this.entries.set(entry.id, entry);
+    this.mutationRevision++;
     return ok(cloneEntry(entry));
   }
 
@@ -46,17 +50,20 @@ export class DiarySystem {
       metadata: patch.metadata !== undefined ? cloneValue(patch.metadata) : e.metadata,
       updatedAt: new Date()
     });
+    this.mutationRevision++;
     return ok(cloneEntry(e));
   }
 
   delete(id: string): Result<void> {
     if (!this.entries.delete(id)) return err("NOT_FOUND", `Diary entry not found: ${id}`);
+    this.mutationRevision++;
     return ok(undefined);
   }
 
   replaceAll(entries: DiaryEntry[]): void {
     this.entries.clear();
     for (const e of entries) this.entries.set(e.id, cloneEntry(e));
+    this.mutationRevision++;
   }
 
   valuesUnsafe(): DiaryEntry[] {

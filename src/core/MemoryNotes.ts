@@ -24,6 +24,9 @@ export interface UpdateNoteInput extends Partial<AddNoteInput> {
 
 export class MemoryNotes {
   private readonly notes = new Map<string, MemoryNote>();
+  private mutationRevision = 0;
+
+  get revision(): number { return this.mutationRevision; }
 
   add(input: AddNoteInput): Result<MemoryNote> {
     if (!input.content?.trim()) return err("INVALID_INPUT", "Memory content cannot be empty.");
@@ -46,6 +49,7 @@ export class MemoryNotes {
       metadata: cloneValue(input.metadata ?? {})
     };
     this.notes.set(note.id, note);
+    this.mutationRevision++;
     return ok(cloneNote(note));
   }
 
@@ -86,11 +90,13 @@ export class MemoryNotes {
     if (input.metadata !== undefined) note.metadata = cloneValue(input.metadata);
     note.updatedAt = new Date();
     note.provenance = { ...note.provenance, lastEditKind: "user" };
+    this.mutationRevision++;
     return ok(cloneNote(note));
   }
 
   delete(id: string): Result<void> {
     if (!this.notes.delete(id)) return err("NOT_FOUND", `Memory note not found: ${id}`);
+    this.mutationRevision++;
     return ok(undefined);
   }
 
@@ -99,6 +105,7 @@ export class MemoryNotes {
     if (!note) return err("NOT_FOUND", `Memory note not found: ${id}`);
     note.status = "active";
     note.updatedAt = new Date();
+    this.mutationRevision++;
     return ok(cloneNote(note));
   }
 
@@ -111,12 +118,14 @@ export class MemoryNotes {
         count++;
       }
     }
+    if (count) this.mutationRevision++;
     return count;
   }
 
   replaceAll(notes: MemoryNote[]): void {
     this.notes.clear();
     for (const note of notes) this.notes.set(note.id, cloneNote(note));
+    this.mutationRevision++;
   }
 
   valuesUnsafe(): MemoryNote[] {

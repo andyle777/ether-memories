@@ -100,13 +100,46 @@ export type EtherErrorCode =
 export interface RetrievalMatch {
   memory: MemoryNote;
   score: number;
+  matchClass: RetrievalMatchClass;
   matchedBy: Array<
-    | "exact_phrase" | "token" | "tag" | "category"
+    | "exact_phrase" | "token" | "full_token_match" | "partial_token_match" | "tag" | "category" | "metadata"
     | "graph_neighbor" | "recency" | "pinned"
     | "importance" | "explicit_id"
   >;
+  evidence: RetrievalEvidence;
   graphEvidence?: GraphEvidence;
 }
+
+export interface RetrievalEvidence {
+  matchClass: RetrievalMatchClass;
+  score: number;
+  exactPhrase?: string;
+  matchedTokens: string[];
+  tags: string[];
+  category?: string;
+  metadataFields: string[];
+  explicitId: boolean;
+  graph?: {
+    seedMemoryId: string;
+    depth: 1 | 2;
+    edgeIds: string[];
+    path: GraphEvidence["path"];
+  };
+  contributions: {
+    lexical: number;
+    graph: number;
+    importance: number;
+    confidence: number;
+  };
+}
+
+export type RetrievalMatchClass =
+  | "explicit_id"
+  | "exact_phrase"
+  | "full_token_match"
+  | "partial_token_match"
+  | "tag_metadata_match"
+  | "graph_only";
 
 export interface GraphEvidence {
   seedMemoryId: string;
@@ -163,6 +196,7 @@ export interface ContextNote {
   note: MemoryNote;
   score?: number;
   matchedBy?: RetrievalMatch["matchedBy"];
+  evidence?: RetrievalEvidence;
   graphEvidence?: GraphEvidence;
   excerpt?: string;
   cite: ContextCitation;
@@ -258,4 +292,36 @@ export interface PortableRecord {
   confidence?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type PortableImportIssueCode =
+  | "UNSUPPORTED_SCHEMA"
+  | "MALFORMED_RECORD"
+  | "INVALID_KIND"
+  | "INVALID_ID"
+  | "DUPLICATE_PAYLOAD_ID"
+  | "INVALID_TIMESTAMP"
+  | "INVALID_CHRONOLOGY"
+  | "INVALID_STATUS"
+  | "INVALID_SOURCE"
+  | "INVALID_CITATION"
+  | "EXISTING_ID_CONFLICT"
+  | "INPUT_LIMIT_EXCEEDED";
+
+export interface PortableImportIssue {
+  code: PortableImportIssueCode;
+  recordIndex?: number;
+  recordId?: string;
+  kind?: string;
+  fieldPath?: string;
+  message: string;
+  incomingValue?: unknown;
+  existingValue?: unknown;
+  relatedIds?: string[];
+  blocking: boolean;
+}
+
+export interface PortableImportReceipt {
+  imported: number;
+  issues: PortableImportIssue[];
 }

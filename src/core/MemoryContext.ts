@@ -39,9 +39,26 @@ export class MemoryContextBuilder {
       : [];
     const explicit = q.noteIds ?? [];
     const selected = new Map<string, RetrievalMatch>();
+    const now = Date.now();
     for (const id of explicit) {
       const n = this.getNotes().find(x => x.id === id);
-      if (n) selected.set(id, { memory: n, score: 0, matchedBy: ["explicit_id"] });
+      if (!n) continue;
+      if (!passesContextFilters(n, q.filters, now)) continue;
+      selected.set(id, {
+        memory: n,
+        score: 0,
+        matchClass: "explicit_id",
+        matchedBy: ["explicit_id"],
+        evidence: {
+          matchClass: "explicit_id",
+          score: 0,
+          matchedTokens: [],
+          tags: [],
+          metadataFields: [],
+          explicitId: true,
+          contributions: { lexical: 0, graph: 0, importance: 0, confidence: 0 }
+        }
+      });
     }
     for (const m of noteMatches) if (!selected.has(m.memory.id)) selected.set(m.memory.id, m);
 
@@ -49,6 +66,7 @@ export class MemoryContextBuilder {
       note: cloneNote(m.memory),
       score: m.score,
       matchedBy: m.matchedBy,
+      evidence: cloneRetrievalEvidence(m.evidence),
       graphEvidence: m.graphEvidence ? cloneGraphEvidence(m.graphEvidence) : undefined,
       cite: citation("note", m.memory.id)
     } satisfies ContextNote));
@@ -60,9 +78,9 @@ export class MemoryContextBuilder {
       if (entry)       selectedDiary.set(id, { entry: cloneDiary(entry), matchedBy: ["explicit_id"], cite: citation("diary", entry.id) });
     }
     if (q.text?.trim()) {
-      for (const entry of this.retriever.searchDiary(q.text, Math.max(budget.maxDiary * 4, 20))) {
-        if (!selectedDiary.has(entry.id)) {
-          selectedDiary.set(entry.id, { entry: cloneDiary(entry), matchedBy: ["exact_phrase"], cite: citation("diary", entry.id) });
+      for (const result of this.retriever.searchDiaryDetailed(q.text, Math.max(budget.maxDiary * 4, 20))) {
+        if (!selectedDiary.has(result.entry.id)) {
+          selectedDiary.set(result.entry.id, { entry: cloneDiary(result.entry), matchedBy: result.matchedBy, cite: citation("diary", result.entry.id) });
         }
       }
     }
@@ -141,7 +159,7 @@ export class MemoryContextBuilder {
     const retrieval: RetrievalTrace = {
       mode: q.noteIds?.length && q.text ? "hybrid" : q.noteIds?.length ? "ids" : q.text ? "query" : "empty",
       matchedNoteCount: noteMatches.length,
-      matchedDiaryCount: diaries.length,
+      matchedDiaryCount: selectedDiary.size,
       filtersApplied: Object.entries(q.filters ?? {}).filter(([,v]) => v !== undefined).map(([k]) => k),
       ranking: "deterministic_v1",
       conflictFlags
@@ -195,3 +213,18 @@ const cloneGraphEvidence = (e: NonNullable<RetrievalMatch["graphEvidence"]>): No
   depth: e.depth,
   path: e.path.map(step => ({ ...step }))
 });
+const cloneRetrievalEvidence = (e: RetrievalMatch["evidence"]): RetrievalMatch["evidence"] => ({
+  ...e,
+  matchedTokens: [...e.matchedTokens],
+  tags: [...e.tags],
+  metadataFields: [...e.metadataFields],
+  graph: e.graph ? { ...e.graph, edgeIds: [...e.graph.edgeIds], path: e.graph.path.map(step => ({ ...step })) } : undefined,
+  contributions: { ...e.contributions }
+});
+const passesContextFilters = (note: MemoryNote, filters: MemoryContextQuery["filters"], now: number): boolean =>
+  (filters?.includeCandidate || note.status !== "candidate") &&
+  (filters?.includeArchived || note.status !== "archived") &&
+  (filters?.includeExpired || !note.expiresAt || note.expiresAt.getTime() > now) &&
+  (!filters?.pinnedOnly || note.pinned) &&
+  (!filters?.tags?.length || filters.tags.every(tag => note.tags.includes(tag))) &&
+  (!filters?.categories?.length || (!!note.category && filters.categories.includes(note.category)));

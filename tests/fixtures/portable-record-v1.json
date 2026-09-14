@@ -1,0 +1,59 @@
+[
+  {
+    "schema": "ether.portable_record.v1",
+    "id": "alpha",
+    "kind": "note",
+    "text": "TypeScript project memory",
+    "citation": {
+      "ref": "note:alpha",
+      "kind": "note",
+      "id": "alpha"
+    },
+    "tags": [
+      "project",
+      "typescript"
+    ],
+    "category": "project",
+    "source": "user",
+    "status": "active",
+    "confidence": 0.9,
+    "createdAt": "2020-01-03T00:00:00.000Z",
+    "updatedAt": "2020-01-03T00:00:00.000Z"
+  },
+  {
+    "schema": "ether.portable_record.v1",
+    "id": "beta",
+    "kind": "note",
+    "text": "Architecture memory",
+    "citation": {
+      "ref": "note:beta",
+      "kind": "note",
+      "id": "beta"
+    },
+    "tags": [
+      "architecture"
+    ],
+    "category": "project",
+    "source": "user",
+    "status": "active",
+    "confidence": 0.8,
+    "createdAt": "2020-01-04T00:00:00.000Z",
+    "updatedAt": "2020-01-04T00:00:00.000Z"
+  },
+  {
+    "schema": "ether.portable_record.v1",
+    "id": "diary-one",
+    "kind": "diary",
+    "text": "TypeScript diary entry",
+    "citation": {
+      "ref": "diary:diary-one",
+      "kind": "diary",
+      "id": "diary-one"
+    },
+    "tags": [
+      "typescript"
+    ],
+    "createdAt": "2020-01-08T00:00:00.000Z",
+    "updatedAt": "2020-01-08T00:00:00.000Z"
+  }
+]
