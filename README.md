@@ -105,4 +105,8 @@ npm test
 npm run build
 ```
 
+## Contributors and acknowledgements
+
+Created and maintained by Andy Le, with assistance from ChatGPT (OpenAI), GitHub Copilot, and Mistral Vibe. See [CONTRIBUTORS.md](CONTRIBUTORS.md) for contribution details.
+
 MIT licensed.
