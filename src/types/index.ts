@@ -1,4 +1,6 @@
 import type { MEMORY_CONTEXT_SCHEMA_VERSION, PORTABLE_RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
+import type { DurableStorageOperations, PersistenceErrorCode } from "./persistence.js";
+export * from "./persistence.js";
 
 export type MemorySource =
   | "user"
@@ -89,6 +91,7 @@ export interface UserIdentity {
 }
 
 export type EtherErrorCode =
+  | PersistenceErrorCode
   | "STORAGE_ERROR"
   | "INVALID_INPUT"
   | "NOT_FOUND"
@@ -277,6 +280,7 @@ export interface EtherSnapshot {
 export interface StoragePort {
   load(): Promise<unknown>;
   save(snapshot: EtherSnapshot): Promise<void>;
+  readonly durable?: DurableStorageOperations;
 }
 
 export interface PortableRecord {
