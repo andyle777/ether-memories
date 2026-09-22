@@ -1,13 +1,40 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CHECKPOINT_FORMAT, PERSISTENCE_LIMITS, WAL_FORMAT, decodeStoreHead, encodeCheckpoint, encodeStoreHead,
-  persistenceLimits, verifyCheckpoint, type PersistedStoreHead } from "../src/index.js";
+import { CHECKPOINT_FORMAT, HEAD_VERSION, CHECKPOINT_VERSION, WAL_VERSION, PERSISTENCE_LIMITS, WAL_FORMAT, decodeStoreHead, encodeCheckpoint, encodeStoreHead,
+  persistenceLimits, verifyCheckpoint, type PersistedStoreHead } from "../src/persistence/codecs.js";
 import { fixture, value } from "./helpers/persistence.js";
 
 const json = (input: unknown) => Buffer.from(JSON.stringify(input), "utf8");
 const corruption = { ok: false, error: { code: "PERSISTENCE_CORRUPTION" } };
 
 describe("bounded durable persistence codecs", () => {
+  it("preserves the canonical HEAD and checkpoint bytes captured at the AMBER review head", () => {
+    const golden = JSON.parse(readFileSync(new URL("./fixtures/persistence-wire-v1.json", import.meta.url), "utf8"));
+    expect(golden.sourceCommit).toBe("328468a11164d564c3b06c15b7e36a7c80fbde42");
+    const { head, checkpointBytes, payload } = fixture(golden.txId);
+    const headBytes = value(encodeStoreHead(head));
+    expect(Buffer.from(headBytes)).toEqual(Buffer.from(golden.headBase64, "base64"));
+    expect(Buffer.from(checkpointBytes)).toEqual(Buffer.from(golden.checkpointBase64, "base64"));
+    expect(payload).toEqual(Buffer.from(golden.payloadBase64, "base64"));
+    expect(createHash("sha256").update(headBytes).digest("hex")).toBe(golden.headSha256);
+    expect(createHash("sha256").update(checkpointBytes).digest("hex")).toBe(golden.checkpointSha256);
+    expect(value(decodeStoreHead(Buffer.from(golden.headBase64, "base64")))).toEqual(head);
+    expect(verifyCheckpoint(Buffer.from(golden.checkpointBase64, "base64"), head).ok).toBe(true);
+  });
+
+  it("sources HEAD, checkpoint and WAL versions independently while retaining version 1", () => {
+    expect(HEAD_VERSION).toBe("1");
+    expect(CHECKPOINT_VERSION).toBe("1");
+    expect(WAL_VERSION).toBe("1");
+    const { head, checkpointBytes } = fixture();
+    const bytes = Buffer.from(checkpointBytes);
+    const header = JSON.parse(bytes.subarray(0, bytes.indexOf(10)).toString("utf8"));
+    expect(head.version).toBe(HEAD_VERSION);
+    expect(header.version).toBe(CHECKPOINT_VERSION);
+    expect(head.walFormat.version).toBe(WAL_VERSION);
+  });
+
   it("encodes fixed HEAD field order independently of every input object's insertion order", () => {
     const { head } = fixture();
     const reverse = (object: object) => Object.fromEntries(Object.entries(object).reverse());

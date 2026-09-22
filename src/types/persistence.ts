@@ -12,9 +12,27 @@ export type WalOperationType = string;
 export type WalOperationVersion = string;
 
 declare const transactionSequenceId: unique symbol;
+declare const mutationId: unique symbol;
 
 /** Canonical unsigned decimal text; never a JS number. Parse at input boundaries. */
 export type TransactionSequenceId = string & { readonly [transactionSequenceId]: true };
+
+/** Caller/coordinator-assigned logical command ID, stable before commit and across retries. */
+export type MutationId = string & { readonly [mutationId]: true };
+export type MutationDigest = string;
+
+/**
+ * Store-scoped logical retry identity, persisted with the eventual WAL transaction.
+ * digest identifies the canonical versioned mutation, excluding assigned WAL identity
+ * and attempt-specific metadata. Reuse the same ID and digest after an ambiguous ack.
+ * Same ID + same canonical mutation may resolve to the original committed success;
+ * same ID + incompatible mutation must fail closed (PERSISTENCE_CORRUPTION).
+ * Canonical encoding and deduplication are future implementation, not supplied here.
+ */
+export interface MutationIdentity {
+  readonly mutationId: MutationId;
+  readonly digest: MutationDigest;
+}
 
 export interface CommittedTip {
   readonly epochId: EpochId;
@@ -22,7 +40,7 @@ export interface CommittedTip {
   readonly digest: TransactionDigest;
 }
 
-/** Retries are identified by the entire tuple, not txId alone. */
+/** WAL transaction/replay identity; distinct from pre-commit logical mutation identity. */
 export type DurableTransactionIdentity = CommittedTip;
 
 export interface CheckpointIdentity {
@@ -61,10 +79,11 @@ export interface WalOperation extends WalOperationIdentifier {
 
 export interface DurableTransaction {
   readonly storeId: StoreId;
+  readonly mutation: MutationIdentity;
   readonly format: WalFormatIdentifier;
   readonly expectedBase: CommittedTip;
   readonly identity: DurableTransactionIdentity;
-  /** Ordered deltas; whole-transaction identity is the retry deduplication unit. */
+  /** Ordered deltas for this logical mutation; not a substitute for its retry identity. */
   readonly operations: readonly WalOperation[];
 }
 
@@ -93,7 +112,9 @@ export interface DurableWriterOperations {
    * Under this same writer authority, validate the store, epoch, exact base and
    * operation versions, then append the complete transaction and cross the
    * required durability barrier before returning success. Never auto-rebase.
-   * An identical committed retry succeeds without appending again; the same
+   * Resolve logical retries using the persisted mutation identity: the same ID
+   * and canonical mutation may return the original committed identity without
+   * another append; incompatible reuse is PERSISTENCE_CORRUPTION. Separately, the same
    * epoch/txId with another digest is PERSISTENCE_CORRUPTION. A stale new
    * transaction returns STALE_TRANSACTION_BASE. An uncertain durable outcome
    * requires recovery before another commit. This does not publish live state.

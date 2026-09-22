@@ -6,6 +6,9 @@ import { decodeStoreHead, encodeStoreHead, persistenceLimits, verifyCheckpoint,
   type PersistedStoreHead, type PersistenceLimitOptions, type PersistenceLimits } from "./codecs.js";
 import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 export interface FsDurableStoreOptions {
   /** Explicit local directory; never interpreted as legacy storagePath. Parent must already exist. */
   readonly directory: string;
@@ -77,7 +80,12 @@ export class FsDurableStore {
         let value: unknown;
         try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
         catch { return err("RECOVERY_REQUIRED", "Existing path is not a recognized legacy snapshot."); }
-        if (typeof value === "object" && value !== null && "schemaVersion" in value) {
+        // Match the snapshot container, not its shared schema label. Durable envelopes
+        // (including HEAD) have different root fields and must never enter legacy mode.
+        if (isRecord(value) && Object.keys(value).length === 5
+          && Object.hasOwn(value, "schemaVersion") && isRecord(value.identity)
+          && Array.isArray(value.memoryNotes) && Array.isArray(value.diary)
+          && isRecord(value.graph) && Array.isArray(value.graph.nodes) && Array.isArray(value.graph.edges)) {
           if (value.schemaVersion === STORE_SCHEMA_VERSION) return ok({ state: "legacy-json" });
           if (typeof value.schemaVersion === "string" && value.schemaVersion.startsWith("ether.memory_store.")) {
             return err("UNSUPPORTED_PERSISTENCE_FORMAT", "Unsupported legacy snapshot schema.");

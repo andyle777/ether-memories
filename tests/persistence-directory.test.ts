@@ -2,7 +2,9 @@ import * as fs from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { EtherMemoriesCore, FsDurableStore, PERSISTENCE_LIMITS, encodeCheckpoint, encodeStoreHead } from "../src/index.js";
+import { EtherMemoriesCore } from "../src/index.js";
+import { FsDurableStore } from "../src/persistence/FsDurableStore.js";
+import { PERSISTENCE_LIMITS, encodeCheckpoint, encodeStoreHead } from "../src/persistence/codecs.js";
 import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "../src/persistence/directoryIO.js";
 import { fixture, value } from "./helpers/persistence.js";
 
@@ -293,6 +295,47 @@ describe("explicit durable-store directory foundation", () => {
     expect(results.filter(result => result.ok)).toHaveLength(1);
     for (const result of results) if (!result.ok) expect(["WRITER_BUSY", "RECOVERY_REQUIRED"]).toContain(result.error.code);
     expect(value(await new FsDurableStore({ directory }).inspect()).state).toBe("active");
+  });
+
+  it.each(["head", "checkpoint-header", "checkpoint", "wal-header", "schema-only", "mixed", "malformed-snapshot"])("does not classify %s as legacy storage or mutate it", async kind => {
+    const data = fixture();
+    const snapshot = new EtherMemoriesCore({ userId: "classification" }).exportData();
+    const headBytes = value(encodeStoreHead(data.head));
+    const checkpoint = Buffer.from(data.checkpointBytes);
+    const artifacts: Record<string, Uint8Array> = {
+      head: headBytes,
+      "checkpoint-header": checkpoint.subarray(0, checkpoint.indexOf(10)),
+      checkpoint,
+      "wal-header": Buffer.from(JSON.stringify({ format: "ether.wal", version: "1", schemaVersion: snapshot.schemaVersion })),
+      "schema-only": Buffer.from(JSON.stringify({ schemaVersion: snapshot.schemaVersion })),
+      mixed: Buffer.from(JSON.stringify({ ...snapshot, ...data.head })),
+      "malformed-snapshot": Buffer.from(JSON.stringify({ ...snapshot, graph: [] }))
+    };
+    const path = join(parent, "artifact.json");
+    const bytes = artifacts[kind]!;
+    await fs.writeFile(path, bytes);
+    expect(await new FsDurableStore({ directory: path }).inspect()).toMatchObject(recovery);
+    expect(await fs.readFile(path)).toEqual(Buffer.from(bytes));
+    expect(await fs.readdir(parent)).toEqual(["artifact.json"]);
+  });
+
+  it("rejects direct inspection of activated HEAD while leaving the directory active", async () => {
+    const store = new FsDurableStore({ directory }, simulatedIO());
+    value(await store.initialize(fixture()));
+    const path = join(directory, "HEAD");
+    const before = await fs.readFile(path);
+    expect(await new FsDurableStore({ directory: path }).inspect()).toMatchObject(recovery);
+    expect(await fs.readFile(path)).toEqual(before);
+    expect(value(await store.inspect()).state).toBe("active");
+  });
+
+  it("preserves unsupported-schema reporting for a legacy snapshot container", async () => {
+    const path = join(parent, "future-snapshot.json");
+    const snapshot = new EtherMemoriesCore({ userId: "classification" }).exportData();
+    const bytes = Buffer.from(JSON.stringify({ ...snapshot, schemaVersion: "ether.memory_store.v99" }));
+    await fs.writeFile(path, bytes);
+    expect(await new FsDurableStore({ directory: path }).inspect()).toMatchObject({ ok: false, error: { code: "UNSUPPORTED_PERSISTENCE_FORMAT" } });
+    expect(await fs.readFile(path)).toEqual(bytes);
   });
 
   it("preserves storagePath single-file behavior and recognizes legacy format without converting it", async () => {

@@ -6,14 +6,16 @@ import { STORE_SCHEMA_VERSION } from "../version.js";
 
 export const HEAD_FORMAT = "ether.store_head" as const;
 export const CHECKPOINT_FORMAT = "ether.checkpoint" as const;
-export const PERSISTENCE_VERSION = "1" as const;
+export const HEAD_VERSION = "1" as const;
+export const CHECKPOINT_VERSION = "1" as const;
+export const WAL_VERSION = "1" as const;
 export const WAL_FORMAT = "ether.wal" as const;
 export const DIGEST_ALGORITHM = "sha256" as const;
 
 /** Wire-only compatibility metadata; no changes to StoreHead or EtherSnapshot. */
 export interface PersistedStoreHead extends StoreHead {
   readonly format: typeof HEAD_FORMAT;
-  readonly version: typeof PERSISTENCE_VERSION;
+  readonly version: typeof HEAD_VERSION;
   readonly schemaVersion: typeof STORE_SCHEMA_VERSION;
   readonly digestAlgorithm: typeof DIGEST_ALGORITHM;
 }
@@ -90,9 +92,9 @@ function parseMetadata(bytes: Uint8Array, maxBytes: number, limits: PersistenceL
   }
 }
 
-function compatibility(value: Record<string, unknown>, format: string): Result<void> {
+function compatibility(value: Record<string, unknown>, format: string, version: string): Result<void> {
   if (typeof value.format !== "string" || typeof value.version !== "string") return corrupt("Missing format/version.");
-  if (value.format !== format || value.version !== PERSISTENCE_VERSION) {
+  if (value.format !== format || value.version !== version) {
     return err("UNSUPPORTED_PERSISTENCE_FORMAT", "Unsupported persistence format/version.");
   }
   if (typeof value.schemaVersion !== "string" || typeof value.digestAlgorithm !== "string") return corrupt("Missing compatibility metadata.");
@@ -104,7 +106,7 @@ function compatibility(value: Record<string, unknown>, format: string): Result<v
 
 function validateHead(value: unknown, limits: PersistenceLimits): Result<PersistedStoreHead> {
   if (!record(value)) return corrupt("HEAD must be an object.");
-  const supported = compatibility(value, HEAD_FORMAT);
+  const supported = compatibility(value, HEAD_FORMAT, HEAD_VERSION);
   if (!supported.ok) return supported;
   if (!keys(value, ["format", "version", "storeId", "epochId", "schemaVersion", "digestAlgorithm", "checkpoint", "walFormat"])
     || !identifier(value.storeId, limits) || !identifier(value.epochId, limits)
@@ -112,17 +114,17 @@ function validateHead(value: unknown, limits: PersistenceLimits): Result<Persist
     || !identifier(value.checkpoint.checkpointId, limits) || !digest(value.checkpoint.digest)
     || !record(value.walFormat) || !keys(value.walFormat, ["format", "version"])) return corrupt("Invalid HEAD structure.");
   if (typeof value.walFormat.format !== "string" || typeof value.walFormat.version !== "string") return corrupt("Invalid WAL identifier.");
-  if (value.walFormat.format !== WAL_FORMAT || value.walFormat.version !== PERSISTENCE_VERSION) {
+  if (value.walFormat.format !== WAL_FORMAT || value.walFormat.version !== WAL_VERSION) {
     return err("UNSUPPORTED_PERSISTENCE_FORMAT", "Unsupported WAL format/version.");
   }
   const checkpointTip = tip(value.checkpoint.tip, limits);
   if (!checkpointTip.ok) return checkpointTip;
   if (checkpointTip.value.epochId !== value.epochId) return corrupt("HEAD and checkpoint epochs differ.");
   // Fixed field projection defines the wire order, independently of caller insertion order.
-  return ok({ format: HEAD_FORMAT, version: PERSISTENCE_VERSION, storeId: value.storeId, epochId: value.epochId,
+  return ok({ format: HEAD_FORMAT, version: HEAD_VERSION, storeId: value.storeId, epochId: value.epochId,
     schemaVersion: STORE_SCHEMA_VERSION, digestAlgorithm: DIGEST_ALGORITHM,
     checkpoint: { checkpointId: value.checkpoint.checkpointId, digest: value.checkpoint.digest, tip: checkpointTip.value },
-    walFormat: { format: WAL_FORMAT, version: PERSISTENCE_VERSION } });
+    walFormat: { format: WAL_FORMAT, version: WAL_VERSION } });
 }
 
 export function encodeStoreHead(head: PersistedStoreHead, options: PersistenceLimitOptions = {}): Result<Uint8Array> {
@@ -155,7 +157,7 @@ export interface CheckpointMetadata {
 
 function checkpointHeader(value: unknown, limits: PersistenceLimits) {
   if (!record(value)) return corrupt("Checkpoint header must be an object.");
-  const supported = compatibility(value, CHECKPOINT_FORMAT);
+  const supported = compatibility(value, CHECKPOINT_FORMAT, CHECKPOINT_VERSION);
   if (!supported.ok) return supported;
   if (!keys(value, ["format", "version", "storeId", "checkpointId", "schemaVersion", "digestAlgorithm", "tip", "payloadBytes"])
     || !identifier(value.storeId, limits) || !identifier(value.checkpointId, limits)
@@ -163,7 +165,7 @@ function checkpointHeader(value: unknown, limits: PersistenceLimits) {
     || value.payloadBytes < 1 || value.payloadBytes > limits.checkpointPayloadBytes) return corrupt("Invalid checkpoint header.");
   const includedTip = tip(value.tip, limits);
   if (!includedTip.ok) return includedTip;
-  return ok({ format: CHECKPOINT_FORMAT, version: PERSISTENCE_VERSION, storeId: value.storeId, checkpointId: value.checkpointId,
+  return ok({ format: CHECKPOINT_FORMAT, version: CHECKPOINT_VERSION, storeId: value.storeId, checkpointId: value.checkpointId,
     schemaVersion: STORE_SCHEMA_VERSION, digestAlgorithm: DIGEST_ALGORITHM, tip: includedTip.value, payloadBytes: value.payloadBytes });
 }
 
@@ -175,7 +177,7 @@ Result<{ bytes: Uint8Array; identity: CheckpointIdentity }> {
   if (!(payload instanceof Uint8Array) || payload.byteLength === 0 || payload.byteLength > limits.value.checkpointPayloadBytes) {
     return corrupt("Checkpoint payload exceeds its byte bounds.");
   }
-  const header = checkpointHeader({ format: CHECKPOINT_FORMAT, version: PERSISTENCE_VERSION, storeId: metadata.storeId,
+  const header = checkpointHeader({ format: CHECKPOINT_FORMAT, version: CHECKPOINT_VERSION, storeId: metadata.storeId,
     checkpointId: metadata.checkpointId, schemaVersion: STORE_SCHEMA_VERSION, digestAlgorithm: DIGEST_ALGORITHM,
     tip: metadata.tip, payloadBytes: payload.byteLength }, limits.value);
   if (!header.ok) return header;

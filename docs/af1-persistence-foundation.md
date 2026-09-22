@@ -2,7 +2,7 @@
 
 This is a metadata/layout foundation, not a usable durable memory engine or a
 v0.6.0 release claim. It adds no WAL transactions, replay, memory mutations,
-compaction, migration, or Dream Cycle. The accepted Tranche 1 contracts are
+compaction, migration, or Dream Cycle. Legacy StoragePort compatibility remains
 unchanged. `FsDurableStore` deliberately does not implement `StoragePort` or
 advertise its optional `durable` operations before recovery/commit exists.
 
@@ -52,7 +52,29 @@ Inspection distinguishes `missing`, recognized `legacy-json`, and verified
 unknown required versions return `UNSUPPORTED_PERSISTENCE_FORMAT`; writer
 artifacts return `WRITER_BUSY` without stale-lock breaking; permission failures
 are `READ_ONLY_LOCKED`. Legacy detection identifies the container schema only,
-not semantic snapshot validity. Opening does not infer or enable durable mode.
+not semantic snapshot validity. Recognition requires the five-field snapshot
+container (schemaVersion, identity, memoryNotes, diary, graph) and its collection
+shapes; a schema label alone, durable envelopes, and mixed artifacts are rejected.
+Opening does not infer or enable durable mode.
+
+## AMBER Review Contract Repairs
+
+Wire/layout codecs, constants and FsDurableStore are internal module APIs, not
+package-root exports. Types needed for StoragePort.durable remain public.
+
+MutationIdentity is a store-scoped pre-commit identity: a branded MutationId
+and a digest of the canonical versioned logical mutation. The caller/coordinator
+reuses it across an ambiguous acknowledgment. DurableTransaction carries it
+separately from its WAL identity (epochId, txId, digest). Matching logical retries
+may resolve to the original committed success; incompatible mutation-ID reuse
+must fail closed with PERSISTENCE_CORRUPTION. Canonical mutation encoding and
+deduplication are contracts only; neither engine is implemented here.
+
+HEAD_VERSION, CHECKPOINT_VERSION and WAL_VERSION are independent constants, all
+currently the string 1. The pre-repair canonical HEAD/checkpoint bytes from
+328468a11164d564c3b06c15b7e36a7c80fbde42 are captured in
+tests/fixtures/persistence-wire-v1.json and compared byte-for-byte in regression
+tests. These repairs do not change that wire representation or the 8 MiB ceiling.
 
 ## HEAD Wire Contract
 

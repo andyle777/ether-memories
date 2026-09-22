@@ -6,6 +6,7 @@ import {
   type DurableTransactionIdentity, type EtherSnapshot, type PersistenceErrorCode,
   type StoragePort, type StoreHead, type TransactionSequenceId
 } from "../src/index.js";
+import type { MutationId, MutationIdentity } from "../src/index.js";
 
 class LegacyStorage implements StoragePort {
   private saved = "null";
@@ -81,6 +82,43 @@ describe("AF1 persistence contracts", () => {
     expect(sameCommittedTip(tip, { ...tip, digest: "digest-b" })).toBe(false);
     expectTypeOf<DurableTransactionIdentity>().toEqualTypeOf<CommittedTip>();
     expectTypeOf<DurableTransaction["expectedBase"]>().toEqualTypeOf<CommittedTip>();
+  });
+
+  it("separates caller mutation IDs from assigned transaction IDs at the type boundary", () => {
+    expectTypeOf<MutationId>().not.toMatchTypeOf<TransactionSequenceId>();
+    expectTypeOf<TransactionSequenceId>().not.toMatchTypeOf<MutationId>();
+    expectTypeOf<string>().not.toMatchTypeOf<MutationId>();
+    expectTypeOf<number>().not.toMatchTypeOf<MutationId>();
+    expectTypeOf<MutationIdentity>().not.toMatchTypeOf<DurableTransactionIdentity>();
+    expectTypeOf<DurableTransactionIdentity>().not.toMatchTypeOf<MutationIdentity>();
+    expectTypeOf<DurableTransaction["mutation"]>().toEqualTypeOf<MutationIdentity>();
+    expectTypeOf<Omit<DurableTransaction, "mutation">>().not.toMatchTypeOf<DurableTransaction>();
+  });
+
+  it("carries a pre-commit mutation identity unchanged into the eventual transaction contract", () => {
+    const mutation: MutationIdentity = { mutationId: "caller-command-a" as MutationId, digest: "canonical-mutation-a" };
+    expect(Object.keys(mutation).sort()).toEqual(["digest", "mutationId"]);
+    const transaction: DurableTransaction = {
+      storeId: "store-a", mutation, format: { format: "ether.wal", version: "1" },
+      expectedBase: { epochId: "epoch-a", txId: sequence("0"), digest: "genesis" },
+      identity: { epochId: "epoch-a", txId: sequence("1"), digest: "transaction-a" },
+      operations: [{ type: "test.delta", version: "1", payload: { value: "a" } }]
+    };
+    const retry = JSON.parse(JSON.stringify(transaction)) as DurableTransaction;
+    expect(retry.mutation).toEqual(mutation);
+    expect(retry.identity).toEqual(transaction.identity);
+    expect(retry.mutation.mutationId).not.toBe(retry.identity.txId);
+    expect(retry.mutation.digest).not.toBe(retry.identity.digest);
+  });
+
+  it("retains a canonical mutation fingerprint so incompatible ID reuse is distinguishable", () => {
+    const original: MutationIdentity = { mutationId: "caller-command-a" as MutationId, digest: "canonical-mutation-a" };
+    const sameCommandRetry: MutationIdentity = { ...original };
+    const incompatible: MutationIdentity = { ...original, digest: "canonical-mutation-b" };
+    expect(sameCommandRetry).toEqual(original);
+    expect(incompatible.mutationId).toBe(original.mutationId);
+    expect(incompatible.digest).not.toBe(original.digest);
+    // This asserts representability only; there is deliberately no deduplication engine.
   });
 
   it("keeps persistence authority metadata outside ordinary snapshots", () => {
