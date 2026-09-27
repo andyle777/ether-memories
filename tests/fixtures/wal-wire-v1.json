@@ -1,0 +1,94 @@
+{
+  "sourceCommit": "7584b88422c46c101120ef5eb3e3cfaaa759399f",
+  "input": {
+    "storeId": "store-wal-golden",
+    "format": {
+      "format": "ether.wal",
+      "version": "1"
+    },
+    "expectedBase": {
+      "epochId": "epoch-wal-golden",
+      "txId": "9007199254740993",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "identity": {
+      "epochId": "epoch-wal-golden",
+      "txId": "9007199254740994"
+    },
+    "mutation": {
+      "mutationId": "mutation-wal-golden",
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "operations": [
+      {
+        "type": "test.set",
+        "version": "1",
+        "payload": {
+          "text": "WAL v1 golden: exact history"
+        }
+      }
+    ],
+    "audit": null
+  },
+  "expectedBase": {
+    "epochId": "epoch-wal-golden",
+    "txId": "9007199254740993",
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "head": {
+    "format": "ether.store_head",
+    "version": "1",
+    "storeId": "store-wal-golden",
+    "epochId": "epoch-wal-golden",
+    "schemaVersion": "ether.memory_store.v0.3",
+    "digestAlgorithm": "sha256",
+    "checkpoint": {
+      "checkpointId": "checkpoint-wal-golden",
+      "digest": "298970752dc119f63fb471bfeefe9f1492d66f42b96d44bfdaae86a07c4b0c01",
+      "tip": {
+        "epochId": "epoch-wal-golden",
+        "txId": "9007199254740993",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "walFormat": {
+      "format": "ether.wal",
+      "version": "1"
+    }
+  },
+  "frameBase64": "/0VXQUwNChoAAAGgAAAAVQAAAjX///3KeyJhdWRpdCI6bnVsbCwiYmFzZSI6eyJkaWdlc3QiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiZXBvY2hJZCI6ImVwb2NoLXdhbC1nb2xkZW4iLCJ0eElkIjoiOTAwNzE5OTI1NDc0MDk5MyJ9LCJlcG9jaElkIjoiZXBvY2gtd2FsLWdvbGRlbiIsImZvcm1hdCI6ImV0aGVyLndhbCIsIm11dGF0aW9uIjp7ImRpZ2VzdCI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJtdXRhdGlvbklkIjoibXV0YXRpb24td2FsLWdvbGRlbiJ9LCJvcGVyYXRpb25Db3VudCI6MSwic3RvcmVJZCI6InN0b3JlLXdhbC1nb2xkZW4iLCJ0eElkIjoiOTAwNzE5OTI1NDc0MDk5NCIsInZlcnNpb24iOiIxIn1beyJwYXlsb2FkIjp7InRleHQiOiJXQUwgdjEgZ29sZGVuOiBleGFjdCBoaXN0b3J5In0sInR5cGUiOiJ0ZXN0LnNldCIsInZlcnNpb24iOiIxIn1dCwHxs/nc6FI5Z+T4ZI/SWfnGmjUrvIsfz9v+iR5/oLRFV0FMRE9ORQ==",
+  "byteLength": 565,
+  "transactionDigest": "0b01f1b3f9dce8523967e4f8648fd259f9c69a352bbc8b1fcfdbfe891e7fa0b4",
+  "frameSha256": "f6a40350e0def9bc00ce9b53db9d9cfd436131159efd020113dde70b98ef71b6",
+  "transaction": {
+    "storeId": "store-wal-golden",
+    "format": {
+      "format": "ether.wal",
+      "version": "1"
+    },
+    "expectedBase": {
+      "epochId": "epoch-wal-golden",
+      "txId": "9007199254740993",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "identity": {
+      "epochId": "epoch-wal-golden",
+      "txId": "9007199254740994",
+      "digest": "0b01f1b3f9dce8523967e4f8648fd259f9c69a352bbc8b1fcfdbfe891e7fa0b4"
+    },
+    "mutation": {
+      "mutationId": "mutation-wal-golden",
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "operations": [
+      {
+        "type": "test.set",
+        "version": "1",
+        "payload": {
+          "text": "WAL v1 golden: exact history"
+        }
+      }
+    ],
+    "audit": null
+  }
+}
