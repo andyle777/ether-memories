@@ -15,7 +15,7 @@ const hydrateTimestamp = (value: unknown): Date => {
   return new Date(String(value));
 };
 
-const hydrateNote = (n: any): MemoryNote => ({
+export const hydrateNote = (n: any): MemoryNote => ({
   ...n,
   tags: Array.isArray(n.tags) ? n.tags : [],
   provenance: n.provenance ?? {
@@ -31,7 +31,7 @@ const hydrateNote = (n: any): MemoryNote => ({
   expiresAt: n.expiresAt ? hydrateTimestamp(n.expiresAt) : undefined
 });
 
-const hydrateDiary = (d: any): DiaryEntry => ({
+export const hydrateDiary = (d: any): DiaryEntry => ({
   ...d,
   tags: Array.isArray(d.tags) ? d.tags : [],
   metadata: isRecord(d.metadata) ? d.metadata : {},

@@ -4,6 +4,7 @@ export * from "./utils/result.js";
 export * from "./utils/persistence.js";
 export * from "./utils/durablePersistence.js";
 export * from "./core/EtherMemories.js";
+export * from "./core/DurableEtherMemories.js";
 export * from "./core/MemoryNotes.js";
 export * from "./core/DiarySystem.js";
 export * from "./core/MindGraph.js";

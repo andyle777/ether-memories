@@ -1,5 +1,6 @@
 import type { EtherSnapshot } from "../types/index.js";
 import type { CommittedTip, MutationId, WalOperation } from "../types/persistence.js";
+import { join } from "node:path";
 import { STARTER_RELATIONS } from "../core/MindGraph.js";
 import { intentDigest, prepareCoreMutation, validatedCommand, type ProductionMutationCommand } from "./mutationPreparation.js";
 import { err, ok, type Result } from "../utils/result.js";
@@ -11,7 +12,9 @@ import { WAL_LIMITS, encodeWalFrame } from "./wal.js";
 import { FsWalStore, type CommitReceipt } from "./FsWalStore.js";
 import { withRecoveryAuthority, required, type RecoveryAuthority } from "./recoveryAuthority.js";
 import { nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
-import { nodeWalIO, type WalIO } from "./walIO.js";
+import { nodeWalIO, type WalFileHandle, type WalIO } from "./walIO.js";
+import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint } from "./codecs.js";
+import { WalFileScan } from "./walFileScan.js";
 import { snapshotData, hydrateSnapshot } from "./snapshotPayload.js";
 import { parseTransactionSequenceId } from "../utils/durablePersistence.js";
 
@@ -19,6 +22,12 @@ export const PRODUCTION_OPERATIONS = ["ether.note.put", "ether.note.remove", "et
   "ether.graph-node.put", "ether.graph-node.remove", "ether.graph-edge.put", "ether.graph-edge.remove", "ether.identity.put"] as const;
 export type ProductionOperationType = typeof PRODUCTION_OPERATIONS[number];
 export interface SemanticOperation { readonly type: ProductionOperationType; readonly version: "1"; readonly payload: unknown }
+/** Tranche 6 live-runtime commit outcome: frozen receipt plus the exact committed effect set and, for a fresh commit, the prepared post-state. */
+export interface MutationOutcome {
+  readonly receipt: CommitReceipt;
+  readonly after?: EtherSnapshot;
+  readonly effects: readonly SemanticOperation[];
+}
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 export function validateSemantic(type: string, payload: unknown): Result<void> {
   if (!PRODUCTION_OPERATIONS.includes(type as ProductionOperationType)) return err("UNSUPPORTED_PERSISTENCE_FORMAT", "Unknown production operation.");
@@ -118,10 +127,12 @@ export async function resolveOperation(operation: WalOperation, authority: Recov
 export class ProductionWalStore {
   private readonly wal: FsWalStore;
   private readonly objects: PayloadObjects;
+  private readonly files: WalIO;
   constructor(private readonly directory: string, private readonly io: DirectoryIO = nodeDirectoryIO,
     files: WalIO = nodeWalIO) {
     this.wal = new FsWalStore({ directory, registry: productionRegistry }, io, files);
     this.objects = new PayloadObjects(io, files);
+    this.files = files;
   }
   async commit(base: CommittedTip, mutationId: MutationId, input: readonly SemanticOperation[]): Promise<Result<CommitReceipt>> {
     return this.commitOperations(base, mutationId, input);
@@ -159,6 +170,90 @@ export class ProductionWalStore {
     const prepared = prepareCoreMutation(baseSnapshot, stableCommand);
     if (!prepared.ok) return prepared;
     return this.commitOperations(base, mutationId, prepared.value.operations, intent.value);
+  }
+
+  /**
+   * Tranche 6 live-runtime commit outcome. Identical durable flow to
+   * commitMutation, plus the exact committed effect set and the prepared
+   * post-state so the caller can publish and reconstruct results without a
+   * second execution. For an already-committed receipt the effects are
+   * resolved from the active WAL (see resolveCommittedEffects); `after` is
+   * absent there by construction.
+   */
+  async commitMutationDetailed(base: CommittedTip, baseSnapshot: EtherSnapshot, mutationId: MutationId,
+    command: ProductionMutationCommand): Promise<Result<MutationOutcome>> {
+    const validated = validatedCommand(command);
+    if (!validated.ok) return validated;
+    const stableCommand = validated.value;
+    const intent = intentDigest(stableCommand);
+    if (!intent.ok) return intent;
+    const found = await this.wal.readCommittedMutation(mutationId);
+    if (!found.ok) return found;
+    if (found.value) {
+      if (found.value.mutation.digest !== intent.value) {
+        return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
+      }
+      const effects = await this.resolveCommittedEffects(mutationId);
+      if (!effects.ok) return effects;
+      return ok({ receipt: found.value, effects: effects.value });
+    }
+    const prepared = prepareCoreMutation(baseSnapshot, stableCommand);
+    if (!prepared.ok) return prepared;
+    const committed = await this.commitOperations(base, mutationId, prepared.value.operations, intent.value);
+    if (!committed.ok) return committed;
+    return ok({ receipt: committed.value, after: prepared.value.after, effects: prepared.value.operations });
+  }
+
+  /**
+   * Resolve the exact committed effect set of an already-committed mutation
+   * from the active WAL of the HEAD lineage (Tranche 6 result
+   * reconstruction). Bounded single pass under writer authority; inline and
+   * object-referenced bodies resolve through the same production decode path
+   * recovery uses. No Core re-execution, no regenerated IDs/timestamps. RAM
+   * stays bounded: only the matching transaction's effects are retained.
+   */
+  async resolveCommittedEffects(mutationId: MutationId): Promise<Result<readonly SemanticOperation[]>> {
+    return withRecoveryAuthority(this.directory, this.io, async authority => {
+      const headBytes = Buffer.from(await this.io.readBounded(join(authority.directory, "HEAD"), PERSISTENCE_LIMITS.headBytes));
+      const head = required(decodeStoreHead(headBytes));
+      const checkpoint = await this.io.readBounded(join(authority.directory, "checkpoints", `checkpoint-${head.checkpoint.checkpointId}.bin`),
+        PERSISTENCE_LIMITS.checkpointHeaderBytes + 1 + PERSISTENCE_LIMITS.checkpointPayloadBytes);
+      required(verifyCheckpoint(checkpoint, head));
+      const path = join(authority.directory, "wal", `wal-${head.checkpoint.digest}.bin`);
+      const kind = await this.io.kind(path);
+      if (kind === "directory") return err("RECOVERY_REQUIRED", "Unsafe WAL path.");
+      if (kind !== "file") return err("PERSISTENCE_CORRUPTION", "Committed mutation effects absent from the active WAL.");
+      let handle: WalFileHandle | undefined;
+      const effects: SemanticOperation[] = [];
+      let seen: string | undefined;
+      try {
+        handle = await this.files.open(path, false);
+        const scan = required(await WalFileScan.open(path, handle, head, productionRegistry, this.files,
+          { mode: "authority-held", verifyAuthority: authority.verify }));
+        let cursor = scan.cursor();
+        do {
+          const batch = required(await scan.next(cursor));
+          cursor = batch.continuation;
+          for (const tx of batch.transactions) {
+            if (tx.mutation.mutationId !== mutationId) continue;
+            if (seen !== undefined && tx.identity.txId !== seen) {
+              return err("PERSISTENCE_CORRUPTION", "Mutation identity reused by distinct committed transactions.");
+            }
+            seen = tx.identity.txId;
+            for (const operation of tx.operations) {
+              const semantic = required(await resolveOperation(operation, authority, this.objects));
+              effects.push({ type: operation.type as ProductionOperationType, version: "1", payload: semantic });
+            }
+          }
+        } while (!cursor.ended);
+      } finally {
+        if (handle) await handle.close();
+      }
+      if (seen === undefined || effects.length === 0) {
+        return err("PERSISTENCE_CORRUPTION", "Committed mutation effects absent from the active WAL.");
+      }
+      return ok(effects);
+    });
   }
 
   private async commitOperations(base: CommittedTip, mutationId: MutationId, input: readonly SemanticOperation[],
