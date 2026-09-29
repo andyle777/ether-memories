@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import type { PersistenceErrorCode } from "../types/persistence.js";
 
 export class DirectoryIoError extends Error {
-  constructor(readonly code: PersistenceErrorCode, message: string) { super(message); }
+  readonly details?: unknown;
+  constructor(readonly code: PersistenceErrorCode, message: string, details?: unknown) {
+    super(message);
+    this.details = details;
+  }
 }
 
 /** Internal trusted backend boundary. Tests may replace operations, not capability booleans. */

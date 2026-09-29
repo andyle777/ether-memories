@@ -25,3 +25,17 @@ it("does not publish internal persistence wire or layout operations at the packa
   expect(publicApi.parseTransactionSequenceId("1").ok).toBe(true);
   expect(typeof publicApi.getDurableOperations).toBe("function");
 });
+
+it("does not publish snapshot preparation or any internal persistence helper at the package root", () => {
+  // The moved snapshot-preparation helper and every other internal helper it
+  // lives beside must stay unreachable from the public root.
+  for (const name of ["prepareSnapshot", "commitSnapshot", "persistedSnapshot", "hydrateSnapshot",
+    "encodeSnapshotPayload", "decodeSnapshotPayload", "decodeLegacySnapshotPayload", "snapshotData",
+    "SNAPSHOT_PAYLOAD_PROFILE", "reduceProduction", "resolveOperation", "validateCandidate",
+    "productionRegistry", "ProductionWalStore", "StartupRecovery", "DiskBackedMutationIndex",
+    "PayloadObjects", "prepareCoreMutation", "encodeEtherData", "decodeEtherData", "ETHER_DATA_PROFILE",
+    "foundationNoteNode", "foundationDerivedEdge", "normalizeGraphRelationship", "normalizeSnapshotGraph"]) {
+    expect(Object.hasOwn(publicApi, name), name).toBe(false);
+    expect((publicApi as Record<string, unknown>)[name], name).toBeUndefined();
+  }
+});
