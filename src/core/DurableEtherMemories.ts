@@ -208,7 +208,7 @@ class DurableRuntime implements DurableEtherMemories {
    * parameters are internal injection points for protocol testing.
    */
   static async open(options: DurableEtherMemoriesOptions, io: DirectoryIO = nodeDirectoryIO,
-    files: WalIO = nodeWalIO, indexDiskBytes: number = DEFAULT_MAX_INDEX_BYTES): Promise<Result<DurableEtherMemories>> {
+    files: WalIO = nodeWalIO, indexDiskBytes: number = DEFAULT_MAX_INDEX_BYTES): Promise<Result<DurableRuntime>> {
     if (!record(options) || typeof options.userId !== "string" || !options.userId.trim()) {
       return err("INVALID_INPUT", "A non-empty userId is required.");
     }
@@ -274,8 +274,8 @@ class DurableRuntime implements DurableEtherMemories {
     return ok({ ...generation.tip });
   }
 
-  /** Committed-generation reads remain available in every non-closed state. */
-  private readable(): Result<StateRoot> {
+/** Committed-generation reads remain available in every non-closed state. */
+  #readable(): Result<StateRoot> {
     if (this.#lifecycle === "closed" || !this.#generation) {
       return err("CLOSED", "This durable runtime is closed.");
     }
@@ -283,13 +283,13 @@ class DurableRuntime implements DurableEtherMemories {
   }
 
   queryMemories(text: string, options?: QueryOptions): Result<MemoryNote[]> {
-    const generation = this.readable();
+    const generation = this.#readable();
     if (!generation.ok) return generation;
     return ok(generation.value.retriever.query(text, options).map(x => cloneValue(x.memory)));
   }
 
   queryMemoriesDetailed(text: string, options?: QueryOptions): Result<RetrievalMatch[]> {
-    const generation = this.readable();
+    const generation = this.#readable();
     if (!generation.ok) return generation;
     return ok(generation.value.retriever.query(text, options).map(x => ({
       ...cloneValue(x),
@@ -301,7 +301,7 @@ class DurableRuntime implements DurableEtherMemories {
   }
 
   buildMemoryContext(input: BuildMemoryContextInput): Result<MemoryContext> {
-    const generation = this.readable();
+    const generation = this.#readable();
     if (!generation.ok) return generation;
     try {
       return ok(new MemoryContextBuilder(LIBRARY_VERSION, generation.value.snapshot.identity.userId,
@@ -313,13 +313,13 @@ class DurableRuntime implements DurableEtherMemories {
   }
 
   getSystemState(): Result<UserIdentity> {
-    const generation = this.readable();
+    const generation = this.#readable();
     if (!generation.ok) return generation;
     return ok(cloneValue(generation.value.snapshot.identity));
   }
 
   exportData(): Result<EtherSnapshot> {
-    const generation = this.readable();
+    const generation = this.#readable();
     if (!generation.ok) return generation;
     return ok(cloneValue(generation.value.snapshot));
   }
@@ -462,12 +462,49 @@ class DurableRuntime implements DurableEtherMemories {
   }
 }
 
+/**
+ * The object returned to callers is NEVER the implementation instance: it is
+ * a frozen plain-object facade whose members are closures over the internal
+ * implementation. No property, symbol, descriptor, prototype or constructor
+ * path leads from the facade back to the implementation, its #private state,
+ * the store, injected I/O dependencies, or any bootstrap/open capability.
+ * The only reachable functionality is the approved public API returning
+ * detached data. The facade is created only after approved inspection/
+ * bootstrap and successful startup recovery: no public runtime object can
+ * exist in a false ready state.
+ */
+const createFacade = (implementation: DurableRuntime): DurableEtherMemories => Object.freeze({
+  get state(): DurableRuntimeState { return implementation.state; },
+  get tip(): Result<CommittedTip> { return implementation.tip; },
+  queryMemories: (text: string, options?: QueryOptions): Result<MemoryNote[]> => implementation.queryMemories(text, options),
+  queryMemoriesDetailed: (text: string, options?: QueryOptions): Result<RetrievalMatch[]> => implementation.queryMemoriesDetailed(text, options),
+  buildMemoryContext: (input: BuildMemoryContextInput): Result<MemoryContext> => implementation.buildMemoryContext(input),
+  getSystemState: (): Result<UserIdentity> => implementation.getSystemState(),
+  exportData: (): Result<EtherSnapshot> => implementation.exportData(),
+  addMemory: (input: AddNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.addMemory(input, mutationId),
+  updateMemory: (id: string, patch: UpdateNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.updateMemory(id, patch, mutationId),
+  promoteCandidate: (id: string, mutationId: string): Promise<Result<MemoryNote>> => implementation.promoteCandidate(id, mutationId),
+  deleteMemory: (id: string, mutationId: string): Promise<Result<void>> => implementation.deleteMemory(id, mutationId),
+  addDiaryEntry: (input: AddDiaryInput, mutationId: string): Promise<Result<DiaryEntry>> => implementation.addDiaryEntry(input, mutationId),
+  updateDiary: (id: string, patch: Partial<Omit<DiaryEntry, "id" | "createdAt" | "updatedAt">>, mutationId: string): Promise<Result<DiaryEntry>> => implementation.updateDiary(id, patch, mutationId),
+  deleteDiary: (id: string, mutationId: string): Promise<Result<void>> => implementation.deleteDiary(id, mutationId),
+  addGraphEdge: (id: string, source: string, target: string, relationship: string,
+    data: Record<string, unknown>, mutationId: string): Promise<Result<MindGraphEdge>> =>
+    implementation.addGraphEdge(id, source, target, relationship, data, mutationId),
+  recover: (): Promise<Result<DurableRecoveryReceipt>> => implementation.recover(),
+  close: (): Promise<Result<void>> => implementation.close()
+});
+
+/** Wrap the internal implementation result in the public facade. */
+const withFacade = (opened: Promise<Result<DurableRuntime>>): Promise<Result<DurableEtherMemories>> =>
+  opened.then(result => result.ok ? ok(createFacade(result.value)) : result);
+
 /** Public durable factory: only supported user configuration; no injection points. */
 export const openDurableEtherMemories = (options: DurableEtherMemoriesOptions): Promise<Result<DurableEtherMemories>> =>
-  DurableRuntime.open(options);
+  withFacade(DurableRuntime.open(options));
 
 /** Internal test factory with protocol-testing dependency injection; never exported from the package root. */
 export const openDurableEtherMemoriesInternal = (options: DurableEtherMemoriesOptions,
   dependencies: DurableDependencies = {}): Promise<Result<DurableEtherMemories>> =>
-  DurableRuntime.open(options, dependencies.io ?? nodeDirectoryIO, dependencies.files ?? nodeWalIO,
-    dependencies.indexDiskBytes ?? DEFAULT_MAX_INDEX_BYTES);
+  withFacade(DurableRuntime.open(options, dependencies.io ?? nodeDirectoryIO, dependencies.files ?? nodeWalIO,
+    dependencies.indexDiskBytes ?? DEFAULT_MAX_INDEX_BYTES));

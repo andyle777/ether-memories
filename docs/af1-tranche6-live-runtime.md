@@ -78,18 +78,24 @@ independent recovery derives.
 
 The durable runtime does NOT expose the legacy mutable module references
 (`notes`, `diary`, `graph`, `linker`, `condensation`): state changes only
-through the durable path. This is enforced at RUNTIME, not just at compile
-time: every internal field of the runtime (canonical generation, store,
-lifecycle, queue, directory, identity, injected I/O dependencies) is an
-ECMAScript `#private` field, so no own property, key, descriptor or prototype
-route on the public object can reach the canonical generation or its mutable
-modules — a caller cannot do `runtime.generation.notes.add(...)` because
-`runtime.generation` does not exist. Reads (`queryMemories`,
-`queryMemoriesDetailed`, `buildMemoryContext`, `getSystemState`, `exportData`)
-serve the committed generation with legacy-shaped results, and returned values
-are deep clones: mutating any returned result never changes canonical state or
-WAL (asserted by permanent tests, including a bounded object-graph escape
-scan).
+through the durable path. This is enforced architecturally, not just at
+compile time: the object returned to callers is a frozen plain-object FACADE —
+never the implementation instance. Its members are closures over a completely
+internal implementation class whose every field is an ECMAScript `#private`
+field (canonical generation, store, lifecycle, queue, directory, identity,
+injected I/O dependencies). No property, symbol, descriptor, prototype or
+constructor path leads from the facade back to the implementation:
+`runtime.constructor` resolves to the harmless `Object`; there is no
+`readable()`, no `generation`, no store, no injected-I/O handle and no
+bootstrap/open capability reachable from the public object. The facade is
+created only after approved inspection/bootstrap and successful startup
+recovery: no public runtime object can exist in a false ready state. Reads
+(`queryMemories`, `queryMemoriesDetailed`, `buildMemoryContext`,
+`getSystemState`, `exportData`) serve the committed generation with
+legacy-shaped results, and returned values are deep clones: mutating any
+returned result never changes canonical state or WAL (asserted by permanent
+tests, including Codex's exact prototype-method and constructor attacks and a
+bounded object-graph escape scan).
 
 ## Mutation identity (required)
 

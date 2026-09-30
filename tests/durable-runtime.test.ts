@@ -539,7 +539,7 @@ describe("durable runtime runtime-enforced encapsulation (final RED)", { timeout
     return { s, runtime };
   };
 
-  it("no own property, key, or descriptor exposes authoritative internals", async () => {
+  it("own properties are exactly the approved public API; no authoritative internals", async () => {
     const { s, runtime } = await open();
     expect("generation" in runtime).toBe(false);
     expect((runtime as unknown as Record<string, unknown>).generation).toBeUndefined();
@@ -548,10 +548,21 @@ describe("durable runtime runtime-enforced encapsulation (final RED)", { timeout
       expect(Object.hasOwn(runtime, name), name).toBe(false);
       expect((runtime as unknown as Record<string, unknown>)[name], name).toBeUndefined();
     }
-    expect(Object.getOwnPropertyNames(runtime)).toEqual([]);
-    expect(Object.keys(runtime)).toEqual([]);
-    expect(Reflect.ownKeys(runtime)).toEqual([]);
-    expect(Object.getOwnPropertyDescriptors(runtime)).toEqual({});
+    // The facade owns exactly the approved public surface - nothing else.
+    const approved = ["state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
+      "getSystemState", "exportData", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
+      "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "recover", "close"].sort();
+    expect(Object.getOwnPropertyNames(runtime).sort()).toEqual(approved);
+    expect(Object.keys(runtime).sort()).toEqual(approved);
+    expect(Reflect.ownKeys(runtime).sort()).toEqual(approved);
+    expect(Object.getOwnPropertySymbols(runtime)).toEqual([]);
+    for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(runtime))) {
+      if (typeof descriptor.get === "function" || typeof descriptor.set === "function") {
+        expect(isAuthoritative((runtime as unknown as Record<string, unknown>)[name]), `accessor ${name}`).toBe(false);
+      } else {
+        expect(typeof descriptor.value, `member ${name}`).toBe("function");
+      }
+    }
     // The canonical committed state is reachable only through the public API.
     expect(value(runtime.exportData()).memoryNotes.some(n => n.content === "encapsulation committed note")).toBe(true);
     value(await runtime.close());
@@ -610,6 +621,74 @@ describe("durable runtime runtime-enforced encapsulation (final RED)", { timeout
       expect(scanForAuthoritative(value, 0, new Set()), "public surface object graph").toHaveLength(0);
     }
     value(await runtime.close());
+  });
+
+  it("Codex RED A regression: no readable() or any StateRoot-returning member exists", async () => {
+    const { s, runtime } = await open();
+    expect((runtime as unknown as Record<string, unknown>).readable).toBeUndefined();
+    expect("readable" in runtime).toBe(false);
+    expect((runtime as unknown as Record<string, unknown>)["readable"]).toBeUndefined();
+    const walBefore = await walBytes(s.directory);
+    const canonical = value(encodeSnapshotSnapshot(runtime));
+    const previousAttack = (runtime as unknown as { readable?: () => { value?: { notes?: { add(input: unknown): unknown } } } }).readable?.().value?.notes?.add;
+    expect(previousAttack).toBeUndefined();
+    // No own/prototype function may return the canonical generation.
+    for (const name of Object.getOwnPropertyNames(runtime)) {
+      const member = (runtime as unknown as Record<string, unknown>)[name];
+      if (typeof member === "function") {
+        expect(isAuthoritative(member), `member ${name}`).toBe(false);
+      }
+    }
+    expect(value(encodeSnapshotSnapshot(runtime))).toEqual(canonical);
+    expect(await walBytes(s.directory)).toBe(walBefore);
+    value(await runtime.close());
+  });
+
+  it("Codex RED B regression: the prototype constructor is harmless and exposes no internal controls", async () => {
+    const { runtime } = await open();
+    const prototype = Object.getPrototypeOf(runtime);
+    expect(prototype).toBe(Object.prototype);
+    const constructor = (prototype as { constructor?: unknown }).constructor;
+    expect(constructor).toBe(Object);
+    const hostile = constructor as unknown as Record<string, unknown>;
+    expect(hostile.open).toBeUndefined();
+    expect(hostile.bootstrap).toBeUndefined();
+    expect(Object.getOwnPropertyNames(hostile).some(name => /durable|runtime|wal|store|bootstrap/i.test(name))).toBe(false);
+    // Codex's Windows bypass attempt: no route from the public runtime object
+    // to injected I/O, bootstrap, or a ready-state construction bypass.
+    expect((runtime as unknown as Record<string, unknown>).io).toBeUndefined();
+    expect((runtime as unknown as Record<string, unknown>).files).toBeUndefined();
+    const attempted = (runtime as unknown as { constructor?: { open?: unknown; bootstrap?: unknown } }).constructor;
+    expect(attempted?.open).toBeUndefined();
+    expect(attempted?.bootstrap).toBeUndefined();
+    value(await runtime.close());
+  });
+
+  it("the public factory fails closed on Windows native durability with no escape route", async () => {
+    const { directory } = await fresh();
+    if (process.platform === "win32") {
+      const refused = await openDurableEtherMemories({ userId: "u", directory });
+      expect(refused.ok).toBe(false);
+      const error = failure(refused);
+      expect(error.code).toBe("DURABILITY_UNAVAILABLE");
+      // The failed result carries no injected or injectable I/O capability.
+      expect(scanForAuthoritative(error.details, 0, new Set())).toHaveLength(0);
+    }
+  });
+
+  it("public methods remain callable detached from the facade object", async () => {
+    const { s, runtime } = await open();
+    const add = runtime.addMemory;
+    const query = runtime.queryMemories;
+    const note = value(await add({ content: "detached method call note" }, "enc-detached-1"));
+    expect(note.content).toBe("detached method call note");
+    expect(value(query("detached method call", { asOf: 0 })).some(n => n.id === note.id)).toBe(true);
+    // A fresh accessor read reflects the committed tip.
+    expect(BigInt(value(runtime.tip).txId)).toBeGreaterThan(BigInt("9007199254740993"));
+    const close = runtime.close;
+    value(await close());
+    expect(failure(await runtime.exportData()).code).toBe("CLOSED");
+    void s;
   });
 
   it("public read results remain fully detached, including memory context", async () => {

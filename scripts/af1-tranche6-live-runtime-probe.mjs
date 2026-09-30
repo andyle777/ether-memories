@@ -56,15 +56,21 @@ try {
   const directory = join(parent, "store");
   const runtime = value(await openDurableEtherMemoriesInternal({ userId, directory }, { io, files }));
   assert.equal(runtime.state, "ready");
-  // Final RED gate: runtime-enforced encapsulation. The canonical internals
-  // are ECMAScript #private fields: no own property, key or descriptor exists
-  // on the public object at runtime, and no route reaches the generation.
+  // Final RED gates: the public object is a frozen facade over the internal
+  // implementation. It owns exactly the approved public API; no route reaches
+  // the implementation, its #private state, injected I/O, or bootstrap.
   assert.equal("generation" in runtime, false);
   assert.equal(runtime.generation, undefined);
   assert.equal(runtime.store, undefined);
-  assert.deepEqual(Object.getOwnPropertyNames(runtime), []);
-  assert.deepEqual(Object.keys(runtime), []);
-  assert.deepEqual(Reflect.ownKeys(runtime), []);
+  assert.equal(runtime.readable, undefined);
+  assert.equal(Object.getPrototypeOf(runtime), Object.prototype);
+  assert.equal(Object.getPrototypeOf(runtime).constructor, Object);
+  assert.equal(Object.getPrototypeOf(runtime).constructor.open, undefined);
+  const approvedNames = ["state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
+    "getSystemState", "exportData", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
+    "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "recover", "close"].sort();
+  assert.deepEqual(Object.getOwnPropertyNames(runtime).sort(), approvedNames);
+  assert.deepEqual(Reflect.ownKeys(runtime).sort(), approvedNames);
   assert.equal(value(runtime.exportData()).memoryNotes.length, 0);
   assert.equal(value(runtime.tip).txId, "9007199254740993");
 
