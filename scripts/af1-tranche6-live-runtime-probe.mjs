@@ -23,7 +23,9 @@ const io = simulate ? { ...nodeDirectoryIO, syncDirectory: async () => {},
 // from the root.
 for (const name of ["openDurableEtherMemoriesInternal", "DurableDependencies", "StartupRecovery", "ProductionWalStore",
   "FsDurableStore", "FsWalStore", "DiskBackedMutationIndex", "prepareCoreMutation", "reduceProduction",
-  "buildStateRoot", "validateStateRoot", "attachTip", "resolveCommittedEffects", "StateRoot"]) {
+  "buildStateRoot", "validateStateRoot", "attachTip", "resolveCommittedEffects", "StateRoot",
+  "rotateDurableStore", "RotationInstrumentation", "ReceiptLedgerReader", "MutationHistoryVerifier",
+  "MAX_ACTIVE_WAL_BYTES"]) {
   assert.equal(name in publicApi, false, `package root must not export ${name}`);
 }
 assert.equal(typeof publicApi.openDurableEtherMemories, "function");
@@ -33,11 +35,12 @@ assert.equal(typeof publicApi.createMutationId, "function");
 // mention internal persistence types or test-injection controls.
 const rootDeclarations = await fs.readFile(new URL("../dist/index.d.ts", import.meta.url), "utf8");
 for (const forbidden of ["DirectoryIO", "WalIO", "indexDiskBytes", "openDurableEtherMemoriesInternal",
-  "StartupRecovery", "ProductionWalStore", "StateRoot", "DurableDependencies", "prepareCoreMutation"]) {
+  "StartupRecovery", "ProductionWalStore", "StateRoot", "DurableDependencies", "prepareCoreMutation",
+  "rotateDurableStore", "ReceiptLedgerReader", "MutationHistoryVerifier", "MAX_ACTIVE_WAL_BYTES"]) {
   assert.equal(rootDeclarations.includes(forbidden), false, `package-root declarations must not mention ${forbidden}`);
 }
 for (const required of ["openDurableEtherMemories", "createMutationId", "DurableEtherMemoriesOptions",
-  "DurableRuntimeState", "DurableEtherMemories", "DurableRecoveryReceipt"]) {
+  "DurableRuntimeState", "DurableEtherMemories", "DurableRecoveryReceipt", "DurableRotationSummary"]) {
   assert.equal(rootDeclarations.includes(required), true, `package-root declarations must declare ${required}`);
 }
 
@@ -68,7 +71,7 @@ try {
   assert.equal(Object.getPrototypeOf(runtime).constructor.open, undefined);
   const approvedNames = ["state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
     "getSystemState", "exportData", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
-    "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "recover", "close"].sort();
+    "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "recover", "close"].sort();
   assert.deepEqual(Object.getOwnPropertyNames(runtime).sort(), approvedNames);
   assert.deepEqual(Reflect.ownKeys(runtime).sort(), approvedNames);
   assert.equal(value(runtime.exportData()).memoryNotes.length, 0);

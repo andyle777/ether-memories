@@ -48,6 +48,7 @@ import type { ProductionMutationCommand } from "../persistence/mutationPreparati
 import { attachTip, type StateRoot } from "../persistence/stateRoot.js";
 import { encodeSnapshotPayload } from "../persistence/snapshotPayload.js";
 import { DEFAULT_MAX_INDEX_BYTES } from "../persistence/recoveryMutationIndex.js";
+import { rotateDurableStore, MAX_ACTIVE_WAL_BYTES } from "../persistence/checkpointRotation.js";
 import { nodeDirectoryIO, type DirectoryIO } from "../persistence/directoryIO.js";
 import { nodeWalIO, type WalIO } from "../persistence/walIO.js";
 import { DIGEST_ALGORITHM, HEAD_FORMAT, HEAD_VERSION, encodeCheckpoint, type PersistedStoreHead } from "../persistence/codecs.js";
@@ -80,6 +81,20 @@ export interface DurableRecoveryReceipt {
 }
 
 /**
+ * Public rotation summary (Tranche 7). The published generation - state and
+ * committed tip - is IDENTICAL before and after a successful rotation; only
+ * the durable lineage (checkpoint, receipt ledger, active WAL segment)
+ * changes.
+ */
+export interface DurableRotationSummary {
+  readonly newCheckpointId: string;
+  readonly newCheckpointDigest: string;
+  readonly ledgerDigest: string;
+  readonly retiredWalBytes: number;
+  readonly receiptCount: number;
+}
+
+/**
  * Public durable runtime surface. Only supported user-facing types appear
  * here; internal persistence types are deliberately absent.
  */
@@ -100,6 +115,7 @@ export interface DurableEtherMemories {
   deleteDiary(id: string, mutationId: string): Promise<Result<void>>;
   addGraphEdge(id: string, source: string, target: string, relationship: string,
     data: Record<string, unknown>, mutationId: string): Promise<Result<MindGraphEdge>>;
+  rotate(): Promise<Result<DurableRotationSummary>>;
   recover(): Promise<Result<DurableRecoveryReceipt>>;
   close(): Promise<Result<void>>;
 }
@@ -120,6 +136,7 @@ export interface DurableDependencies {
   readonly io?: DirectoryIO;
   readonly files?: WalIO;
   readonly indexDiskBytes?: number;
+  readonly maxActiveWalBytes?: number;
 }
 
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -193,13 +210,14 @@ class DurableRuntime implements DurableEtherMemories {
   readonly #files: WalIO;
   readonly #indexDiskBytes: number;
 
-  constructor(directory: string, userId: string, io: DirectoryIO, files: WalIO, indexDiskBytes: number) {
+  constructor(directory: string, userId: string, io: DirectoryIO, files: WalIO, indexDiskBytes: number,
+    maxActiveWalBytes: number) {
     this.#directory = directory;
     this.#userId = userId;
     this.#io = io;
     this.#files = files;
     this.#indexDiskBytes = indexDiskBytes;
-    this.#store = new ProductionWalStore(directory, io, files);
+    this.#store = new ProductionWalStore(directory, io, files, maxActiveWalBytes);
   }
 
   /**
@@ -208,7 +226,8 @@ class DurableRuntime implements DurableEtherMemories {
    * parameters are internal injection points for protocol testing.
    */
   static async open(options: DurableEtherMemoriesOptions, io: DirectoryIO = nodeDirectoryIO,
-    files: WalIO = nodeWalIO, indexDiskBytes: number = DEFAULT_MAX_INDEX_BYTES): Promise<Result<DurableRuntime>> {
+    files: WalIO = nodeWalIO, indexDiskBytes: number = DEFAULT_MAX_INDEX_BYTES,
+    maxActiveWalBytes: number = MAX_ACTIVE_WAL_BYTES): Promise<Result<DurableRuntime>> {
     if (!record(options) || typeof options.userId !== "string" || !options.userId.trim()) {
       return err("INVALID_INPUT", "A non-empty userId is required.");
     }
@@ -231,7 +250,7 @@ class DurableRuntime implements DurableEtherMemories {
       const bootstrapped = await DurableRuntime.bootstrap(options, io);
       if (!bootstrapped.ok) return bootstrapped;
     }
-    const runtime = new DurableRuntime(options.directory, options.userId, io, files, indexDiskBytes);
+    const runtime = new DurableRuntime(options.directory, options.userId, io, files, indexDiskBytes, maxActiveWalBytes);
     const recovered = await runtime.recover();
     if (!recovered.ok) return recovered;
     return ok(runtime);
@@ -357,6 +376,55 @@ class DurableRuntime implements DurableEtherMemories {
     data: Record<string, unknown>, mutationId: string): Promise<Result<MindGraphEdge>> {
     return this.runMutation(mutationId, { kind: "graph-edge.put", id, source, target, relationship, data },
       effects => selectEdgeEffect(effects, id));
+  }
+
+  /**
+   * Explicit checkpoint rotation (Tranche 7): write a new checkpoint from the
+   * exact committed tip, durably preserve the retiring WAL segment's mutation
+   * receipts in the cumulative receipt ledger, activate the new anchored
+   * lineage and reclaim the retired WAL. The published generation (state and
+   * tip) is IDENTICAL before and after a successful rotation. Rotation
+   * serializes behind the same single-flight queue as mutations: queued
+   * mutations run either entirely before or entirely after it, and reads
+   * continue from the current immutable generation throughout.
+   */
+  async rotate(): Promise<Result<DurableRotationSummary>> {
+    return this.enqueue(async () => {
+      if (this.#lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
+      const generation = this.#generation;
+      if (this.#lifecycle !== "ready" || !generation) {
+        return err("RECOVERY_REQUIRED", "Recovery is required before rotation.");
+      }
+      const outcome = await rotateDurableStore({
+        directory: this.#directory,
+        generation: { bytes: generation.bytes, tip: generation.tip },
+        io: this.#io,
+        files: this.#files
+      });
+      if (outcome.ok) {
+        return ok({
+          newCheckpointId: outcome.value.newCheckpointId,
+          newCheckpointDigest: outcome.value.newCheckpointDigest,
+          ledgerDigest: outcome.value.ledgerDigest,
+          retiredWalBytes: outcome.value.retiredWalBytes,
+          receiptCount: outcome.value.receiptCount
+        });
+      }
+      const details = record(outcome.error.details) ? outcome.error.details : {};
+      if (details.activated === true) {
+        // P6 already committed the new lineage: pending cleanup must never be
+        // reported as if the old lineage were still authoritative. The
+        // published generation is unchanged and remains exactly correct.
+        return err(outcome.error.code, outcome.error.message, { ...details, rotationCommitted: true });
+      }
+      // Same staleness semantics as durable mutations: a recovery-requiring
+      // failure means the runtime can no longer prove its generation matches
+      // durable history; the caller recovers explicitly and retries.
+      if (outcome.error.code === "RECOVERY_REQUIRED" || outcome.error.code === "STALE_TRANSACTION_BASE") {
+        this.#lifecycle = "recovery-required";
+      }
+      return outcome;
+    });
   }
 
   /**
@@ -491,6 +559,7 @@ const createFacade = (implementation: DurableRuntime): DurableEtherMemories => O
   addGraphEdge: (id: string, source: string, target: string, relationship: string,
     data: Record<string, unknown>, mutationId: string): Promise<Result<MindGraphEdge>> =>
     implementation.addGraphEdge(id, source, target, relationship, data, mutationId),
+  rotate: (): Promise<Result<DurableRotationSummary>> => implementation.rotate(),
   recover: (): Promise<Result<DurableRecoveryReceipt>> => implementation.recover(),
   close: (): Promise<Result<void>> => implementation.close()
 });
@@ -507,4 +576,4 @@ export const openDurableEtherMemories = (options: DurableEtherMemoriesOptions): 
 export const openDurableEtherMemoriesInternal = (options: DurableEtherMemoriesOptions,
   dependencies: DurableDependencies = {}): Promise<Result<DurableEtherMemories>> =>
   withFacade(DurableRuntime.open(options, dependencies.io ?? nodeDirectoryIO, dependencies.files ?? nodeWalIO,
-    dependencies.indexDiskBytes ?? DEFAULT_MAX_INDEX_BYTES));
+    dependencies.indexDiskBytes ?? DEFAULT_MAX_INDEX_BYTES, dependencies.maxActiveWalBytes ?? MAX_ACTIVE_WAL_BYTES));
