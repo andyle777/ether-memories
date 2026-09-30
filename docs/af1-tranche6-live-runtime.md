@@ -2,7 +2,9 @@
 
 This document records the Tranche 6 architecture: the frozen T1–T5 persistence
 machinery made usable by the actual live runtime, without changing any frozen
-persistence wire semantics.
+persistence wire semantics. It includes the post-review RED repairs
+(precommit complete-post-state validation, explicit mutation identity,
+cross-runtime race reconciliation and a clean public declaration surface).
 
 ## Scope (approved)
 
@@ -18,9 +20,18 @@ native Windows durability claim.
 - `openDurableEtherMemories(options)` — explicit asynchronous durable factory.
   Legacy `new EtherMemoriesCore(...)` with `StoragePort`/`storagePath` is
   untouched; durable mode is opt-in and structurally distinct.
-- `DurableEtherMemories` — the durable runtime class. The frozen persistence
-  machinery beneath (`StartupRecovery`, `ProductionWalStore`,
-  `prepareCoreMutation`, …) remains unexported from the package root.
+- `createMutationId(): string` — narrow convenience helper that generates the
+  CALLER's stable logical mutation identity before the durable operation is
+  invoked. The runtime never generates an invisible identity on the caller's
+  behalf: total-ACK-loss idempotency is only possible for an identity the
+  caller already possessed.
+- `DurableEtherMemories` — the public runtime interface (methods, state, tip).
+  The implementing class, the frozen persistence machinery beneath
+  (`StartupRecovery`, `ProductionWalStore`, `prepareCoreMutation`, …) and every
+  protocol-testing injection point (`openDurableEtherMemoriesInternal`,
+  `DirectoryIO`/`WalIO` dependencies, recovery-index byte budget) are internal
+  and absent from the package-root declarations; the T6 probe inspects the
+  generated `dist/index.d.ts` to prove it.
 - `DurableRuntimeState` is the public observable lifecycle:
   `ready | recovery-required | closed`. "Opening" is factory-internal; no
   runtime object escapes before authoritative recovery succeeds.
@@ -59,36 +70,77 @@ authority. No live optimistic mutation and no rollback path exists: the live
 Core object only ever executes inside `prepareCoreMutation`'s detached
 ephemeral Core (frozen T5 semantics).
 
-Recovery and live publication construct generations through the one shared
-`buildStateRoot` path (extracted from `StartupRecovery`), so they cannot drift.
-The T6 probe proves it: the live-published snapshot payload bytes and tip are
-byte-identical to what an independent recovery derives.
+Recovery, live publication and PRECOMMIT VALIDATION all construct generations
+through the one shared `validateStateRoot` path (extracted from
+`StartupRecovery`), so they cannot drift. The T6 probe proves it: the
+live-published snapshot payload bytes and tip are byte-identical to what an
+independent recovery derives.
 
 The durable runtime does NOT expose the legacy mutable module references
 (`notes`, `diary`, `graph`, `linker`, `condensation`): state changes only
 through the durable path. Reads (`queryMemories`, `queryMemoriesDetailed`,
 `buildMemoryContext`, `getSystemState`, `exportData`) serve the committed
-generation with legacy-shaped results.
+generation with legacy-shaped results. Returned values are deep clones:
+mutating any returned result never changes canonical state or WAL (asserted by
+permanent tests).
+
+## Mutation identity (required)
+
+Every durable mutator takes a REQUIRED caller-stable logical mutation ID:
+`addMemory(input, mutationId)`, `updateMemory(id, patch, mutationId)`,
+`promoteCandidate(id, mutationId)`, `deleteMemory(id, mutationId)`,
+`addDiaryEntry(input, mutationId)`, `updateDiary(id, patch, mutationId)`,
+`deleteDiary(id, mutationId)`, `addGraphEdge(..., mutationId)`. A missing or
+empty identity fails with `INVALID_INPUT` and nothing is attempted.
+
+The identity is captured exactly once at the public boundary and never
+regenerated; ambiguous outcomes surface it in error details for an exact
+retry. Caller mutation identity remains distinct from WAL transaction identity
+(frozen T5 distinction). Two intentionally different identities are two logical
+commands and commit two transactions.
 
 ## Mutation sequence
 
 ```
 ready state, else predictable failure
-  -> capture mutationId exactly once (caller-provided or created at this boundary)
+  -> capture the caller's required mutationId
   -> in-process single-flight slot
   -> base = committed tip; base snapshot = committed generation
   -> ProductionWalStore.commitMutationDetailed
+       command validation / intent digest / detached preparation /
+       precommit complete-post-state validation      (all pure precommit)
        already-committed (same intent) -> committed effect set from the active WAL
        conflicting intent             -> PERSISTENCE_CORRUPTION, nothing changes
-       absent                          -> detached preparation -> payload-object
-                                          durability when required -> WAL commit
-  -> buildStateRoot(prepared post-state, committed tip)
-  -> single synchronous publication assignment
+       absent                          -> payload-object durability when
+                                          required -> WAL commit
+  -> publication of the prevalidated generation with the exact committed tip
   -> legacy-shaped result reconstructed from the exact committed effects
 ```
 
 Durability precedes visibility. A failed durable mutation leaves the published
 committed generation completely unchanged, including every derived index.
+
+### Precommit complete-post-state validation (RED 1)
+
+No transaction may become durable if its complete deterministic post-state
+cannot be reconstructed and published by startup recovery; individual
+WAL-operation validity is insufficient. After detached preparation produces the
+complete AFTER snapshot and BEFORE payload-object durability or WAL authority
+can advance, `validateStateRoot` runs the exact same deterministic construction
+recovery and live publication use: production canonical snapshot size, the
+frozen 8 MiB StateRoot/checkpoint-compatible resource bound, graph
+normalization/consistency, Notes/Diary reconstruction and committed
+retrieval-index rebuild. Validation failures carry `phase:
+"precommit-validation"` (with the frozen `resource-limit` reason where
+applicable): nothing has been written, the WAL/tip/objects are unchanged, the
+runtime stays ready, and subsequent valid mutations succeed.
+
+Note on the effective bound: the frozen v0.5 FoundationLinker mirrors an
+unsynopsized note's content into its graph node label, so the canonical
+post-state is roughly TWICE the note content. A ~4.3M-character multi-byte
+note is rejected precommit; cumulative small mutations are rejected at the
+exact crossing mutation; the committed history below the bound remains
+recoverable.
 
 ### Result reconstruction (lost ACK / restart retry)
 
@@ -118,12 +170,22 @@ distinction, not a silent conversion.
 ## Concurrency model
 
 - In-process: one mutation in flight (single-flight). Concurrent submissions
-  wait and execute against the then-current committed tip. Public commands
-  carry no base, so this is not a rebase.
-- Same mutationId + same intent (concurrent or retried): the authoritative
-  receipt lookup returns the original committed transaction — no second
-  transaction, no new IDs, no new objects.
+  wait and execute against the then-current committed tip; readiness is
+  rechecked when each queued mutation begins, so a queued mutation submitted
+  while ready does not execute after an earlier operation moved the runtime to
+  `recovery-required`. Public commands carry no base, so this is not a rebase.
+- Same mutationId + same intent (concurrent, retried, or racing another
+  runtime): the authoritative receipt lookup returns the original committed
+  transaction — no second transaction, no new IDs, no new objects.
 - Same mutationId + conflicting intent: `PERSISTENCE_CORRUPTION`, fail closed.
+- Cross-runtime race (lookup observed absent, another runtime committed the
+  same identity before the commit acquired authority): the commit-boundary
+  failure is reconciled by an authoritative re-lookup BEFORE classifying
+  corruption — same stable intent digest resolves the winner's committed
+  receipt (exactly one WAL transaction, never a false corruption result);
+  conflicting intent is genuine `PERSISTENCE_CORRUPTION`; a still-absent
+  identity yields the genuine stale-base result. Uses the frozen scanner
+  machinery only; single-writer authority is not weakened.
 - Lost ACK (ambiguous durable outcome): the mutation fails `RECOVERY_REQUIRED`
   and the runtime enters `recovery-required`. Reads keep serving the last
   committed generation; `recover()` is required; the retry with the same
@@ -131,6 +193,13 @@ distinction, not a silent conversion.
   transparently inside an unrelated mutation.
 - Stale base (another runtime advanced the tip): `STALE_TRANSACTION_BASE`,
   retryable, never a silent rebase; `recover()` then retry.
+- Already-committed receipts are reported as a normal success ONLY when the
+  runtime's published generation already includes that committed transaction
+  coherently. If the durable history is ahead of the published generation
+  (lost ACK, cross-runtime race), the runtime enters `recovery-required` and
+  returns `RECOVERY_REQUIRED` carrying the mutation identity and committed tip
+  for a deterministic retry; never a normal success over a stale live
+  generation.
 - Authority contention: `WRITER_BUSY`/`READ_ONLY_LOCKED` surface unchanged
   from the frozen T4 writer protocol. No new locks, leases or takeover.
 - Readers never lock; publication is a single synchronous reference
@@ -143,9 +212,12 @@ distinction, not a silent conversion.
 `recovery-required` — committed reads and `recover()` available; durable
 mutations fail `RECOVERY_REQUIRED`.
 `closed` — deterministic release; every operation fails `CLOSED` (a
-deliberate lifecycle error, not a durability failure). Close is idempotent;
-no durable session leases or TTL takeover exist. A second runtime may open
-the store after close.
+deliberate lifecycle error, not a durability failure).
+
+Close is deterministic FIFO drain: it waits for every previously submitted
+operation to complete, then closes; operations submitted afterwards fail
+`CLOSED` and never execute. Close is idempotent; no durable session leases or
+TTL takeover exist. A second runtime may open the store after close.
 
 `recover()` returns the runtime to `ready` by re-running authoritative
 recovery and publishing the recovered committed generation.
@@ -161,15 +233,20 @@ recovery and publishing the recovered committed generation.
 
 ## Verification receipts
 
-- New suites: `tests/durable-runtime.test.ts` (14 tests),
-  `tests/durable-runtime-concurrency.test.ts` (5 tests).
+- New suites: `tests/durable-runtime.test.ts` (21 tests, including the
+  ~4.3M-character reproducer, cumulative-bound crossing, just-under/just-over
+  boundaries, required-identity contract, queue/close/alias attacks),
+  `tests/durable-runtime-concurrency.test.ts` (8 tests, including the three
+  cross-runtime pause-race reproducers).
 - Probe: `node scripts/af1-tranche6-live-runtime-probe.mjs
-  --simulate-directory-barriers` — bootstrap, 280+ live mutations across all
-  command kinds, interleaved reads, one 80 KB object-backed mutation, a
-  concurrent pair, injected lost ACK + explicit recovery + same-identity
-  retry, cross-runtime stale base, close, recovery reopen with exact
-  tip/snapshot byte equality, recovery-confirmed transaction count.
-- Frozen gates carried forward: full suite 461 baseline + 19 new = 480/480,
+  --simulate-directory-barriers` — bootstrap, 290+ live public mutations across
+  all command kinds, interleaved reads, an 80 KB object-backed mutation, a
+  rejected over-bound precommit mutation, a concurrent pair, injected lost ACK
+  + explicit recovery + same-identity retry, cross-runtime stale base,
+  close, recovery reopen with exact tip/snapshot byte equality,
+  recovery-confirmed transaction count, and package-root runtime + declaration
+  (`.d.ts`) surface gates.
+- Frozen gates carried forward: full suite (T5 461 baseline + T6 tests),
   focused 388/388, mutation-index 38/38, ORION 14/14, Tranche 4 probe,
   Tranche 5 1,050-transaction probe, all five frozen fixtures byte-identical.
 
@@ -181,3 +258,7 @@ recovery and publishing the recovered committed generation.
 - The durable runtime does not expose `condensation`/bulk import paths;
   `purgeExpired`, `importPortableRecords` and `importData` are absent from
   the durable surface by design (compound/bulk operations are future work).
+- Precommit validation constructs the complete candidate generation on every
+  mutation, so mutations on multi-megabyte stores pay the canonical
+  encode/index rebuild per commit. Correctness first; optimization is future
+  work.

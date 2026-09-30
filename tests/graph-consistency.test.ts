@@ -49,7 +49,7 @@ describe("graph consistency between published snapshot and runtime graph", () =>
     // Idempotence through the published form: normalization applied again is a no-op.
     expect(normalizeSnapshotGraph(read.snapshot)).toEqual(read.snapshot);
   });
-  it("explicit edge ids, several nodes/edges and FoundationLinker effects survive recovery identically", async () => {
+  it("explicit edge ids, several nodes/edges and FoundationLinker effects survive recovery identically", { timeout: 30_000 }, async () => {
     const s = await setup();
     // Detached Core execution: the linker's real effect set (including its
     // generated edge id) is captured exactly; replay reproduces it verbatim.

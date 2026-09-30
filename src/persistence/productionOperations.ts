@@ -15,6 +15,7 @@ import { nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 import { nodeWalIO, type WalFileHandle, type WalIO } from "./walIO.js";
 import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint } from "./codecs.js";
 import { WalFileScan } from "./walFileScan.js";
+import { validateStateRoot, type StateRoot } from "./stateRoot.js";
 import { snapshotData, hydrateSnapshot } from "./snapshotPayload.js";
 import { parseTransactionSequenceId } from "../utils/durablePersistence.js";
 
@@ -22,10 +23,11 @@ export const PRODUCTION_OPERATIONS = ["ether.note.put", "ether.note.remove", "et
   "ether.graph-node.put", "ether.graph-node.remove", "ether.graph-edge.put", "ether.graph-edge.remove", "ether.identity.put"] as const;
 export type ProductionOperationType = typeof PRODUCTION_OPERATIONS[number];
 export interface SemanticOperation { readonly type: ProductionOperationType; readonly version: "1"; readonly payload: unknown }
-/** Tranche 6 live-runtime commit outcome: frozen receipt plus the exact committed effect set and, for a fresh commit, the prepared post-state. */
+/** Tranche 6 live-runtime commit outcome: frozen receipt plus the prevalidated candidate generation and the exact committed effect set. */
 export interface MutationOutcome {
   readonly receipt: CommitReceipt;
   readonly after?: EtherSnapshot;
+  readonly root?: StateRoot;
   readonly effects: readonly SemanticOperation[];
 }
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -174,18 +176,27 @@ export class ProductionWalStore {
 
   /**
    * Tranche 6 live-runtime commit outcome. Identical durable flow to
-   * commitMutation, plus the exact committed effect set and the prepared
-   * post-state so the caller can publish and reconstruct results without a
-   * second execution. For an already-committed receipt the effects are
-   * resolved from the active WAL (see resolveCommittedEffects); `after` is
-   * absent there by construction.
+   * commitMutation, plus the prevalidated candidate generation and the exact
+   * committed effect set so the caller can publish and reconstruct results
+   * without a second execution. For an already-committed receipt the effects
+   * are resolved from the active WAL (see resolveCommittedEffects); `after`
+   * and `root` are absent there by construction.
    */
   async commitMutationDetailed(base: CommittedTip, baseSnapshot: EtherSnapshot, mutationId: MutationId,
     command: ProductionMutationCommand): Promise<Result<MutationOutcome>> {
-    const validated = validatedCommand(command);
+    // Command validation, intent digesting, detached preparation and complete
+    // post-state validation are all pure precommit phases: nothing durable has
+    // happened, so any failure there (including deterministic resource-bound
+    // hits) is an unambiguous precommit rejection, never an ambiguous outcome.
+    const precommit = <T>(result: Result<T>): Result<T> => {
+      if (result.ok) return result;
+      const details = record(result.error.details) ? result.error.details : {};
+      return err(result.error.code, result.error.message, { ...details, phase: "precommit-validation" });
+    };
+    const validated = precommit(validatedCommand(command));
     if (!validated.ok) return validated;
     const stableCommand = validated.value;
-    const intent = intentDigest(stableCommand);
+    const intent = precommit(intentDigest(stableCommand));
     if (!intent.ok) return intent;
     const found = await this.wal.readCommittedMutation(mutationId);
     if (!found.ok) return found;
@@ -197,11 +208,41 @@ export class ProductionWalStore {
       if (!effects.ok) return effects;
       return ok({ receipt: found.value, effects: effects.value });
     }
-    const prepared = prepareCoreMutation(baseSnapshot, stableCommand);
+    const prepared = precommit(prepareCoreMutation(baseSnapshot, stableCommand));
     if (!prepared.ok) return prepared;
+    // RED 1 precommit complete-post-state validation: no transaction may
+    // become durable if its complete deterministic post-state cannot be
+    // reconstructed and published by startup recovery. The same single
+    // construction path used by recovery and live publication validates the
+    // prospective post-state BEFORE payload-object durability or WAL
+    // authority can advance. Individual WAL-operation validity is not
+    // sufficient; nothing has been written at this point.
+    const prospective = precommit(validateStateRoot(prepared.value.after));
+    if (!prospective.ok) return prospective;
     const committed = await this.commitOperations(base, mutationId, prepared.value.operations, intent.value);
-    if (!committed.ok) return committed;
-    return ok({ receipt: committed.value, after: prepared.value.after, effects: prepared.value.operations });
+    if (!committed.ok) {
+      // RED 3 race-boundary reconciliation: the pre-preparation lookup can
+      // race with another writer committing the same mutation identity. When
+      // the final commit observes changed durable history, reconcile the
+      // mutation identity again before classifying corruption: the same
+      // stable intent under this identity is the existing committed logical
+      // mutation, not corruption; a conflicting intent is; a still-absent
+      // identity is a genuine stale-base/contention result.
+      if (committed.error.code === "PERSISTENCE_CORRUPTION") {
+        const relooked = await this.wal.readCommittedMutation(mutationId);
+        if (!relooked.ok) return relooked;
+        if (relooked.value) {
+          if (relooked.value.mutation.digest !== intent.value) {
+            return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
+          }
+          const effects = await this.resolveCommittedEffects(mutationId);
+          if (!effects.ok) return effects;
+          return ok({ receipt: relooked.value, effects: effects.value });
+        }
+      }
+      return committed;
+    }
+    return ok({ receipt: committed.value, after: prepared.value.after, root: prospective.value, effects: prepared.value.operations });
   }
 
   /**
