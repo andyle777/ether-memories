@@ -7,6 +7,10 @@ import type { MemoryNote } from "../src/types/index.js";
 import type { Result } from "../src/utils/result.js";
 import { openDurableEtherMemories, openDurableEtherMemoriesInternal, createMutationId, type DurableEtherMemories } from "../src/core/DurableEtherMemories.js";
 import { StartupRecovery } from "../src/persistence/StartupRecovery.js";
+import { ProductionWalStore } from "../src/persistence/productionOperations.js";
+import { MemoryNotes } from "../src/core/MemoryNotes.js";
+import { DiarySystem } from "../src/core/DiarySystem.js";
+import { MindGraphManager } from "../src/core/MindGraph.js";
 import { encodeSnapshotPayload } from "../src/persistence/snapshotPayload.js";
 import { nodeWalIO, type WalIO } from "../src/persistence/walIO.js";
 import { value } from "./helpers/persistence.js";
@@ -524,6 +528,140 @@ describe("durable runtime close, release and result immutability", { timeout: 12
     expect(legacy.schemaVersion).toBe("ether.memory_store.v0.3");
   });
 });
+
+describe("durable runtime runtime-enforced encapsulation (final RED)", { timeout: 120_000 }, () => {
+  const INTERNAL_FIELD_NAMES = ["generation", "lifecycle", "store", "queue", "directory", "userId", "io", "files", "indexDiskBytes"];
+
+  const open = async () => {
+    const s = await setup();
+    const runtime = value(await openDurableEtherMemoriesInternal({ userId: s.snapshot.identity.userId, directory: s.directory, openMode: "existing" }, { io: s.io }));
+    value(await runtime.addMemory({ content: "encapsulation committed note", tags: ["enc"] }, "enc-1"));
+    return { s, runtime };
+  };
+
+  it("no own property, key, or descriptor exposes authoritative internals", async () => {
+    const { s, runtime } = await open();
+    expect("generation" in runtime).toBe(false);
+    expect((runtime as unknown as Record<string, unknown>).generation).toBeUndefined();
+    for (const name of INTERNAL_FIELD_NAMES) {
+      expect((runtime as unknown as Record<string, unknown>)[name], name).toBeUndefined();
+      expect(Object.hasOwn(runtime, name), name).toBe(false);
+      expect((runtime as unknown as Record<string, unknown>)[name], name).toBeUndefined();
+    }
+    expect(Object.getOwnPropertyNames(runtime)).toEqual([]);
+    expect(Object.keys(runtime)).toEqual([]);
+    expect(Reflect.ownKeys(runtime)).toEqual([]);
+    expect(Object.getOwnPropertyDescriptors(runtime)).toEqual({});
+    // The canonical committed state is reachable only through the public API.
+    expect(value(runtime.exportData()).memoryNotes.some(n => n.content === "encapsulation committed note")).toBe(true);
+    value(await runtime.close());
+    void s;
+  });
+
+  it("prototype traversal yields only methods and accessors, never state", async () => {
+    const { runtime } = await open();
+    let prototype: unknown = runtime;
+    for (let depth = 0; depth < 5 && prototype !== null; depth++) {
+      const names = Object.getOwnPropertyNames(prototype).filter(name => name !== "constructor");
+      for (const name of names) {
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, name)!;
+        // Accessors on the prototype must return detached public data only.
+        if (typeof descriptor.get === "function") {
+          const accessed = (runtime as unknown as Record<string, unknown>)[name];
+          expect(isAuthoritative(accessed), `prototype accessor ${name}`).toBe(false);
+        } else {
+          expect(typeof descriptor.value, `prototype member ${name}`).toBe("function");
+        }
+      }
+      prototype = Object.getPrototypeOf(prototype);
+    }
+    value(await runtime.close());
+  });
+
+  it("Codex's exact runtime.generation attack is impossible and changes nothing", async () => {
+    const { s, runtime } = await open();
+    const walBefore = await walBytes(s.directory);
+    const canonical = value(encodeSnapshotSnapshot(runtime));
+    const tipBefore = value(runtime.tip);
+    // Codex's attack: runtime.generation.notes.add({...}) before the repair.
+    const hostile = (runtime as unknown as { generation?: { notes?: { add(input: unknown): unknown } } }).generation;
+    expect(hostile).toBeUndefined();
+    expect((runtime as unknown as Record<string, { notes?: unknown }>)["generation"]?.notes).toBeUndefined();
+    expect(value(runtime.queryMemories("encapsulation", { asOf: 0 })).some(n => n.content === "encapsulation committed note")).toBe(true);
+    expect(value(encodeSnapshotSnapshot(runtime))).toEqual(canonical);
+    expect(await walBytes(s.directory)).toBe(walBefore);
+    expect(value(runtime.tip)).toEqual(tipBefore);
+    value(await runtime.close());
+    const reopened = value(await openDurableEtherMemoriesInternal({ userId: s.snapshot.identity.userId, directory: s.directory, openMode: "existing" }, { io: s.io }));
+    expect(value(reopened.exportData()).memoryNotes.some(n => n.content === "encapsulation committed note")).toBe(true);
+    expect(value(reopened.exportData()).memoryNotes.some(n => n.content === "unlogged")).toBe(false);
+    value(await reopened.close());
+  });
+
+  it("a bounded object-graph escape scan finds no canonical modules or injected dependencies", async () => {
+    const { runtime } = await open();
+    // Every value reachable from the public surface (own properties, prototype
+    // accessor results and method results) is scanned to a bounded depth.
+    const surface: unknown[] = [Object.getOwnPropertyNames(runtime).map(name => (runtime as unknown as Record<string, unknown>)[name]),
+      runtime.state, runtime.tip];
+    const context = runtime.buildMemoryContext({ purpose: "debug" });
+    if (context.ok) surface.push(context.value);
+    for (const value of surface) {
+      expect(scanForAuthoritative(value, 0, new Set()), "public surface object graph").toHaveLength(0);
+    }
+    value(await runtime.close());
+  });
+
+  it("public read results remain fully detached, including memory context", async () => {
+    const { s, runtime } = await open();
+    const staleContext = value(runtime.buildMemoryContext({ purpose: "debug" }));
+    const note = value(await runtime.addMemory({ content: "detached result note" }, "enc-2"));
+    const walAfter = await walBytes(s.directory);
+    const canonical = value(encodeSnapshotSnapshot(runtime));
+    // Alias attacks on every returned shape, including memory context.
+    const hostileContext = staleContext as unknown as Record<string, any>;
+    if (Array.isArray(hostileContext.citations)) hostileContext.citations.push({ forged: true });
+    hostileContext.purpose = "forged";
+    note.content = "mutated";
+    (note.metadata as Record<string, unknown>).forged = true;
+    const queried = value(runtime.queryMemories("encapsulation committed", { asOf: 0 }));
+    queried[0]!.content = "mutated";
+    const exported = value(runtime.exportData());
+    (exported.memoryNotes[0]!.metadata as Record<string, unknown>).forged = true;
+    const identity = value(runtime.getSystemState());
+    identity.displayName = "forged";
+    expect(value(encodeSnapshotSnapshot(runtime))).toEqual(canonical);
+    expect(await walBytes(s.directory)).toBe(walAfter);
+    value(await runtime.close());
+    const reopened = value(await openDurableEtherMemoriesInternal({ userId: s.snapshot.identity.userId, directory: s.directory, openMode: "existing" }, { io: s.io }));
+    expect(value(reopened.exportData()).memoryNotes.some(n => n.content === "detached result note")).toBe(true);
+    expect(value(reopened.exportData()).memoryNotes.some(n => n.content === "mutated")).toBe(false);
+    value(await reopened.close());
+  });
+});
+
+const isAuthoritative = (candidate: unknown): boolean => {
+  return candidate instanceof MemoryNotes || candidate instanceof DiarySystem
+    || candidate instanceof MindGraphManager || candidate instanceof ProductionWalStore
+    || candidate instanceof StartupRecovery;
+};
+
+/** Recursively find authoritative objects reachable from a public value (bounded depth). */
+const scanForAuthoritative = (value: unknown, depth: number, seen: Set<unknown>): unknown[] => {
+  if (depth > 4 || (typeof value !== "object" && typeof value !== "function") || value === null) return [];
+  if (seen.has(value)) return [];
+  seen.add(value);
+  if (isAuthoritative(value)) return [value];
+  // A frozen StateRoot-shaped capsule is also an escape.
+  if (Object.isFrozen(value)
+    && ["snapshot", "bytes", "tip", "notes", "diary", "graph", "retriever"].every(key => key in (value as object))) {
+    return [value];
+  }
+  const findings: unknown[] = [];
+  const record = value as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(record)) findings.push(...scanForAuthoritative(record[key], depth + 1, seen));
+  return findings;
+};
 
 const encodeSnapshotSnapshot = (runtime: DurableEtherMemories) => {
   const exported = runtime.exportData();

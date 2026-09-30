@@ -78,11 +78,18 @@ independent recovery derives.
 
 The durable runtime does NOT expose the legacy mutable module references
 (`notes`, `diary`, `graph`, `linker`, `condensation`): state changes only
-through the durable path. Reads (`queryMemories`, `queryMemoriesDetailed`,
-`buildMemoryContext`, `getSystemState`, `exportData`) serve the committed
-generation with legacy-shaped results. Returned values are deep clones:
-mutating any returned result never changes canonical state or WAL (asserted by
-permanent tests).
+through the durable path. This is enforced at RUNTIME, not just at compile
+time: every internal field of the runtime (canonical generation, store,
+lifecycle, queue, directory, identity, injected I/O dependencies) is an
+ECMAScript `#private` field, so no own property, key, descriptor or prototype
+route on the public object can reach the canonical generation or its mutable
+modules — a caller cannot do `runtime.generation.notes.add(...)` because
+`runtime.generation` does not exist. Reads (`queryMemories`,
+`queryMemoriesDetailed`, `buildMemoryContext`, `getSystemState`, `exportData`)
+serve the committed generation with legacy-shaped results, and returned values
+are deep clones: mutating any returned result never changes canonical state or
+WAL (asserted by permanent tests, including a bounded object-graph escape
+scan).
 
 ## Mutation identity (required)
 
@@ -233,11 +240,13 @@ recovery and publishing the recovered committed generation.
 
 ## Verification receipts
 
-- New suites: `tests/durable-runtime.test.ts` (21 tests, including the
+- New suites: `tests/durable-runtime.test.ts` (26 tests, including the
   ~4.3M-character reproducer, cumulative-bound crossing, just-under/just-over
-  boundaries, required-identity contract, queue/close/alias attacks),
-  `tests/durable-runtime-concurrency.test.ts` (8 tests, including the three
-  cross-runtime pause-race reproducers).
+  boundaries, required-identity contract, queue/close/alias attacks, and the
+  runtime-encapsulation regressions: no own keys/descriptors, prototype
+  traversal, Codex's exact `runtime.generation` attack, bounded object-graph
+  escape scan, detached results), `tests/durable-runtime-concurrency.test.ts`
+  (8 tests, including the three cross-runtime pause-race reproducers).
 - Probe: `node scripts/af1-tranche6-live-runtime-probe.mjs
   --simulate-directory-barriers` — bootstrap, 290+ live public mutations across
   all command kinds, interleaved reads, an 80 KB object-backed mutation, a

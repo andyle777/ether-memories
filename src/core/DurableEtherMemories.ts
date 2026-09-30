@@ -171,15 +171,35 @@ function selectRemoveEffect(effects: readonly SemanticOperation[], type: "ether.
 
 /** Internal runtime implementation; the public surface is the interface above. */
 class DurableRuntime implements DurableEtherMemories {
-  private generation?: StateRoot;
-  private lifecycle: DurableRuntimeState = "ready";
-  private readonly store: ProductionWalStore;
+  /**
+   * Runtime-enforced encapsulation (final RED repair): every internal state
+   * reference is an ECMAScript #private field, not a TypeScript-private
+   * property. TypeScript `private` is compile-time only and leaves the
+   * canonical generation reachable as an ordinary own property in emitted
+   * JavaScript, which would allow bypassing every durable mutation API and
+   * mutating live modules directly. #private fields do not exist on the
+   * object's own/prototype property graph at runtime: a caller holding the
+   * public durable-runtime object has no route to the canonical generation,
+   * its mutable modules, the store, or injected I/O dependencies.
+   */
+  #generation?: StateRoot;
+  #lifecycle: DurableRuntimeState = "ready";
+  readonly #store: ProductionWalStore;
   /** Single-flight in-process serialization of durable operations. */
-  private queue: Promise<unknown> = Promise.resolve();
+  #queue: Promise<unknown> = Promise.resolve();
+  readonly #directory: string;
+  readonly #userId: string;
+  readonly #io: DirectoryIO;
+  readonly #files: WalIO;
+  readonly #indexDiskBytes: number;
 
-  private constructor(private readonly directory: string, private readonly userId: string,
-    private readonly io: DirectoryIO, private readonly files: WalIO, private readonly indexDiskBytes: number) {
-    this.store = new ProductionWalStore(directory, io, files);
+  constructor(directory: string, userId: string, io: DirectoryIO, files: WalIO, indexDiskBytes: number) {
+    this.#directory = directory;
+    this.#userId = userId;
+    this.#io = io;
+    this.#files = files;
+    this.#indexDiskBytes = indexDiskBytes;
+    this.#store = new ProductionWalStore(directory, io, files);
   }
 
   /**
@@ -244,11 +264,11 @@ class DurableRuntime implements DurableEtherMemories {
     return initialized.ok ? ok(undefined) : initialized;
   }
 
-  get state(): DurableRuntimeState { return this.lifecycle; }
+  get state(): DurableRuntimeState { return this.#lifecycle; }
 
   get tip(): Result<CommittedTip> {
-    const generation = this.generation;
-    if (this.lifecycle === "closed" || !generation) {
+    const generation = this.#generation;
+    if (this.#lifecycle === "closed" || !generation) {
       return err("CLOSED", "This durable runtime is closed.");
     }
     return ok({ ...generation.tip });
@@ -256,10 +276,10 @@ class DurableRuntime implements DurableEtherMemories {
 
   /** Committed-generation reads remain available in every non-closed state. */
   private readable(): Result<StateRoot> {
-    if (this.lifecycle === "closed" || !this.generation) {
+    if (this.#lifecycle === "closed" || !this.#generation) {
       return err("CLOSED", "This durable runtime is closed.");
     }
-    return ok(this.generation);
+    return ok(this.#generation);
   }
 
   queryMemories(text: string, options?: QueryOptions): Result<MemoryNote[]> {
@@ -347,21 +367,21 @@ class DurableRuntime implements DurableEtherMemories {
    */
   async recover(): Promise<Result<DurableRecoveryReceipt>> {
     return this.enqueue(async () => {
-      if (this.lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
-      const recovery = new StartupRecovery(this.directory, this.userId, this.io, this.files, undefined, this.indexDiskBytes);
+      if (this.#lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
+      const recovery = new StartupRecovery(this.#directory, this.#userId, this.#io, this.#files, undefined, this.#indexDiskBytes);
       const receipt = await recovery.recover();
       if (!receipt.ok) {
-        this.lifecycle = "recovery-required";
+        this.#lifecycle = "recovery-required";
         return receipt;
       }
       const generation = recovery.generation();
       if (!generation.ok) {
-        this.lifecycle = "recovery-required";
+        this.#lifecycle = "recovery-required";
         return generation;
       }
       // Single synchronous publication: no awaits or partial writes in this boundary.
-      this.generation = generation.value;
-      this.lifecycle = "ready";
+      this.#generation = generation.value;
+      this.#lifecycle = "ready";
       return receipt;
     });
   }
@@ -369,8 +389,8 @@ class DurableRuntime implements DurableEtherMemories {
   /** Deterministic release. Idempotent; no durable session leases exist to release. */
   async close(): Promise<Result<void>> {
     return this.enqueue(async () => {
-      this.lifecycle = "closed";
-      this.generation = undefined;
+      this.#lifecycle = "closed";
+      this.#generation = undefined;
       return ok(undefined);
     });
   }
@@ -389,19 +409,19 @@ class DurableRuntime implements DurableEtherMemories {
     return this.enqueue(async () => {
       // Readiness is rechecked when each queued mutation begins: an earlier
       // queued operation may have moved the runtime to recovery-required.
-      if (this.lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
-      const generation = this.generation;
-      if (this.lifecycle !== "ready" || !generation) {
+      if (this.#lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
+      const generation = this.#generation;
+      if (this.#lifecycle !== "ready" || !generation) {
         return err("RECOVERY_REQUIRED", "Recovery is required before durable mutations.", { mutationId: captured });
       }
-      const outcome = await this.store.commitMutationDetailed(generation.tip, generation.snapshot, captured, command);
+      const outcome = await this.#store.commitMutationDetailed(generation.tip, generation.snapshot, captured, command);
       if (!outcome.ok) {
         const details = record(outcome.error.details) ? outcome.error.details : {};
         // Unambiguous precommit rejections (complete-post-state validation)
         // commit nothing: the runtime stays ready and usable.
         if (details.phase !== "precommit-validation"
           && (outcome.error.code === "RECOVERY_REQUIRED" || outcome.error.code === "STALE_TRANSACTION_BASE")) {
-          this.lifecycle = "recovery-required";
+          this.#lifecycle = "recovery-required";
           return err(outcome.error.code, outcome.error.message, { ...details, mutationId: captured });
         }
         return outcome;
@@ -415,7 +435,7 @@ class DurableRuntime implements DurableEtherMemories {
         // with the mutation identity and require explicit recovery; never a
         // normal success over a stale live generation.
         if (generation.tip.epochId !== receipt.identity.epochId || BigInt(generation.tip.txId) < BigInt(receipt.identity.txId)) {
-          this.lifecycle = "recovery-required";
+          this.#lifecycle = "recovery-required";
           return err("RECOVERY_REQUIRED", "The committed mutation is ahead of the published generation; recover and retry with the same mutation identity.",
             { mutationId: captured, committedTip: { ...receipt.identity } });
         }
@@ -427,17 +447,17 @@ class DurableRuntime implements DurableEtherMemories {
       // mixture.
       const root = outcome.value.root;
       if (!root) {
-        this.lifecycle = "recovery-required";
+        this.#lifecycle = "recovery-required";
         return err("RECOVERY_REQUIRED", "Durable commit lost its prevalidated post-state; recover and retry with the same mutation identity.", { mutationId: captured });
       }
-      this.generation = attachTip(root, receipt.identity);
+      this.#generation = attachTip(root, receipt.identity);
       return select(outcome.value.effects);
     });
   }
 
   private enqueue<T>(operation: () => Promise<Result<T>>): Promise<Result<T>> {
-    const run = this.queue.then(operation, operation);
-    this.queue = run.then(() => undefined, () => undefined);
+    const run = this.#queue.then(operation, operation);
+    this.#queue = run.then(() => undefined, () => undefined);
     return run;
   }
 }
