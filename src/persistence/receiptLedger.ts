@@ -77,7 +77,16 @@ export const ROOT_PREDECESSOR_DIGEST = ZERO_DIGEST;
  *     Every committed transaction becomes exactly one receipt entry, and
  *     every legal frame is at least F_MIN bytes, so a B-byte segment holds
  *     at most E(B) = B / F_MIN transactions. Rotatability requires
- *       E(B) <= C_SORT  =>  B <= C_SORT x F_MIN = 32,768,000 bytes.
+ *       E(B) <= C_SORT  =>  B <= C_SORT x F_MIN = 32,505,856 bytes.
+ *
+ *     F_MIN = 496 is the PROVEN global minimum legal production frame
+ *     accepted by the frozen encoder (Codex AMBER repair): the earlier 500
+ *     floor was falsified by a legal 499-byte frame, and a constructive
+ *     exhaustive minimization of every variable field (1-char storeId,
+ *     epochId and mutationId; 1-digit txIds; zero digests; null audit; one
+ *     minimal validateSemantic-legal operation per production type) measures
+ *     496 bytes (ether.note.put {id:"a"}) - pinned exactly by the derivation
+ *     test, which also reproduces Codex's 499-byte frame.
  *
  * (2) BYTE-SCRATCH BUDGET (frozen 256 MiB working budget):
  *       restart scratch: 2 x E(B) x R_IDX(512) <= 2.048 x B
@@ -88,10 +97,11 @@ export const ROOT_PREDECESSOR_DIGEST = ZERO_DIGEST;
  *     budget, 1,024-file namespace) and the history verifier are both
  *     comfortably inside these bounds at E = C_SORT.
  *
- * Chosen: 30 MiB = 31,457,280 bytes - a round constant with >= 4% margin
- * below the binding bound (1): floor(30 MiB / 500) = 62,914 entries
- * <= 65,536. Every segment admitted by this envelope is therefore
- * restartable AND rotatable under default limits.
+ * Chosen: 30 MiB = 31,457,280 bytes - a round constant with margin
+ * below the binding bound (1): floor(30 MiB / 496) = 63,420 entries
+ * <= 65,536 (and 2 x 63,420 x 512 = 64.99 MiB restart scratch, well inside
+ * the 256 MiB working budget). Every segment admitted by this envelope is
+ * therefore restartable AND rotatable under default limits.
  *
  * DURABLE CUMULATIVE RECEIPT STORAGE IS DELIBERATELY NOT BOUNDED BY THIS
  * ENVELOPE (Copilot AMBER Finding 2): retained receipt history grows
@@ -102,7 +112,7 @@ export const ROOT_PREDECESSOR_DIGEST = ZERO_DIGEST;
  * sort scratch derived from the retiring segment, never total rotation
  * disk.
  */
-export const MIN_LEGAL_WAL_FRAME_BYTES = 500;
+export const MIN_LEGAL_WAL_FRAME_BYTES = 496;
 export const MAX_ACTIVE_WAL_BYTES = 30 * 1024 * 1024;
 
 const isHex = (value: unknown, length: number): value is string =>

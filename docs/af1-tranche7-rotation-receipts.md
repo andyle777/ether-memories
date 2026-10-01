@@ -41,6 +41,18 @@ idempotent success, every other removal or `.private` barrier failure is
 observable (pre-P6: fails the rotation pre-activation; post-P6: reported as
 pending cleanup with `activated: true`).
 
+The source-aware mutation-history verifier follows the same T5 recovery-index
+scratch precedent: ONE bounded deterministic namespace
+(`mutation-history-{000000..1023}.run`) covers every session artifact —
+initial sorted runs AND every intermediate/final merge output — with exact
+session ownership and byte accounting reserved before creation. A new session
+sweeps the whole namespace before creating its first artifact (crashed
+sessions' stale files are reclaimed; ENOENT is idempotent; other failures
+fail closed). Ownership and accounting survive until a successful unlink; a
+failed unlink retains both and propagates — a successful verification leaves
+ZERO session-owned scratch, and the `.private` directory barrier is taken
+after full successful removal.
+
 ## Receipt ledger wire (stream-framed)
 
 Physical representation (canonical JSON, LF-delimited, never one monolithic
@@ -202,13 +214,18 @@ A required ledger absent while authority is held is genuine corruption.
    - binding bound: the rotation sorter's fixed entry capacity
      `C_SORT = 128 runs × 512 entries = 65,536` receipt entries; every
      committed transaction becomes exactly one entry and every legal frame is
-     at least F_MIN ≥ 500 bytes (frozen-encoder-measured, test-enforced), so
-     admissibility requires `B ≤ C_SORT × F_MIN = 32,768,000` bytes;
+     at least F_MIN = 496 bytes — the PROVEN global minimum accepted by the
+     frozen encoder (constructive exhaustive minimization of every variable
+     field across all nine production operation types; the earlier 500-byte
+     floor was falsified by a legal 499-byte frame, kept as a permanent
+     regression) — so admissibility requires
+     `B ≤ C_SORT × F_MIN = 32,505,856` bytes;
    - byte bounds: restart scratch `2 × B × 512/500 ≤ 256 MiB` (B ≤ 125 MiB)
      and transient rotation sort scratch `≤ 1.25 × B ≤ 256 MiB`.
-   - Chosen 30 MiB leaves ≥ 4% margin below the binding bound
-     (⌊30 MiB/500⌋ = 62,914 ≤ 65,536): every admitted segment is provably
-     restartable AND rotatable under default limits.
+   - Chosen 30 MiB leaves margin below the binding bound
+     (⌊30 MiB/496⌋ = 63,420 ≤ 65,536; restart scratch 2 × 63,420 × 512 ≈
+     65 MiB, well inside the 256 MiB working budget): every admitted segment
+     is provably restartable AND rotatable under default limits.
    - A commit whose exact prospective frame would cross the envelope fails
      precommit (`RECOVERY_REQUIRED`, `reason:"resource-limit"`,
      `phase:"precommit-validation"`) before payload-object durability, WAL

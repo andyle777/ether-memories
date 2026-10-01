@@ -12,9 +12,11 @@ import {
   openAuthoritativeReceiptLedger, ReceiptLedgerReader, isRotatedCheckpointId, receiptLedgerPath
 } from "../src/persistence/receiptLedger.js";
 import { DEFAULT_MAX_INDEX_BYTES } from "../src/persistence/recoveryMutationIndex.js";
-import { WAL_LIMITS } from "../src/persistence/wal.js";
+import { WAL_LIMITS, encodeWalFrame } from "../src/persistence/wal.js";
 import { encodeSnapshotPayload } from "../src/persistence/snapshotPayload.js";
-import { decodeStoreHead } from "../src/persistence/codecs.js";
+import { productionRegistry, validateSemantic } from "../src/persistence/productionOperations.js";
+import { encodeEtherData, ETHER_DATA_PROFILE } from "../src/persistence/etherData.js";
+import { decodeStoreHead, WAL_FORMAT, WAL_VERSION } from "../src/persistence/codecs.js";
 import { nodeWalIO, type WalIO } from "../src/persistence/walIO.js";
 import type { DirectoryIO } from "../src/persistence/directoryIO.js";
 import type { CommittedTip } from "../src/types/persistence.js";
@@ -65,24 +67,52 @@ const note = (runtime: DurableEtherMemories, content: string, mutationId: string
   runtime.addMemory({ content, tags: ["rotation"], status: "active" }, mutationId);
 
 describe("Tranche 7 active-WAL envelope", { timeout: 300_000 }, () => {
-  it("the F_MIN floor, sorter entry capacity and every derivation margin hold for MAX_ACTIVE_WAL_BYTES", () => {
-    const base = { epochId: "epoch-a", txId: "9007199254740993" as CommittedTip["txId"], digest: "0".repeat(64) };
-    // Minimal legal production frames through the frozen encoder: the two
-    // smallest operation shapes (a removal and an identity put).
-    const minimalRemove = semanticFrame(base, [{ type: "ether.note.remove", version: "1", payload: { id: "n" } }], "mutation-0123456789abcdef");
-    const minimalIdentity = semanticFrame(base, [identityPut()], "mutation-0123456789abcdef");
-    const measured = Math.min(minimalRemove.bytes.byteLength, minimalIdentity.bytes.byteLength);
-    // The derivation's floor assumption: every legal frame is at least
-    // MIN_LEGAL_WAL_FRAME_BYTES, so E(B) <= B / MIN_LEGAL_WAL_FRAME_BYTES.
-    expect(measured).toBeGreaterThanOrEqual(MIN_LEGAL_WAL_FRAME_BYTES);
-    // BINDING BOUND (Copilot AMBER Finding 1): every committed transaction
-    // becomes exactly one receipt entry, so the worst-case admissible
-    // segment must fit the rotation sorter's fixed entry capacity.
+  it('constructive frame minimization pins the true minimum and every envelope margin', () => {
+    // CONSTRUCTIVE EXHAUSTIVE MINIMIZATION of every variable field of a legal
+    // production frame accepted by the frozen encoder: 1-char identifiers
+    // (identifier rule [a-z0-9][a-z0-9_-]{0,63}), 1-digit txIds (canonical
+    // decimal), fixed 64-hex digests, null audit, one operation (the minimum
+    // op count) with the smallest validateSemantic-legal payload for EVERY
+    // production type. Every remaining degree of freedom (identifier length,
+    // txId length, op count, payload size) is at its floor, so the measured
+    // minimum is the true global encoder-legal minimum (Codex AMBER repair:
+    // the old 500 floor was falsified by a legal 499-byte frame).
+    const zero = '0'.repeat(64);
+    const frameOf = (storeId: string, epochId: string, mutationId: string, opType: string, payload: unknown) => {
+      const encoded = value(encodeEtherData(payload as never));
+      return encodeWalFrame({ storeId, format: { format: WAL_FORMAT, version: WAL_VERSION },
+        expectedBase: { epochId, txId: '0' as CommittedTip['txId'], digest: zero },
+        identity: { epochId, txId: '1' as CommittedTip['txId'] },
+        mutation: { mutationId: mutationId as never, digest: zero },
+        operations: [{ type: opType as never, version: '1',
+          payload: { encoding: ETHER_DATA_PROFILE, data: Buffer.from(encoded).toString('utf8') } }],
+        audit: null }, productionRegistry);
+    };
+    const candidates: Array<[string, unknown]> = [];
+    for (const type of ['ether.note.put', 'ether.note.remove', 'ether.diary.put', 'ether.diary.remove',
+      'ether.graph-node.put', 'ether.graph-node.remove', 'ether.graph-edge.put', 'ether.graph-edge.remove', 'ether.identity.put']) {
+      candidates.push(type === 'ether.identity.put' ? [type, { userId: 'a' }] : [type, { id: 'a' }]);
+    }
+    const sizes = new Map<string, number>();
+    for (const id of ['a', '0']) {
+      for (const [type, payload] of candidates) {
+        expect(validateSemantic(type, payload).ok).toBe(true);
+        const frame = frameOf(id, id, id, type, payload);
+        if (frame.ok) sizes.set(type + '|' + id, frame.value.bytes.byteLength);
+      }
+    }
+    const min = Math.min(...sizes.values());
+    // Exact pin: any encoder change producing a smaller legal frame fails here.
+    expect(min).toBe(MIN_LEGAL_WAL_FRAME_BYTES);
+    // Codex's regression: a legal frame below the old false 500-byte floor.
+    expect(sizes.get('ether.note.remove|a')).toBe(499);
+    // BINDING BOUND: every admissible segment must fit the rotation sorter's
+    // fixed entry capacity under the PROVEN minimum frame size.
     expect(SORTER_ENTRY_CAPACITY).toBe(128 * 512);
     expect(Math.floor(MAX_ACTIVE_WAL_BYTES / MIN_LEGAL_WAL_FRAME_BYTES)).toBeLessThanOrEqual(SORTER_ENTRY_CAPACITY);
-    // Byte-scratch margins: restart scratch (T5 index runs + merge output),
-    // and rotation TRANSIENT sort scratch only (never cumulative durable
-    // history, which is filesystem-capacity-bound - Copilot AMBER Finding 2).
+    // Byte-scratch margins: restart scratch, and rotation TRANSIENT sort
+    // scratch only (never cumulative durable history, which is
+    // filesystem-capacity-bound).
     const R_IDX = 512; // frozen recoveryMutationIndex MAX_RECORD_BYTES
     expect(2 * Math.ceil(MAX_ACTIVE_WAL_BYTES / MIN_LEGAL_WAL_FRAME_BYTES) * R_IDX).toBeLessThanOrEqual(DEFAULT_MAX_INDEX_BYTES);
     expect(Math.ceil(1.25 * MAX_ACTIVE_WAL_BYTES)).toBeLessThanOrEqual(DEFAULT_MAX_INDEX_BYTES);
