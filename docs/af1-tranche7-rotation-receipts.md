@@ -220,12 +220,17 @@ A required ledger absent while authority is held is genuine corruption.
      floor was falsified by a legal 499-byte frame, kept as a permanent
      regression) — so admissibility requires
      `B ≤ C_SORT × F_MIN = 32,505,856` bytes;
-   - byte bounds: restart scratch `2 × B × 512/500 ≤ 256 MiB` (B ≤ 125 MiB)
-     and transient rotation sort scratch `≤ 1.25 × B ≤ 256 MiB`.
-   - Chosen 30 MiB leaves margin below the binding bound
-     (⌊30 MiB/496⌋ = 63,420 ≤ 65,536; restart scratch 2 × 63,420 × 512 ≈
-     65 MiB, well inside the 256 MiB working budget): every admitted segment
-     is provably restartable AND rotatable under default limits.
+   - byte bounds: restart scratch `2 × B × 512/496 ≤ 268,435,456 bytes`
+     (B ≤ 130,023,424 bytes) and transient rotation sort scratch
+     `≤ 1.25 × B ≤ 268,435,456 bytes` (B ≤ 214,748,364 bytes).
+   - Chosen 30 MiB = 31,457,280 bytes leaves margin below the binding
+     bound: at most 63,421 legal minimum-sized frames fit under the byte
+     envelope (63,421 × 496 = 31,456,816 bytes ≤ 31,457,280 bytes
+     < 63,422 × 496 = 31,457,312 bytes), and 63,421 ≤ 65,536 sorter
+     entries; worst-case restart scratch 2 × 63,421 × 512 = 64,943,104
+     bytes, well inside the frozen 256 MiB = 268,435,456-byte working
+     budget. Every admitted segment is provably restartable AND rotatable
+     under default limits.
    - A commit whose exact prospective frame would cross the envelope fails
      precommit (`RECOVERY_REQUIRED`, `reason:"resource-limit"`,
      `phase:"precommit-validation"`) before payload-object durability, WAL

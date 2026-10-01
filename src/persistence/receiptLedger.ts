@@ -88,20 +88,23 @@ export const ROOT_PREDECESSOR_DIGEST = ZERO_DIGEST;
  *     496 bytes (ether.note.put {id:"a"}) - pinned exactly by the derivation
  *     test, which also reproduces Codex's 499-byte frame.
  *
- * (2) BYTE-SCRATCH BUDGET (frozen 256 MiB working budget):
- *       restart scratch: 2 x E(B) x R_IDX(512) <= 2.048 x B
- *         -> B <= 125 MiB;
+ * (2) BYTE-SCRATCH BUDGET (frozen 256 MiB = 268,435,456-byte working budget):
+ *       restart scratch: 2 x E(B) x R_IDX(512) <= 2 x B x 512/496
+ *         -> B <= 130,023,424 bytes;
  *       rotation transient SORT scratch only (NOT cumulative durable
- *         history; see below): <= 1.25 x B -> B <= 204.8 MiB.
+ *         history; see below): <= 1.25 x B -> B <= 214,748,364 bytes.
  *     The T5 mutation index (record bound 512 B, byte-accounted 256 MiB
  *     budget, 1,024-file namespace) and the history verifier are both
  *     comfortably inside these bounds at E = C_SORT.
  *
  * Chosen: 30 MiB = 31,457,280 bytes - a round constant with margin
- * below the binding bound (1): floor(30 MiB / 496) = 63,420 entries
- * <= 65,536 (and 2 x 63,420 x 512 = 64.99 MiB restart scratch, well inside
- * the 256 MiB working budget). Every segment admitted by this envelope is
- * therefore restartable AND rotatable under default limits.
+ * below the binding bound (1): at most 63,421 legal minimum-sized frames
+ * fit under the byte envelope (63,421 x 496 = 31,456,816 bytes
+ * <= 31,457,280 bytes < 63,422 x 496 = 31,457,312 bytes), and
+ * 63,421 <= 65,536 sorter entries (worst-case restart scratch
+ * 2 x 63,421 x 512 = 64,943,104 bytes, well inside the frozen
+ * 268,435,456-byte working budget). Every segment admitted by this
+ * envelope is therefore restartable AND rotatable under default limits.
  *
  * DURABLE CUMULATIVE RECEIPT STORAGE IS DELIBERATELY NOT BOUNDED BY THIS
  * ENVELOPE (Copilot AMBER Finding 2): retained receipt history grows
