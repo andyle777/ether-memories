@@ -69,7 +69,20 @@ export async function withRecoveryAuthority<T>(directory: string, io: DirectoryI
       await io.removeOwnedFile(lock);
       owned = false;
       await io.syncDirectory(directory);
-    } catch { result = err("RECOVERY_REQUIRED", "Recovery authority release/barrier failed."); }
+    } catch {
+      // A release/barrier failure must never erase the primary outcome
+      // (Copilot AMBER Finding 4): the result's details - including rotation
+      // activation state (activated: true / rotationCommitted facts) - are
+      // preserved so callers can distinguish "never performed" from
+      // "authority already switched". The frozen error code and
+      // recovery-required classification are unchanged; details are purely
+      // additive.
+      const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+      const details = result.ok
+        ? (isRecord(result.value) ? { ...result.value } : undefined)
+        : (isRecord(result.error.details) ? { ...result.error.details } : undefined);
+      result = err("RECOVERY_REQUIRED", "Recovery authority release/barrier failed.", details);
+    }
   }
   return result;
 }

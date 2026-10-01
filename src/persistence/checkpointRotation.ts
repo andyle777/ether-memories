@@ -4,7 +4,7 @@ import { err, ok, type Result } from "../utils/result.js";
 import type { CommittedTip, MutationId } from "../types/persistence.js";
 import type { WalOperation } from "../types/persistence.js";
 import { encodeCheckpoint, encodeStoreHead, verifyCheckpoint, decodeStoreHead, PERSISTENCE_LIMITS, HEAD_FORMAT, HEAD_VERSION, DIGEST_ALGORITHM, type PersistedStoreHead } from "./codecs.js";
-import { nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
+import { nodeDirectoryIO, DirectoryIoError, type DirectoryIO } from "./directoryIO.js";
 import { nodeWalIO, type WalFileHandle, type WalIO } from "./walIO.js";
 import { withRecoveryAuthority, type RecoveryAuthority } from "./recoveryAuthority.js";
 import { WalFileScan } from "./walFileScan.js";
@@ -61,22 +61,43 @@ export interface RotationInput {
 }
 
 /** Deterministic scratch namespace (T5 convention: bounded, swept every time). */
-const SCRATCH_NAMESPACE_SIZE = 128;
+export const SCRATCH_NAMESPACE_SIZE = 128;
 const scratchCandidate = (index: number) => `rotation-candidate-${String(index).padStart(6, "0")}.bin`;
 const scratchCheckpoint = (index: number) => `rotation-checkpoint-${String(index).padStart(6, "0")}.bin`;
 const scratchHead = (index: number) => `rotation-head-${String(index).padStart(6, "0")}.bin`;
 const scratchSortRun = (index: number) => `rotation-sort-${String(index).padStart(6, "0")}.run`;
 
 /** Entries buffered per sorted run: RAM stays bounded by this chunk. */
-const SORT_CHUNK_ENTRIES = 512;
+export const SORT_CHUNK_ENTRIES = 512;
+/**
+ * Maximum receipt entries one rotation can sort: every committed transaction
+ * in the retiring segment becomes exactly one entry, so this fixed capacity is
+ * a hard bound on the segments MAX_ACTIVE_WAL_BYTES may admit (derivation in
+ * receiptLedger.ts; enforced by the envelope derivation test).
+ */
+export const SORTER_ENTRY_CAPACITY = SCRATCH_NAMESPACE_SIZE * SORT_CHUNK_ENTRIES;
 
-/** Sweeps the entire deterministic rotation scratch namespace, tolerating ENOENT. */
-async function sweepScratch(directory: string, io: DirectoryIO): Promise<void> {
+/**
+ * Sweeps the entire deterministic rotation scratch namespace. ENOENT is the
+ * idempotent-success case; every OTHER removal or directory-sync failure is
+ * observable (never silently swallowed debris - Copilot AMBER Finding 5).
+ * After successful removals the .private directory barrier is taken.
+ */
+async function sweepScratch(directory: string, io: DirectoryIO): Promise<Result<undefined>> {
   for (let index = 0; index < SCRATCH_NAMESPACE_SIZE; index++) {
     for (const name of [scratchCandidate(index), scratchCheckpoint(index), scratchHead(index), scratchSortRun(index)]) {
-      try { await io.removeOwnedFile(join(directory, ".private", name)); } catch { /* absent: fine */ }
+      try { await io.removeOwnedFile(join(directory, ".private", name)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        return err(error instanceof DirectoryIoError ? error.code : "RECOVERY_REQUIRED", "Rotation scratch cleanup failed.");
+      }
     }
   }
+  try { await io.syncDirectory(join(directory, ".private")); }
+  catch (error) {
+    return err(error instanceof DirectoryIoError ? error.code : "RECOVERY_REQUIRED", "Rotation scratch cleanup barrier failed.");
+  }
+  return ok(undefined);
 }
 
 /**
@@ -221,8 +242,10 @@ export async function rotateDurableStore(input: RotationInput): Promise<Result<R
       return err("RECOVERY_REQUIRED", "The published generation does not belong to the active store lineage.");
     }
     // T5-convention scratch sweep: crashed-rotation scratch never survives a
-    // new attempt, and ENOENT is always tolerated.
-    await sweepScratch(directory, io);
+    // new attempt. ENOENT is tolerated; a real cleanup/barrier failure fails
+    // the rotation pre-activation with the old lineage fully authoritative.
+    const swept = await sweepScratch(directory, io);
+    if (!swept.ok) return swept;
     await instrumentation.at("P1-capture");
 
     // The authoritative historical ledger for the CURRENT lineage (zero
@@ -430,23 +453,39 @@ export async function rotateDurableStore(input: RotationInput): Promise<Result<R
     await io.syncDirectory(join(directory, "checkpoints"));
 
     // P6: IRREVERSIBLE rotation commit point - atomic HEAD activation.
-    await instrumentation.at("P6-head-activate");
-    const headCandidate = join(directory, ".private", scratchHead(0));
-    const encodedHead = encodeStoreHead(newHead);
-    if (!encodedHead.ok) return encodedHead;
-    await io.writeExclusive(headCandidate, encodedHead.value);
-    await io.syncDirectory(join(directory, ".private"));
-    const persistedHead = await io.readBounded(headCandidate, PERSISTENCE_LIMITS.headBytes);
-    const decodedHead = decodeStoreHead(persistedHead);
-    if (!decodedHead.ok || !Buffer.from(persistedHead).equals(Buffer.from(encodedHead.value))) {
-      return err("RECOVERY_REQUIRED", "HEAD candidate verification failed.");
+    // The activation state is tracked explicitly through every substep
+    // (Copilot AMBER Finding 4): pre-activation (HEAD rename never occurred,
+    // old lineage definitely authoritative) is materially different from
+    // head-renamed-durability-unconfirmed (process-visible HEAD may already be
+    // the new lineage, crash durability unconfirmed - never reported as an
+    // ordinary pre-activation failure).
+    let headRenamed = false;
+    try {
+      await instrumentation.at("P6-head-activate");
+      const headCandidate = join(directory, ".private", scratchHead(0));
+      const encodedHead = encodeStoreHead(newHead);
+      if (!encodedHead.ok) {
+        return err(encodedHead.error.code, encodedHead.error.message, { activationState: "pre-activation" });
+      }
+      await io.writeExclusive(headCandidate, encodedHead.value);
+      await io.syncDirectory(join(directory, ".private"));
+      const persistedHead = await io.readBounded(headCandidate, PERSISTENCE_LIMITS.headBytes);
+      const decodedHead = decodeStoreHead(persistedHead);
+      if (!decodedHead.ok || !Buffer.from(persistedHead).equals(Buffer.from(encodedHead.value))) {
+        return err("RECOVERY_REQUIRED", "HEAD candidate verification failed.", { activationState: "pre-activation" });
+      }
+      const activated = await io.activateFile(headCandidate, join(directory, "HEAD"));
+      if (activated !== "atomic") {
+        return err("DURABILITY_UNAVAILABLE", "Backend did not confirm atomic HEAD activation.", { activationState: "pre-activation" });
+      }
+      headRenamed = true;
+      await io.syncDirectory(join(directory, ".private"));
+      await io.syncDirectory(directory);
+    } catch (error) {
+      return err(error instanceof DirectoryIoError ? error.code : "RECOVERY_REQUIRED",
+        error instanceof DirectoryIoError ? error.message : "HEAD activation failed.",
+        { activationState: headRenamed ? "head-renamed-durability-unconfirmed" : "pre-activation" });
     }
-    const activated = await io.activateFile(headCandidate, join(directory, "HEAD"));
-    if (activated !== "atomic") {
-      return err("DURABILITY_UNAVAILABLE", "Backend did not confirm atomic HEAD activation.");
-    }
-    await io.syncDirectory(join(directory, ".private"));
-    await io.syncDirectory(directory);
 
     // P7: idempotent post-activation reclamation. The new lineage is now
     // authoritative; failures here NEVER undo the rotation and are reported
@@ -462,7 +501,8 @@ export async function rotateDurableStore(input: RotationInput): Promise<Result<R
       if (previousReader && previousReader.ledgerDigest !== ledgerDigestHex) {
         await io.removeOwnedFile(receiptLedgerPath(directory, previousReader.ledgerDigest));
       }
-      await sweepScratch(directory, io);
+      const scratchSwept = await sweepScratch(directory, io);
+      if (!scratchSwept.ok) throw new Error("scratch cleanup failed");
       await io.syncDirectory(join(directory, "wal"));
       await io.syncDirectory(join(directory, "checkpoints"));
       await io.syncDirectory(receiptsDirectory);

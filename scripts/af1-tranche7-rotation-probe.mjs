@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 // Compiled production modules only; never tests/ or src/ development imports.
 import { openDurableEtherMemoriesInternal } from "../dist/core/DurableEtherMemories.js";
 import { rotateDurableStore } from "../dist/persistence/checkpointRotation.js";
-import { ReceiptLedgerReader, receiptLedgerPath } from "../dist/persistence/receiptLedger.js";
+import { ReceiptLedgerReader, receiptLedgerPath, RECEIPTS_DIRECTORY } from "../dist/persistence/receiptLedger.js";
 import { encodeSnapshotPayload } from "../dist/persistence/snapshotPayload.js";
 import { decodeStoreHead } from "../dist/persistence/codecs.js";
 import { StartupRecovery } from "../dist/persistence/StartupRecovery.js";
@@ -106,6 +106,14 @@ try {
   assert.equal(value(await reopened.addMemory({ content: "probe post-rotation note", tags: ["t7"], status: "active" }, "probe-note-c")).content, "probe post-rotation note");
   // A fresh active segment still accepts new commits after two rotations.
   value(await reopened.addMemory({ content: "probe active segment note", tags: ["t7"], status: "active" }, "probe-note-d"));
+  // Rotation 3: the third destructive round trip with retries from every
+  // retired segment plus the active WAL.
+  const third = value(await reopened.rotate());
+  assert.equal(third.receiptCount, committedBeforeRotation + 3);
+  assert.equal(value(await reopened.addMemory({ content: "probe rotation note A", tags: ["t7"], status: "active" }, "probe-note-a")).id, noteA.id);
+  assert.equal(value(await reopened.addMemory({ content: "probe post-rotation note", tags: ["t7"], status: "active" }, "probe-note-c")).content, "probe post-rotation note");
+  assert.equal(value(await reopened.addMemory({ content: "probe active segment note", tags: ["t7"], status: "active" }, "probe-note-d")).content, "probe active segment note");
+  assert.equal((await fs.readdir(join(directory, RECEIPTS_DIRECTORY))).length, 1);
   const finalSnapshot = snapshotOf(reopened);
   const finalTip = value(reopened.tip);
   value(await reopened.close());
@@ -142,7 +150,7 @@ try {
   // receipt-referenced object must refuse startup.
   const ledgerMissing = join(parent, "ledger-missing");
   await fs.cp(directory, ledgerMissing, { recursive: true });
-  await fs.unlink(receiptLedgerPath(ledgerMissing, second.ledgerDigest));
+  await fs.unlink(receiptLedgerPath(ledgerMissing, third.ledgerDigest));
   assert.equal(failureCode(await openDurableEtherMemoriesInternal({ userId, directory: ledgerMissing, openMode: "existing" }, { io, files })), "PERSISTENCE_CORRUPTION");
   const objects = await fs.readdir(join(directory, "objects"));
   assert.ok(objects.length > 0);
@@ -157,11 +165,11 @@ try {
 
   const snapshotSha256 = createHash("sha256").update(finalSnapshot).digest("hex");
   console.log(JSON.stringify({
-    rotations: 2,
+    rotations: 3,
     committedBeforeRotation,
-    receiptCountAfterRotation2: second.receiptCount,
+    receiptCountAfterRotation3: third.receiptCount,
     retiredWalBytes: first.retiredWalBytes,
-    ledgerDigestRotation2: second.ledgerDigest,
+    ledgerDigestRotation3: third.ledgerDigest,
     snapshotBytes: finalSnapshot.length,
     snapshotSha256,
     finalTip: finalTip.txId,

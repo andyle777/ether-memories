@@ -66,27 +66,44 @@ export interface ReceiptLedgerHeader {
 export const ROOT_PREDECESSOR_DIGEST = ZERO_DIGEST;
 
 /**
- * MAX_ACTIVE_WAL_BYTES, derived (not assumed) from the frozen 256 MiB
- * working budget (DEFAULT_MAX_INDEX_BYTES) and frozen expansion constants,
- * all protected by a dedicated derivation test:
+ * MAX_ACTIVE_WAL_BYTES, derived (not assumed) from every fixed resource
+ * capacity a legal segment can expand into, all protected by a dedicated
+ * derivation test. The envelope is bounded by the MINIMUM of:
  *
- *   F_MIN  = minimum legal WAL frame bytes, measured with the frozen encoder
- *            at 526 (assumption floor 500, test-enforced).
- *   R_IDX  = frozen mutation-index record bound = 512 bytes.
- *   E(B)   = B / F_MIN worst-case logical transactions in a B-byte segment.
+ * (1) SORTER ENTRY CAPACITY (binding bound; Copilot AMBER Finding 1):
+ *     the rotation segment sorter holds at most
+ *       C_SORT = SORTER_NAMESPACE(128 runs) x SORT_CHUNK_ENTRIES(512)
+ *              = 65,536 receipt entries.
+ *     Every committed transaction becomes exactly one receipt entry, and
+ *     every legal frame is at least F_MIN bytes, so a B-byte segment holds
+ *     at most E(B) = B / F_MIN transactions. Rotatability requires
+ *       E(B) <= C_SORT  =>  B <= C_SORT x F_MIN = 32,768,000 bytes.
  *
- *   restart worst scratch (T5 index runs + merge output):
- *     2 x E(B) x R_IDX <= 2 x B x 512/500 = 2.048 x B
- *     -> at B = 64 MiB: 131 MiB (51% of the 256 MiB budget)
- *   rotation worst scratch (segment sort runs; entries <= frames plus a
- *   25% safety factor): 1.25 x B -> at B = 64 MiB: 80 MiB (31%).
+ * (2) BYTE-SCRATCH BUDGET (frozen 256 MiB working budget):
+ *       restart scratch: 2 x E(B) x R_IDX(512) <= 2.048 x B
+ *         -> B <= 125 MiB;
+ *       rotation transient SORT scratch only (NOT cumulative durable
+ *         history; see below): <= 1.25 x B -> B <= 204.8 MiB.
+ *     The T5 mutation index (record bound 512 B, byte-accounted 256 MiB
+ *     budget, 1,024-file namespace) and the history verifier are both
+ *     comfortably inside these bounds at E = C_SORT.
  *
- * 64 MiB leaves >= 2x headroom for every session-owned structure a legal
- * segment of that size can expand into: any accepted segment can
- * subsequently restart AND rotate under default budgets.
+ * Chosen: 30 MiB = 31,457,280 bytes - a round constant with >= 4% margin
+ * below the binding bound (1): floor(30 MiB / 500) = 62,914 entries
+ * <= 65,536. Every segment admitted by this envelope is therefore
+ * restartable AND rotatable under default limits.
+ *
+ * DURABLE CUMULATIVE RECEIPT STORAGE IS DELIBERATELY NOT BOUNDED BY THIS
+ * ENVELOPE (Copilot AMBER Finding 2): retained receipt history grows
+ * indefinitely, and a rotation's cumulative ledger rewrite (predecessor +
+ * successor coexisting) is bounded only by actual filesystem capacity.
+ * ENOSPC before P6 fails the rotation pre-activation with the old lineage
+ * fully authoritative. The 1.25 x B factor above bounds ONLY transient
+ * sort scratch derived from the retiring segment, never total rotation
+ * disk.
  */
 export const MIN_LEGAL_WAL_FRAME_BYTES = 500;
-export const MAX_ACTIVE_WAL_BYTES = 64 * 1024 * 1024;
+export const MAX_ACTIVE_WAL_BYTES = 30 * 1024 * 1024;
 
 const isHex = (value: unknown, length: number): value is string =>
   typeof value === "string" && value.length === length && /^[0-9a-f]+$/.test(value);

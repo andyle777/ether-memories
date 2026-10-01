@@ -351,38 +351,34 @@ export class ProductionWalStore {
   /**
    * Tranche 7 historical receipt lookup: reconcile a mutation identity
    * against the authoritative cumulative receipt ledger (reclaimed history).
-   * Same intent digest -> the original committed receipt with effects
-   * resolved from the receipt's exact committed operations (OBJECT_REFERENCEs
-   * resolve through the immutable payload-object machinery). Conflicting
-   * intent -> corruption. Absent -> undefined.
+   * The COMPLETE lookup - HEAD observation, required-ledger derivation,
+   * receipt lookup and effect resolution - runs under writer authority
+   * (Copilot AMBER Finding 3): HEAD and the receipt ledger are observed as
+   * one coherent authoritative lineage, and a concurrent rotation necessarily
+   * serializes entirely before or entirely after this lookup. A required
+   * ledger missing while this authority is held is genuine corruption; a
+   * ledger that vanished because another runtime rotated and reclaimed it is
+   * impossible inside this window. Same intent digest -> the original
+   * committed receipt with effects resolved from the receipt's exact
+   * committed operations (OBJECT_REFERENCEs resolve through the immutable
+   * payload-object machinery). Conflicting intent -> corruption. Absent ->
+   * undefined.
    */
   private async lookupHistoricalMutation(mutationId: MutationId, intentDigest: string): Promise<Result<MutationOutcome | undefined>> {
-    let checkpointId: string;
-    let epochId: string;
-    let storeId: string;
-    try {
-      const headBytes = Buffer.from(await this.io.readBounded(join(this.directory, "HEAD"), PERSISTENCE_LIMITS.headBytes));
-      const head = decodeStoreHead(headBytes);
-      if (!head.ok) return head;
-      checkpointId = head.value.checkpoint.checkpointId;
-      epochId = head.value.epochId;
-      storeId = head.value.storeId;
-    } catch {
-      return err("RECOVERY_REQUIRED", "Historical receipt lookup could not read the store.");
-    }
-    const ledger = await openAuthoritativeReceiptLedger(this.directory, storeId, epochId, checkpointId, this.files);
-    if (!ledger.ok) return ledger;
-    const reader = ledger.value;
-    if (!reader) return ok(undefined);
-    const found = await reader.lookup(mutationId);
-    if (!found.ok) return found;
-    if (!found.value) return ok(undefined);
-    const entry = found.value;
-    if (entry.intentDigest !== intentDigest) {
-      return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
-    }
-    // Resolve the receipt's committed operations under writer authority.
     return withRecoveryAuthority(this.directory, this.io, async authority => {
+      const head = authority.head;
+      const ledger = await openAuthoritativeReceiptLedger(authority.directory, head.storeId, head.epochId,
+        head.checkpoint.checkpointId, this.files);
+      if (!ledger.ok) return ledger;
+      const reader = ledger.value;
+      if (!reader) return ok(undefined);
+      const found = await reader.lookup(mutationId);
+      if (!found.ok) return found;
+      if (!found.value) return ok(undefined);
+      const entry = found.value;
+      if (entry.intentDigest !== intentDigest) {
+        return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
+      }
       const effects: SemanticOperation[] = [];
       for (const operation of entry.operations) {
         const semantic = required(await resolveOperation(operation, authority, this.objects));

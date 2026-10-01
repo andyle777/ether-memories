@@ -1,7 +1,8 @@
 # AF1 Tranche 7 — Checkpoint Rotation, Durable Receipts and WAL Reclamation
 
-Status: implemented on `feat/v0.6.0-af1-tranche7` (unfrozen). Frozen parents: T6 `77fee0df`,
-T5 `86fd96cc`. This document describes the T7 architecture exactly as implemented.
+Status: implemented on `feat/v0.6.0-af1-tranche7` (unfrozen; Copilot AMBER repairs applied).
+Frozen parents: T6 `77fee0df`, T5 `86fd96cc`. This document describes the T7
+architecture exactly as implemented.
 
 ## Invariant
 
@@ -35,7 +36,10 @@ store/
 `receipts/` is a permanent durable namespace. `.private/` remains disposable
 scratch and is never receipt authority. Rotation scratch uses the frozen T5
 deterministic-namespace convention (`rotation-{candidate,checkpoint,head,sort}-{NNNNNN}.{bin,run}`,
-128 slots) swept at P0 and P7 of every rotation.
+128 slots) swept at P0 and P7 of every rotation; ENOENT during sweeps is
+idempotent success, every other removal or `.private` barrier failure is
+observable (pre-P6: fails the rotation pre-activation; post-P6: reported as
+pending cleanup with `activated: true`).
 
 ## Receipt ledger wire (stream-framed)
 
@@ -98,7 +102,8 @@ platform collation. An authoritative ledger must be strictly increasing.
 ## Rotation protocol (P0–P7, writer authority held throughout)
 
 - **P0 authority**: acquire writer authority; verify the current HEAD
-  lineage matches the runtime's published epoch; sweep rotation scratch.
+  lineage matches the runtime's published epoch; sweep rotation scratch
+  (real removal/barrier failures fail pre-activation; ENOENT is idempotent).
 - **P1 capture**: capture the exact immutable published generation
   (canonical snapshot bytes + committed tip). No state mutation.
 - **P2 scan**: frozen WAL scan proving the segment is anchored to exactly the
@@ -117,13 +122,36 @@ platform collation. An authoritative ledger must be strictly increasing.
   directory syncs — all before HEAD activation. HEAD never references an
   artifact that is not already durable and verified at its final path.
 - **P6 HEAD activation (irreversible)**: frozen candidate → byte-exact verify
-  → `activateFile` → directory barriers. After P6 the new lineage is
-  authoritative and is never reported otherwise.
+  → `activateFile` → directory barriers, with the activation state tracked
+  explicitly through every substep (see below).
 - **P7 reclamation (idempotent, post-activation)**: remove the retired WAL,
   obsolete checkpoint, predecessor ledger and rotation scratch; barriers.
   Failures (including injected crashes) return
   `{activated: true, phase: "post-activation"}` and never claim old authority;
   the next rotation/recovery sweeps debris safely.
+
+### P6 activation-state model
+
+Every P6 failure carries an exact `activationState` detail:
+
+- `pre-activation` — the HEAD rename never occurred (candidate write/verify,
+  rename failure, backend refusal). The old lineage is definitely
+  authoritative; the runtime conservatively requires recovery before further
+  writes.
+- `head-renamed-durability-unconfirmed` — the rename succeeded but a
+  post-rename `.private`/store directory barrier failed: process-visible HEAD
+  may already be the new lineage while crash durability is unconfirmed. Never
+  reported as an ordinary pre-activation failure; the runtime enters
+  `recovery-required` (`rotationDurabilityUncertain: true`) until explicit
+  recovery re-establishes coherent authority.
+- **post-barrier/committed** — P6 fully succeeded; P7 failures retain
+  `activated: true` (runtime: `rotationCommitted: true`).
+- **authority release** — a failure while releasing writer authority never
+  erases the primary outcome: `withRecoveryAuthority` preserves the committed
+  rotation/recovery details (including `activated: true` and the full
+  `RotationOutcome` when the operation itself succeeded), so callers can
+  always distinguish "never performed" from "authority already switched".
+  The frozen error code and recovery-required classification are unchanged.
 
 ### Crash matrix
 
@@ -158,22 +186,45 @@ immutable payload-object machinery); conflicting intent → corruption; absent
 transaction results after rotation, WAL deletion, later updates/deletions,
 restart and multiple rotations. No Core re-execution; no generated IDs.
 
-## Active-WAL envelope
+**Concurrency (Copilot AMBER Finding 3 repaired)**: the COMPLETE historical
+lookup — authoritative HEAD observation, required-ledger derivation, receipt
+lookup and effect resolution — runs under writer authority as ONE coherent
+lineage view. A concurrent rotation therefore serializes entirely before or
+entirely after the lookup and observes normal `WRITER_BUSY` contention; a
+legitimate rotation can never be misclassified as missing-history corruption.
+A required ledger absent while authority is held is genuine corruption.
 
-`MAX_ACTIVE_WAL_BYTES = 64 MiB`, derived (see `receiptLedger.ts`) from the
-frozen 256 MiB working budget and frozen expansion constants, all pinned by a
-derivation test: F_MIN ≥ 500 measured via the frozen encoder; R_IDX = 512
-(frozen mutation-index record bound); restart worst scratch
-`2 × B × 512/500 = 2.048 × B` (131 MiB at 64 MiB); rotation worst scratch
-`1.25 × B` (80 MiB). Any accepted segment can subsequently restart AND rotate
-under default budgets.
+## Resource contract (three distinct quantities)
 
-A commit whose EXACT prospective frame (same transport plan as the commit
-performs, encoded with the store's real identity fields) would push the active
-segment past the envelope fails precommit — before payload-object durability,
-WAL append, tip advancement or generation publication — with
-`RECOVERY_REQUIRED` + `{reason: "resource-limit", phase: "precommit-validation"}`,
-and requires an explicit `rotate()`. The runtime stays ready.
+1. **MAX_ACTIVE_WAL_BYTES = 30 MiB** — the mathematical admission limit for
+   one active WAL segment, bounded by the MINIMUM of every fixed capacity a
+   legal segment can expand into:
+   - binding bound: the rotation sorter's fixed entry capacity
+     `C_SORT = 128 runs × 512 entries = 65,536` receipt entries; every
+     committed transaction becomes exactly one entry and every legal frame is
+     at least F_MIN ≥ 500 bytes (frozen-encoder-measured, test-enforced), so
+     admissibility requires `B ≤ C_SORT × F_MIN = 32,768,000` bytes;
+   - byte bounds: restart scratch `2 × B × 512/500 ≤ 256 MiB` (B ≤ 125 MiB)
+     and transient rotation sort scratch `≤ 1.25 × B ≤ 256 MiB`.
+   - Chosen 30 MiB leaves ≥ 4% margin below the binding bound
+     (⌊30 MiB/500⌋ = 62,914 ≤ 65,536): every admitted segment is provably
+     restartable AND rotatable under default limits.
+   - A commit whose exact prospective frame would cross the envelope fails
+     precommit (`RECOVERY_REQUIRED`, `reason:"resource-limit"`,
+     `phase:"precommit-validation"`) before payload-object durability, WAL
+     append, tip advancement or publication; the runtime stays ready and an
+     explicit `rotate()` is required.
+2. **Bounded transient sort/recovery scratch** — a function of the retiring
+   segment only (the 1.25 × B factor above), inside the frozen 256 MiB
+   working budget.
+3. **Durable cumulative receipt storage** — grows INDEFINITELY with retained
+   receipt history and is deliberately NOT bounded by the envelope or the
+   working budget. A rotation's cumulative rewrite temporarily coexists with
+   its predecessor (peak disk ≈ predecessor ledger + successor ledger +
+   active segment/sort scratch + checkpoint/fixed overhead); actual
+   filesystem capacity is the limiting physical resource. ENOSPC before P6
+   fails the rotation pre-activation with the old lineage fully
+   authoritative; ENOSPC never destroys historical authority.
 
 ## Runtime surface
 
@@ -183,6 +234,10 @@ the immutable generation, the published generation (state and tip) is
 identical across rotation, and a post-activation cleanup failure is reported
 with `rotationCommitted: true`. Rotation does not republish the generation and
 introduces no lease or coordination beyond the frozen single-writer authority.
+A rotation failure classified `RECOVERY_REQUIRED`/`STALE_TRANSACTION_BASE` (or
+any `pre-activation`/`head-renamed-durability-unconfirmed` P6 failure)
+conservatively moves the runtime to `recovery-required`; explicit recovery
+restores readiness without state change.
 
 ## Historical object roots (binding for future GC)
 

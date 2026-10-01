@@ -6,7 +6,7 @@ import { value } from "./helpers/persistence.js";
 import { bootstrap, semanticFrame, semanticNote, identityPut } from "./helpers/recovery.js";
 import { simulatedDirectoryIO } from "./helpers/wal.js";
 import { openDurableEtherMemoriesInternal, type DurableEtherMemories } from "../src/core/DurableEtherMemories.js";
-import { rotateDurableStore, type RotationPhase } from "../src/persistence/checkpointRotation.js";
+import { rotateDurableStore, SORTER_ENTRY_CAPACITY, type RotationPhase } from "../src/persistence/checkpointRotation.js";
 import {
   MAX_ACTIVE_WAL_BYTES, MIN_LEGAL_WAL_FRAME_BYTES, MAX_RECEIPT_ENTRY_BYTES, RECEIPTS_DIRECTORY,
   openAuthoritativeReceiptLedger, ReceiptLedgerReader, isRotatedCheckpointId, receiptLedgerPath
@@ -15,8 +15,10 @@ import { DEFAULT_MAX_INDEX_BYTES } from "../src/persistence/recoveryMutationInde
 import { WAL_LIMITS } from "../src/persistence/wal.js";
 import { encodeSnapshotPayload } from "../src/persistence/snapshotPayload.js";
 import { decodeStoreHead } from "../src/persistence/codecs.js";
+import { nodeWalIO, type WalIO } from "../src/persistence/walIO.js";
 import type { DirectoryIO } from "../src/persistence/directoryIO.js";
 import type { CommittedTip } from "../src/types/persistence.js";
+import type { EtherSnapshot } from "../src/types/index.js";
 
 const cleanup: string[] = [];
 const setup = async () => {
@@ -36,11 +38,11 @@ const failure = (result: { ok: boolean; error?: { code: string; details?: unknow
   return result.error!;
 };
 const failureDetails = (result: { ok: boolean; error?: { code: string; details?: unknown } }) =>
-  failure(result).details as Record<string, unknown>;
+  (failure(result).details ?? {}) as Record<string, unknown>;
 const open = async (store: Awaited<ReturnType<typeof bootstrap>>,
-  deps: { maxActiveWalBytes?: number; io?: DirectoryIO } = {}) =>
+  deps: { maxActiveWalBytes?: number; io?: DirectoryIO; files?: WalIO } = {}) =>
   openDurableEtherMemoriesInternal({ userId: store.snapshot.identity.userId, directory: store.directory, openMode: "existing" },
-    { io: deps.io ?? store.io, maxActiveWalBytes: deps.maxActiveWalBytes });
+    { io: deps.io ?? store.io, files: deps.files ?? nodeWalIO, maxActiveWalBytes: deps.maxActiveWalBytes });
 const walBytes = async (directory: string) => {
   let total = 0;
   try { for (const name of await fs.readdir(join(directory, "wal"))) total += (await fs.stat(join(directory, "wal", name))).size; }
@@ -63,7 +65,7 @@ const note = (runtime: DurableEtherMemories, content: string, mutationId: string
   runtime.addMemory({ content, tags: ["rotation"], status: "active" }, mutationId);
 
 describe("Tranche 7 active-WAL envelope", { timeout: 300_000 }, () => {
-  it("the F_MIN floor and every derivation margin hold for MAX_ACTIVE_WAL_BYTES", () => {
+  it("the F_MIN floor, sorter entry capacity and every derivation margin hold for MAX_ACTIVE_WAL_BYTES", () => {
     const base = { epochId: "epoch-a", txId: "9007199254740993" as CommittedTip["txId"], digest: "0".repeat(64) };
     // Minimal legal production frames through the frozen encoder: the two
     // smallest operation shapes (a removal and an identity put).
@@ -73,10 +75,16 @@ describe("Tranche 7 active-WAL envelope", { timeout: 300_000 }, () => {
     // The derivation's floor assumption: every legal frame is at least
     // MIN_LEGAL_WAL_FRAME_BYTES, so E(B) <= B / MIN_LEGAL_WAL_FRAME_BYTES.
     expect(measured).toBeGreaterThanOrEqual(MIN_LEGAL_WAL_FRAME_BYTES);
-    // Restart worst scratch (T5 index runs + merge output): 2 * E(B) * R_IDX.
+    // BINDING BOUND (Copilot AMBER Finding 1): every committed transaction
+    // becomes exactly one receipt entry, so the worst-case admissible
+    // segment must fit the rotation sorter's fixed entry capacity.
+    expect(SORTER_ENTRY_CAPACITY).toBe(128 * 512);
+    expect(Math.floor(MAX_ACTIVE_WAL_BYTES / MIN_LEGAL_WAL_FRAME_BYTES)).toBeLessThanOrEqual(SORTER_ENTRY_CAPACITY);
+    // Byte-scratch margins: restart scratch (T5 index runs + merge output),
+    // and rotation TRANSIENT sort scratch only (never cumulative durable
+    // history, which is filesystem-capacity-bound - Copilot AMBER Finding 2).
     const R_IDX = 512; // frozen recoveryMutationIndex MAX_RECORD_BYTES
     expect(2 * Math.ceil(MAX_ACTIVE_WAL_BYTES / MIN_LEGAL_WAL_FRAME_BYTES) * R_IDX).toBeLessThanOrEqual(DEFAULT_MAX_INDEX_BYTES);
-    // Rotation worst scratch (segment sort runs with a 25% safety factor).
     expect(Math.ceil(1.25 * MAX_ACTIVE_WAL_BYTES)).toBeLessThanOrEqual(DEFAULT_MAX_INDEX_BYTES);
     // The envelope always admits at least one maximal legal frame.
     expect(WAL_LIMITS.frameBytes).toBeLessThanOrEqual(MAX_ACTIVE_WAL_BYTES);
@@ -505,5 +513,339 @@ describe("Tranche 7 rotation crash matrix", { timeout: 600_000 }, () => {
     expect(snapshotBytes(reopened)).toEqual(snapshot);
     expect(tipOf(reopened)).toEqual(tip);
     value(await reopened.close());
+  });
+});
+describe("Tranche 7 Copilot AMBER repairs", { timeout: 600_000 }, () => {
+  /**
+   * Crafted tiny-frame histories (frozen encoder, anchored chain). Recovery
+   * is not exercised here: rotateDurableStore streams and validates the WAL
+   * without replaying it, so capacity-stress histories stay fast.
+   */
+  const craftedIdentity = { userId: "fixture-user", createdAt: new Date("2020-01-01T00:00:00.000Z"),
+    lastActive: new Date("2020-01-02T00:00:00.000Z"), preferences: {} };
+  const craft = async (store: Awaited<ReturnType<typeof bootstrap>>, count: number) => {
+    const chunks: Buffer[] = [];
+    let base = store.tip;
+    for (let index = 0; index < count; index++) {
+      const frame = semanticFrame(base, [identityPut()], `tiny-${index}`);
+      chunks.push(Buffer.from(frame.bytes));
+      base = frame.transaction.identity;
+    }
+    await fs.writeFile(store.walPath, Buffer.concat(chunks));
+    const bytes = value(encodeSnapshotPayload({ ...store.snapshot, identity: craftedIdentity } as unknown as EtherSnapshot));
+    return { tip: base, bytes, frameBytes: chunks[0]!.byteLength };
+  };
+
+  it("a worst-case admissible tiny-frame segment rotates and restarts within sorter capacity (Finding 1)", async () => {
+    const s = await setup();
+    // The largest count of these legal minimal frames the default envelope
+    // can admit: exactly the byte envelope.
+    const probe = semanticFrame(s.tip, [identityPut()], "tiny-probe");
+    const count = Math.floor(MAX_ACTIVE_WAL_BYTES / probe.bytes.byteLength);
+    expect(count).toBeGreaterThan(40_000);
+    expect(count).toBeLessThanOrEqual(SORTER_ENTRY_CAPACITY);
+    const crafted = await craft(s, count);
+    expect(await walBytes(s.directory)).toBeLessThanOrEqual(MAX_ACTIVE_WAL_BYTES);
+    const summary = value(await rotateDurableStore({ directory: s.directory, io: s.io,
+      generation: { bytes: crafted.bytes, tip: crafted.tip } }));
+    expect(summary.receiptCount).toBe(count);
+    // The admitted worst case is sortable: the new lineage is authoritative.
+    expect(isRotatedCheckpointId((await headOf(s.directory)).checkpoint.checkpointId)).toBe(true);
+    expect(await walNames(s.directory)).toEqual([]);
+    const reader = value(await ReceiptLedgerReader.open(s.directory, summary.ledgerDigest));
+    expect(reader.header.entryCount).toBe(count);
+    value(await reader.verify());
+    // Restart from the rotated lineage: exact crafted generation.
+    const reopened = value(await open(s));
+    expect(value(reopened.exportData()).identity.userId).toBe("fixture-user");
+    expect(snapshotBytes(reopened)).toEqual(crafted.bytes);
+    expect(tipOf(reopened)).toEqual(crafted.tip);
+    value(await reopened.close());
+  });
+
+  it("a 65,537-tiny-frame segment is beyond admission and can never become authoritative (Finding 1)", async () => {
+    const s = await setup();
+    const count = SORTER_ENTRY_CAPACITY + 1;
+    const crafted = await craft(s, count);
+    // Copilot's exact reproducer shape: more sortable entries than the
+    // segment could ever legally reach under the corrected envelope.
+    expect(count * crafted.frameBytes).toBeGreaterThan(MAX_ACTIVE_WAL_BYTES);
+    const outcome = await rotateDurableStore({ directory: s.directory, io: s.io,
+      generation: { bytes: crafted.bytes, tip: crafted.tip } });
+    expect(outcome.ok).toBe(false);
+    // Old lineage stays authoritative: the failure is pre-activation.
+    expect((await headOf(s.directory)).checkpoint.checkpointId).toBe("checkpoint-a");
+    expect((await walNames(s.directory)).length).toBe(1);
+  });
+
+  it("a large cumulative ledger with a tiny retiring segment rotates without segment-proportional accounting (Finding 2)", async () => {
+    const s = await setup();
+    const history = 5_000;
+    const crafted = await craft(s, history);
+    const first = value(await rotateDurableStore({ directory: s.directory, io: s.io,
+      generation: { bytes: crafted.bytes, tip: crafted.tip } }));
+    const ledgerOnePath = receiptLedgerPath(s.directory, first.ledgerDigest);
+    const ledgerOneBytes = (await fs.stat(ledgerOnePath)).size;
+    expect(ledgerOneBytes).toBeGreaterThan(1_000_000);
+    // A one-frame retiring segment against a multi-megabyte cumulative
+    // history: total rotation space is dominated by the durable ledger
+    // rewrite (predecessor + successor coexist), NOT by the segment.
+    const one = semanticFrame(crafted.tip, [identityPut()], "tiny-after");
+    const walPath = join(s.directory, "wal", `wal-${first.newCheckpointDigest}.bin`);
+    await fs.writeFile(walPath, Buffer.from(one.bytes));
+    const second = value(await rotateDurableStore({ directory: s.directory, io: s.io,
+      generation: { bytes: crafted.bytes, tip: one.transaction.identity } }));
+    expect(second.receiptCount).toBe(history + 1);
+    const reader = value(await ReceiptLedgerReader.open(s.directory, second.ledgerDigest));
+    expect(reader.header.entryCount).toBe(history + 1);
+    expect(reader.header.predecessorLedgerDigest).toBe(first.ledgerDigest);
+    value(await reader.verify());
+    expect((await fs.stat(receiptLedgerPath(s.directory, second.ledgerDigest))).size)
+      .toBeGreaterThanOrEqual(ledgerOneBytes);
+    // Reconciliation still resolves identities from the large history.
+    const found = value(await reader.lookup("tiny-0"));
+    expect(found?.mutationId).toBe("tiny-0");
+    expect(await fs.access(ledgerOnePath).then(() => true, () => false)).toBe(false);
+  });
+
+  it("ENOSPC during ledger construction fails pre-activation with the old lineage authoritative (Finding 2)", async () => {
+    const s = await setup();
+    const crafted = await craft(s, 5);
+    let armed = true;
+    const files: WalIO = { ...nodeWalIO, open: async (path, create) => {
+      if (armed && path.includes("rotation-candidate")) throw new Error("simulated ENOSPC");
+      return nodeWalIO.open(path, create);
+    } };
+    const failed = await rotateDurableStore({ directory: s.directory, io: s.io, files,
+      generation: { bytes: crafted.bytes, tip: crafted.tip } });
+    expect(failed.ok).toBe(false);
+    expect((await headOf(s.directory)).checkpoint.checkpointId).toBe("checkpoint-a");
+    // Disarm: the same rotation then succeeds.
+    armed = false;
+    const summary = value(await rotateDurableStore({ directory: s.directory, io: s.io, files,
+      generation: { bytes: crafted.bytes, tip: crafted.tip } }));
+    expect(summary.receiptCount).toBe(5);
+  });
+
+  it("a concurrent rotation is never misclassified as history corruption during reconciliation (Finding 3)", async () => {
+    const s = await setup();
+    const runtime = value(await open(s));
+    value(await note(runtime, "race historical note", "race-0"));
+    value(await runtime.rotate());
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let armed = false;
+    const gatedFiles: WalIO = { ...nodeWalIO, open: async (path, create) => {
+      if (armed && path.includes("receipts")) await gate;
+      return nodeWalIO.open(path, create);
+    } };
+    // Runtime A holds writer authority for its complete historical lookup and
+    // stalls inside it (after old-lineage observation). Runtime B is opened
+    // BEFORE the stall: a second runtime cannot even recover while A holds
+    // the writer lock.
+    const runtimeA = value(await open(s, { files: gatedFiles }));
+    const runtimeB = value(await open(s));
+    armed = true;
+    const retryA = note(runtimeA, "race historical note", "race-0");
+    await new Promise(resolve => setTimeout(resolve, 150));
+    // Runtime B's rotation observes normal authority contention, never a
+    // PERSISTENCE_CORRUPTION misclassification of missing history.
+    const contended = await runtimeB.rotate();
+    expect(failure(contended).code).toBe("WRITER_BUSY");
+    expect(runtimeB.state).toBe("ready");
+    expect(failureDetails(contended).activated).toBeUndefined();
+    release!();
+    const reconciled = value(await retryA);
+    expect(reconciled.content).toBe("race historical note");
+    // Coherent retry semantics after the successor lineage is observed.
+    value(await runtimeB.rotate());
+    expect(value(await note(runtimeA, "race historical note", "race-0")).id).toBe(reconciled.id);
+    expect(failure(await note(runtimeA, "conflicting intent", "race-0")).code).toBe("PERSISTENCE_CORRUPTION");
+    // Exactly one transaction exists for the identity: no duplicate commit.
+    const exported = value(runtimeA.exportData());
+    expect(exported.memoryNotes.filter(n => n.content === "race historical note").length).toBe(1);
+    value(await runtimeA.close());
+    value(await runtimeB.close());
+  });
+
+  it("P6 pre-rename failures keep the old lineage; recovery restores readiness (Finding 4)", async () => {
+    const s = await setup();
+    let armed = true;
+    const faulting: DirectoryIO = { ...s.io, writeExclusive: async (path, bytes) => {
+      if (armed && path.includes("rotation-head-000000")) throw new Error("candidate write failure");
+      return s.io.writeExclusive(path, bytes);
+    } };
+    const runtime = value(await open(s, { io: faulting }));
+    value(await note(runtime, "pre-rename note", "prerename-1"));
+    const snapshot = snapshotBytes(runtime);
+    const failed = await runtime.rotate();
+    expect(failureDetails(failed)).toMatchObject({ activationState: "pre-activation" });
+    // The old lineage is definitely authoritative: the runtime conservatively
+    // requires recovery, which restores readiness without any state change.
+    expect(runtime.state).toBe("recovery-required");
+    value(await runtime.recover());
+    expect(runtime.state).toBe("ready");
+    expect((await headOf(s.directory)).checkpoint.checkpointId).toBe("checkpoint-a");
+    expect(snapshotBytes(runtime)).toEqual(snapshot);
+    // A failed rename is equally pre-activation: the old HEAD is intact.
+    armed = false;
+    const renameFault: DirectoryIO = { ...s.io, activateFile: async (candidate, destination) => {
+      if (destination.endsWith("HEAD")) throw new Error("rename failure");
+      return s.io.activateFile(candidate, destination);
+    } };
+    const runtime2 = value(await open(s, { io: renameFault }));
+    const failedRename = await runtime2.rotate();
+    expect(failureDetails(failedRename)).toMatchObject({ activationState: "pre-activation" });
+    expect(runtime2.state).toBe("recovery-required");
+    expect((await headOf(s.directory)).checkpoint.checkpointId).toBe("checkpoint-a");
+    value(await runtime2.recover());
+    expect(runtime2.state).toBe("ready");
+    value(await runtime2.close());
+    value(await runtime.close());
+  });
+
+  it("post-rename barrier failures report unconfirmed activation and require recovery (Finding 4)", async () => {
+    for (const mode of ["private-sync", "store-sync"] as const) {
+      const s = await setup();
+      let renamed = false;
+      let disarm = false;
+      const faulting: DirectoryIO = { ...s.io,
+        activateFile: async (candidate, destination) => {
+          const activated = await s.io.activateFile(candidate, destination);
+          if (destination.endsWith("HEAD")) renamed = true;
+          return activated;
+        },
+        syncDirectory: async path => {
+          if (!disarm && renamed && ((mode === "private-sync" && path.endsWith(".private")) || (mode === "store-sync" && path === s.directory))) {
+            throw new Error("post-rename barrier failure");
+          }
+          return s.io.syncDirectory(path);
+        } };
+      const runtime = value(await open(s, { io: faulting }));
+      value(await note(runtime, `barrier note ${mode}`, "barrier-1"));
+      const snapshot = snapshotBytes(runtime);
+      const failed = await runtime.rotate();
+      // HEAD renamed but durability unconfirmed: never an ordinary
+      // pre-activation failure, and the runtime must not casually remain
+      // writable.
+      expect(failureDetails(failed)).toMatchObject({ activationState: "head-renamed-durability-unconfirmed" });
+      expect(failureDetails(failed).rotationDurabilityUncertain).toBe(true);
+      expect(runtime.state).toBe("recovery-required");
+      // The barrier failure was transient: explicit recovery re-establishes
+      // coherent authority; the published generation is identical across the
+      // uncertain switch.
+      disarm = true;
+      value(await runtime.recover());
+      expect(runtime.state).toBe("ready");
+      expect(snapshotBytes(runtime)).toEqual(snapshot);
+      value(await runtime.close());
+      const reopened = value(await open(s));
+      expect(snapshotBytes(reopened)).toEqual(snapshot);
+      value(await reopened.close());
+    }
+  });
+
+  it("authority-release failures preserve the primary activation outcome (Finding 4)", async () => {
+    // P6/P7 fully succeed, then authority release fails: the committed
+    // rotation must still be distinguishable from "never performed".
+    const s = await setup();
+    let armed = false;
+    const lockFault: DirectoryIO = { ...s.io, removeOwnedFile: async path => {
+      if (armed && path.endsWith("writer.lock")) throw new Error("release failure");
+      return s.io.removeOwnedFile(path);
+    } };
+    const runtime = value(await open(s, { io: lockFault }));
+    value(await note(runtime, "release failure note", "release-1"));
+    const snapshot = snapshotBytes(runtime);
+    armed = true;
+    const failed = await runtime.rotate();
+    const details = failureDetails(failed);
+    expect(details.activated).toBe(true);
+    expect(details.rotationCommitted).toBe(true);
+    expect(runtime.state).toBe("ready");
+    // The new lineage is authoritative despite the release failure.
+    expect(isRotatedCheckpointId((await headOf(s.directory)).checkpoint.checkpointId)).toBe(true);
+    expect(snapshotBytes(runtime)).toEqual(snapshot);
+    value(await runtime.close());
+    // P7 cleanup failure PLUS release failure: the post-activation result
+    // and its activation metadata survive both failures.
+    const s2 = await setup();
+    const crafted = await craft(s2, 3);
+    let p7Armed = false;
+    const p7Fault: DirectoryIO = { ...s2.io, removeOwnedFile: async path => {
+      if (p7Armed && path.includes("wal-")) throw new Error("wal reclaim failure");
+      if (p7Armed && path.endsWith("writer.lock")) throw new Error("release failure");
+      return s2.io.removeOwnedFile(path);
+    } };
+    const outcome = await rotateDurableStore({ directory: s2.directory, io: p7Fault,
+      generation: { bytes: crafted.bytes, tip: crafted.tip },
+      instrumentation: { at: async at => { if (at === "P7-reclaim") p7Armed = true; } } });
+    const p7details = failureDetails(outcome);
+    expect(p7details.activated).toBe(true);
+    expect(p7details.phase).toBe("post-activation");
+    expect(isRotatedCheckpointId((await headOf(s2.directory)).checkpoint.checkpointId)).toBe(true);
+  });
+
+  it("scratch cleanup failures are observable: pre-activation fail-closed, post-activation pending (Finding 5)", async () => {
+    const s = await setup();
+    const debris = join(s.directory, ".private", "rotation-candidate-000000.bin");
+    await fs.writeFile(debris, "stale debris");
+    let armed = true;
+    const faulting: DirectoryIO = { ...s.io, removeOwnedFile: async path => {
+      if (armed && path.includes("rotation-candidate")) throw new Error("scratch removal failure");
+      return s.io.removeOwnedFile(path);
+    } };
+    const runtime = value(await open(s, { io: faulting }));
+    value(await note(runtime, "scratch note", "scratch-1"));
+    // Pre-P6 scratch cleanup failure fails the rotation pre-activation with
+    // the old lineage authoritative; ENOENT stays idempotent elsewhere.
+    const failed = await runtime.rotate();
+    expect(failed.ok).toBe(false);
+    expect(failureDetails(failed).activated).toBeUndefined();
+    expect((await headOf(s.directory)).checkpoint.checkpointId).toBe("checkpoint-a");
+    // The runtime conservatively requires recovery, which succeeds: the
+    // store itself was never damaged.
+    expect(runtime.state).toBe("recovery-required");
+    value(await runtime.recover());
+    // Disarm: the retry completes the rotation and sweeps the debris.
+    armed = false;
+    const summary = value(await runtime.rotate());
+    expect(isRotatedCheckpointId(summary.newCheckpointId)).toBe(true);
+    expect(await fs.access(debris).then(() => true, () => false)).toBe(false);
+    value(await runtime.close());
+    // Post-P6 scratch cleanup failure reports pending cleanup, never old
+    // authority, and the new lineage stays authoritative.
+    const s2 = await setup();
+    await fs.writeFile(join(s2.directory, ".private", "rotation-candidate-000000.bin"), "stale debris");
+    let p7Armed = false;
+    const p7Fault: DirectoryIO = { ...s2.io, removeOwnedFile: async path => {
+      if (p7Armed && path.includes("rotation-candidate")) throw new Error("scratch removal failure");
+      return s2.io.removeOwnedFile(path);
+    } };
+    const crafted = await craft(s2, 2);
+    const p7outcome = await rotateDurableStore({ directory: s2.directory, io: p7Fault,
+      generation: { bytes: crafted.bytes, tip: crafted.tip },
+      instrumentation: { at: async at => { if (at === "P7-reclaim") p7Armed = true; } } });
+    expect(failureDetails(p7outcome)).toMatchObject({ activated: true, phase: "post-activation" });
+    expect(isRotatedCheckpointId((await headOf(s2.directory)).checkpoint.checkpointId)).toBe(true);
+    // A .private directory barrier failure during the P0 sweep is equally
+    // observable and pre-activation.
+    const s3 = await setup();
+    let syncArmed = false;
+    const syncFault: DirectoryIO = { ...s3.io, syncDirectory: async path => {
+      if (syncArmed && path.endsWith(".private")) throw new Error("scratch barrier failure");
+      return s3.io.syncDirectory(path);
+    } };
+    const runtime3 = value(await open(s3, { io: syncFault }));
+    value(await note(runtime3, "sync scratch note", "syncscratch-1"));
+    syncArmed = true;
+    const syncFailed = await runtime3.rotate();
+    expect(syncFailed.ok).toBe(false);
+    expect(failureDetails(syncFailed).activated).toBeUndefined();
+    expect((await headOf(s3.directory)).checkpoint.checkpointId).toBe("checkpoint-a");
+    syncArmed = false;
+    value(await runtime3.recover());
+    value(await runtime3.rotate());
+    value(await runtime3.close());
   });
 });

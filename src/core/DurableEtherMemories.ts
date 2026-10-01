@@ -417,6 +417,13 @@ class DurableRuntime implements DurableEtherMemories {
         // published generation is unchanged and remains exactly correct.
         return err(outcome.error.code, outcome.error.message, { ...details, rotationCommitted: true });
       }
+      if (details.activationState === "head-renamed-durability-unconfirmed") {
+        // HEAD may already point at the new lineage but crash durability of
+        // the switch is unconfirmed: the runtime must not casually remain
+        // writable; explicit recovery re-establishes coherent authority.
+        this.#lifecycle = "recovery-required";
+        return err(outcome.error.code, outcome.error.message, { ...details, rotationDurabilityUncertain: true });
+      }
       // Same staleness semantics as durable mutations: a recovery-requiring
       // failure means the runtime can no longer prove its generation matches
       // durable history; the caller recovers explicitly and retries.
