@@ -76,11 +76,16 @@ export async function withRecoveryAuthority<T>(directory: string, io: DirectoryI
       // preserved so callers can distinguish "never performed" from
       // "authority already switched". The frozen error code and
       // recovery-required classification are unchanged; details are purely
-      // additive.
+      // additive. T8 adds one more additive marker: authority-layer
+      // uncertainty (a release/barrier failure) outranks any operation-level
+      // failure disposition, so the durable runtime can move to
+      // recovery-required even when the primary operation failed as an
+      // ordinary maintenance error.
       const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-      const details = result.ok
+      const preserved = result.ok
         ? (isRecord(result.value) ? { ...result.value } : undefined)
         : (isRecord(result.error.details) ? { ...result.error.details } : undefined);
+      const details = isRecord(preserved) ? { ...preserved, authorityReleaseFailed: true } : { authorityReleaseFailed: true };
       result = err("RECOVERY_REQUIRED", "Recovery authority release/barrier failed.", details);
     }
   }

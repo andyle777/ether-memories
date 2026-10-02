@@ -479,16 +479,29 @@ class DurableRuntime implements DurableEtherMemories {
         directory: this.#directory, io: this.#io, files: this.#files, expectedTip: generation.tip
       });
       if (!outcome.ok) {
+        // Explicit lifecycle precedence: AUTHORITY UNCERTAINTY (writer-lock
+        // release/barrier failure, marked by the authority coordinator) >
+        // AUTHORITATIVE DATA UNCERTAINTY (gcDisposition "authoritative") >
+        // MAINTENANCE FAILURE (gcDisposition "maintenance"). The disposition
+        // is an explicit internal classification, never inferred from a
+        // possibly stale phase string.
         const details = record(outcome.error.details) ? outcome.error.details : {};
-        const phase = typeof details.gcPhase === "string" ? details.gcPhase : undefined;
-        // GC's own maintenance phases never make authoritative state
-        // uncertain; only authoritative-source phases (or authority-layer
-        // errors without a GC phase) and corruption classifications do.
-        const maintenance = phase !== undefined && ["G1-scratch-sweep", "G2-mark-scratch", "G3-inventory",
-          "G5-validate", "G6-reclaim", "G7-final-cleanup"].includes(phase);
-        const authoritative = !maintenance && (outcome.error.code === "PERSISTENCE_CORRUPTION"
-          || outcome.error.code === "RECOVERY_REQUIRED" || outcome.error.code === "STALE_TRANSACTION_BASE");
-        if (authoritative) this.#lifecycle = "recovery-required";
+        if (details.authorityReleaseFailed === true) {
+          this.#lifecycle = "recovery-required";
+          return outcome;
+        }
+        const disposition = details.gcDisposition;
+        if (disposition === "authoritative") {
+          this.#lifecycle = "recovery-required";
+          return outcome;
+        }
+        if (disposition === "maintenance") return outcome;
+        // No GC disposition: the failure came from the authority layer
+        // (acquisition, layout, HEAD change) - conservative classification.
+        if (outcome.error.code === "PERSISTENCE_CORRUPTION" || outcome.error.code === "RECOVERY_REQUIRED"
+          || outcome.error.code === "STALE_TRANSACTION_BASE") {
+          this.#lifecycle = "recovery-required";
+        }
         return outcome;
       }
       return ok({

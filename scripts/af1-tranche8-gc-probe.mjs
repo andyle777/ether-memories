@@ -96,7 +96,7 @@ try {
     if (path.includes(join(directory, "objects"))) throw Object.assign(new Error("denied"), { code: "EACCES" });
     await io.removeOwnedFile(path);
   } };
-  const unlinkFailure = await collectDurableGarbage({ directory, io: denyIo, files });
+  const unlinkFailure = await collectDurableGarbage({ directory, expectedTip: value(restarted.tip), io: denyIo, files });
   check("an injected unlink failure fails with READ_ONLY_LOCKED and exact partial accounting",
     failureCode(unlinkFailure) === "READ_ONLY_LOCKED"
       && unlinkFailure.error.details.reclaimedObjects === 0 && unlinkFailure.error.details.gcPhase === "G6-reclaim");
@@ -108,7 +108,7 @@ try {
     if (path === join(directory, "objects")) throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "injected barrier failure");
     await io.syncDirectory(path);
   } };
-  const barrierFailure = await collectDurableGarbage({ directory, io: barrierIo, files });
+  const barrierFailure = await collectDurableGarbage({ directory, expectedTip: value(restarted.tip), io: barrierIo, files });
   check("an injected barrier failure fails with DURABILITY_UNAVAILABLE and exact accounting",
     failureCode(barrierFailure) === "DURABILITY_UNAVAILABLE"
       && barrierFailure.error.details.reclaimedObjects === 1 && barrierFailure.error.details.gcPhase === "G6-reclaim");
@@ -118,7 +118,7 @@ try {
     if (path === join(directory, ".private")) throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "injected scratch barrier failure");
     await io.syncDirectory(path);
   } };
-  const scratchFailure = await collectDurableGarbage({ directory, io: scratchIo, files });
+  const scratchFailure = await collectDurableGarbage({ directory, expectedTip: value(restarted.tip), io: scratchIo, files });
   check("an injected scratch-cleanup failure is an observable maintenance failure",
     failureCode(scratchFailure) === "DURABILITY_UNAVAILABLE"
       && scratchFailure.error.details.gcPhase === "G1-scratch-sweep");

@@ -113,6 +113,60 @@ regular file immediately before deletion. Because every committed transaction
 becomes a receipt entry at rotation, this is equivalent to: no authoritative
 committed history can ever resolve the deleted object again.
 
+## Scratch integrity (exact-content binding)
+
+Shape-only validation (syntax, count, ordering) is NEVER deletion authority.
+Every generated scratch artifact — mark chunk runs, inventory runs, cascade
+merge outputs, the candidates run and the validated run — is **sealed** with a
+constant-size in-memory descriptor containing the record count, the exact
+canonical byte length and a SHA-256 computed from the INTENDED output while it
+is generated. After write+fsync each artifact is fully read back and verified
+against its binding (digest, count, canonical encoding, strict ordering). A
+sealed run may only be consumed through a `SealedRunReader` that opens ONE
+handle, fully verifies the content binding on that handle, and then streams
+records from the SAME handle (no path reopen between verification and trusted
+consumption), re-hashing as it streams with a second full-content hash
+assertion at end-of-stream, and re-checking the captured file stamp before
+every reclaim unlink. Substituting legal, sorted, same-count digest records at
+any point in the chain therefore fails closed. Descriptors are in-memory
+session state only; crash debris is swept, never resumed as trusted state, so
+no new durable on-disk format exists. Chunk runs collapse within-chunk
+duplicates at flush time so every sealed run is strictly increasing.
+
+## Failure disposition model (internal, not public codes)
+
+Every error GC returns carries `details.gcDisposition`:
+
+- `authoritative` — corrupt history, terminal-tip mismatch, a marked object
+  missing from the physical inventory, malformed persisted references;
+- `maintenance` — every scratch create/write/sync/verify/read failure,
+  enumeration failure, unlink/directory-barrier failure.
+
+Authority-layer uncertainty is marked by the frozen authority coordinator with
+the additive `details.authorityReleaseFailed` and outranks every operation
+disposition. The runtime applies the explicit precedence
+**authority > authoritative > maintenance** — never a phase-string inference:
+
+- `authorityReleaseFailed === true` → recovery-required (even when the primary
+  operation failed as an ordinary maintenance error, and even after a fully
+  successful collection);
+- `gcDisposition === "authoritative"` → recovery-required;
+- `gcDisposition === "maintenance"` → stays ready with exact partial details;
+- no disposition (authority-acquisition layer) → conservative classification
+  by error code.
+
+## Containment: exactly one destructive path
+
+`expectedTip` is a structurally REQUIRED input: G2 proves the scanned active
+persistence representation reaches exactly that captured committed tip before
+any coverage or deletion. The only supported destructive caller is the runtime
+facade `collectGarbage()`, which captures the tip from its own live published
+generation; repo-internal protocol tests pass the live runtime's tip the same
+way. The package `exports` map (`.` and `./package.json` only) keeps external
+consumers from deep-importing any internal module — the collector, the
+sorter and every other internal persistence module are unreachable from an
+installed package. The frozen root API is unchanged.
+
 ## Threat-model boundary (frozen, unchanged by T8)
 
 Concurrent external or malicious mutation of the store namespace while writer
