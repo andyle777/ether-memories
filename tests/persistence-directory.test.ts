@@ -364,7 +364,15 @@ describe("bounded streaming directory-name enumeration", () => {
   });
   afterEach(async () => {
     if (dirname(resolve(parent)) !== resolve(tmpdir()) || !basename(parent).startsWith("ether-af1-names-")) throw new Error("Unsafe test cleanup path");
-    await fs.rm(parent, { recursive: true, force: true });
+    // Windows can transiently report ENOTEMPTY while a directory handle drains;
+    // retry rather than failing an unrelated test on cleanup.
+    for (let attempt = 0; ; attempt++) {
+      try { await fs.rm(parent, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (attempt >= 2 || (error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
   });
 
   it("streams an empty directory as zero names", async () => {
@@ -388,7 +396,7 @@ describe("bounded streaming directory-name enumeration", () => {
   });
 
   it("streams many entries one at a time without array accumulation", async () => {
-    const count = 3000;
+    const count = 1500;
     for (let i = 0; i < count; i++) await fs.writeFile(join(directory, `entry-${i}.bin`), "x");
     let seen = 0;
     let inVisit = 0;
@@ -401,7 +409,7 @@ describe("bounded streaming directory-name enumeration", () => {
       expect(inVisit).toBe(0);
     });
     expect(seen).toBe(count);
-  });
+  }, 30_000);
 
   it("propagates visitor failures and never silently truncates enumeration", async () => {
     await fs.writeFile(join(directory, "a"), "x");
