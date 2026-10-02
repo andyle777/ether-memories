@@ -528,309 +528,6 @@ describe("G0-G7 reclamation protocol", () => {
   it("keeps every object when interrupted before deletion, then succeeds on retry", async () => {
     const runtime = value(await open());
     value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-interrupt-1"));
-    await injectOrphan("interrupted orphan");
-    const before = await objectNames();
-    const interrupted = await collectDurableGarbage({ directory, io, files,
-      instrumentation: { at: async phase => { if (phase === "G6-reclaim") throw new Error("simulated crash before deletion"); } } });
-    expect(failure(interrupted).code).toBe("RECOVERY_REQUIRED");
-    expect(await objectNames()).toEqual(before);
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome.reclaimedObjects).toBe(1);
-    expect(await objectNames()).toEqual(before.slice(1));
-    value(await runtime.close());
-  });
-
-  it("reports exact partial reclaim accounting when an unlink fails mid-deletion", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: "inline only", status: "active" }, "gc-partial-1"));
-    await injectOrphan("orphan one");
-    await injectOrphan("orphan two");
-    await injectOrphan("orphan three");
-    let unlinks = 0;
-    const failingIo: DirectoryIO = {
-      ...io,
-      removeOwnedFile: async path => {
-        if (path.includes("objects") && ++unlinks === 2) throw Object.assign(new Error("denied"), { code: "EACCES" });
-        await io.removeOwnedFile(path);
-      }
-    };
-    const result = await collectDurableGarbage({ directory, io: failingIo, files });
-    const error = failure(result);
-    expect(error.code).toBe("READ_ONLY_LOCKED");
-    const details = error.details as Record<string, number>;
-    expect(details.reclaimedObjects).toBe(1);
-    expect(details.remainingCandidates).toBe(2);
-    expect(details.gcPhase).toBe("G6-reclaim");
-    expect((await objectNames())).toHaveLength(2);
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome.reclaimedObjects).toBe(2);
-    expect(await objectNames()).toHaveLength(0);
-    value(await runtime.close());
-  });
-
-  it("reports a barrier failure as a partial maintenance failure with exact accounting", async () => {
-    const runtime = value(await open());
-    await injectOrphan("barrier orphan");
-    const failingIo: DirectoryIO = {
-      ...io,
-      syncDirectory: async path => {
-        if (path === objectsDir()) throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "injected barrier failure");
-        await io.syncDirectory(path);
-      }
-    };
-    const result = await collectDurableGarbage({ directory, io: failingIo, files });
-    const error = failure(result);
-    expect(error.code).toBe("DURABILITY_UNAVAILABLE");
-    const details = error.details as Record<string, number>;
-    expect(details.reclaimedObjects).toBe(1);
-    expect(details.gcPhase).toBe("G6-reclaim");
-    // The unlink happened; the barrier failure never claims more capacity.
-    expect(await objectNames()).toHaveLength(0);
-    value(await runtime.close());
-  });
-
-  it("fails observably when final scratch cleanup fails while leaving authority untouched", async () => {
-    const runtime = value(await open());
-    await injectOrphan("cleanup orphan");
-    let failPrivate = false;
-    const failingIo: DirectoryIO = {
-      ...io,
-      syncDirectory: async path => {
-        if (failPrivate && path === join(directory, ".private")) {
-          throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "injected cleanup barrier failure");
-        }
-        await io.syncDirectory(path);
-      }
-    };
-    const result = await collectDurableGarbage({ directory, io: failingIo, files,
-      instrumentation: { at: async phase => { if (phase === "G7-final-cleanup") failPrivate = true; } } });
-    const error = failure(result);
-    expect(error.code).toBe("DURABILITY_UNAVAILABLE");
-    expect((error.details as Record<string, string>).gcPhase).toBe("G7-final-cleanup");
-    expect(await objectNames()).toHaveLength(0);
-    // Stale deterministic scratch is reclaimed by the next attempt.
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome.reclaimedObjects).toBe(0);
-    value(await runtime.close());
-  });
-
-  it("excludes a concurrent writer through ordinary writer contention while GC holds authority", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: "inline before", status: "active" }, "gc-race-0"));
-    let releaseGc: () => void = () => undefined;
-    const gate = new Promise<void>(resolve => { releaseGc = resolve; });
-    const started = new Promise<void>(resolve => {
-      void (async () => {
-        await collectDurableGarbage({ directory, io, files, instrumentation: {
-          at: async phase => { if (phase === "G3-inventory") { resolve(); await gate; } }
-        } });
-      })();
-    });
-    await started;
-    const concurrent = await runtime.addMemory({ content: "concurrent", status: "active" }, "gc-race-1");
-    expect(failure(concurrent).code).toBe("WRITER_BUSY");
-    releaseGc();
-    await started;
-    value(await runtime.close());
-  });
-});
-
-describe("G0-G7 reclamation protocol", () => {
-  let parent: string;
-  let directory: string;
-  const io = simulatedDirectoryIO();
-  const files = nodeWalIO;
-  const objectsDir = () => join(directory, "objects");
-  const objectNames = async () => (await fs.readdir(objectsDir())).sort();
-  const objectBackedContent = () => "gc protocol large object payload ".repeat(3000);
-
-  beforeEach(async () => {
-    parent = await fs.mkdtemp(join(tmpdir(), "ether-gc-protocol-"));
-    directory = join(parent, "store");
-  });
-  afterEach(async () => { await fs.rm(parent, { recursive: true, force: true }); });
-
-  const open = async (deps: { io?: DirectoryIO; files?: WalIO } = {}) =>
-    openDurableEtherMemoriesInternal({ userId: "gc-protocol-user", directory, openMode: "auto" },
-      { io: deps.io ?? io, files: deps.files ?? files });
-
-  const injectOrphan = async (content = "orphan") => {
-    const digest = createHash("sha256").update(content).digest("hex");
-    await fs.mkdir(objectsDir(), { recursive: true });
-    await fs.writeFile(join(objectsDir(), digest + ".bin"), content);
-    return digest;
-  };
-
-  it("reclaims only never-referenced orphans on a non-rotated store and is idempotent", async () => {
-    const runtime = value(await open());
-    const note = value(await runtime.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-large-1"));
-    expect(note.id).toBeTruthy();
-    const referenced = await objectNames();
-    expect(referenced.length).toBeGreaterThanOrEqual(1);
-    await injectOrphan("unreferenced debris");
-    const orphanName = createHash("sha256").update("unreferenced debris").digest("hex") + ".bin";
-    const tip = value(runtime.tip);
-    const snapshot = value(runtime.exportData());
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome).toEqual({ scannedObjects: referenced.length + 1, markedReferences: referenced.length,
-      reclaimedObjects: 1, unknownArtifacts: 0 });
-    expect(await objectNames()).toEqual(referenced);
-    expect(value(runtime.tip)).toEqual(tip);
-    expect(value(runtime.exportData())).toEqual(snapshot);
-    const second = value(await collectDurableGarbage({ directory, io, files }));
-    expect(second).toEqual({ scannedObjects: referenced.length, markedReferences: referenced.length,
-      reclaimedObjects: 0, unknownArtifacts: 0 });
-    expect(orphanName).not.toBe("");
-    value(await runtime.close());
-  });
-
-  it("preserves a historical-receipt-only object across rotation, deletion, GC, restart and exact retry", async () => {
-    const runtime = value(await open());
-    const large = value(await runtime.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-historical-1"));
-    const objectsBefore = await objectNames();
-    value(await runtime.rotate());
-    expect(await fs.readdir(join(directory, "wal"))).toEqual([]);
-    value(await runtime.deleteMemory(large.id, "gc-historical-2"));
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome.reclaimedObjects).toBe(0);
-    expect(outcome.markedReferences).toBe(objectsBefore.length);
-    expect(await objectNames()).toEqual(objectsBefore);
-    value(await runtime.close());
-    const reopened = value(await open());
-    const retried = value(await reopened.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-historical-1"));
-    expect(retried.id).toBe(large.id);
-    expect(retried.createdAt.getTime()).toBe(large.createdAt.getTime());
-    const afterRetry = value(await collectDurableGarbage({ directory, io, files }));
-    expect(afterRetry.reclaimedObjects).toBe(0);
-    value(await reopened.close());
-  });
-
-  it("fails closed before deletion when an active-WAL-referenced object is missing", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-wal-root"));
-    const referenced = await objectNames();
-    await injectOrphan("orphan while corrupted");
-    await fs.unlink(join(objectsDir(), referenced[0]!));
-    const result = await collectDurableGarbage({ directory, io, files });
-    const error = failure(result);
-    expect(error.code).toBe("PERSISTENCE_CORRUPTION");
-    // No deletion occurred: the injected orphan is untouched.
-    const orphanDigest = createHash("sha256").update("orphan while corrupted").digest("hex");
-    expect(await objectNames()).toEqual([...referenced.slice(1), orphanDigest + ".bin"].sort());
-    value(await runtime.close());
-  });
-
-  it("fails closed before deletion when a receipt-ledger-referenced object is missing", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-receipt-root"));
-    value(await runtime.rotate());
-    const referenced = await objectNames();
-    await fs.unlink(join(objectsDir(), referenced[0]!));
-    const result = await collectDurableGarbage({ directory, io, files });
-    expect(failure(result).code).toBe("PERSISTENCE_CORRUPTION");
-    expect(await objectNames()).toEqual(referenced.slice(1));
-    value(await runtime.close());
-  });
-
-  it("treats a missing objects directory as zero inventory only when no marks exist", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: "inline note", status: "active" }, "gc-inline-1"));
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome).toEqual({ scannedObjects: 0, markedReferences: 0, reclaimedObjects: 0, unknownArtifacts: 0 });
-    value(await runtime.close());
-  });
-
-  it("treats a missing objects directory with authoritative marks as corruption", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-marks-1"));
-    await fs.rm(objectsDir(), { recursive: true, force: true });
-    const result = await collectDurableGarbage({ directory, io, files });
-    expect(failure(result).code).toBe("PERSISTENCE_CORRUPTION");
-    value(await runtime.close());
-  });
-
-  it("never deletes or follows malformed names, dotfiles, directories or symlinks", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-unknown-1"));
-    const referenced = await objectNames();
-    await injectOrphan("plain orphan");
-    await fs.writeFile(join(objectsDir(), "zz-not-hex.bin"), "junk");
-    await fs.writeFile(join(objectsDir(), ".hidden.tmp"), "junk");
-    await fs.mkdir(join(objectsDir(), "f".repeat(64) + ".bin"));
-    const linkTarget = join(parent, "link-target");
-    await fs.writeFile(linkTarget, "outside the store");
-    const linkName = "e".repeat(64) + ".bin";
-    let symlinkCreated = true;
-    try { await fs.symlink(linkTarget, join(objectsDir(), linkName), "file"); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
-      symlinkCreated = false;
-    }
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome.unknownArtifacts).toBe(symlinkCreated ? 4 : 3);
-    expect(outcome.reclaimedObjects).toBe(1);
-    const survivors = [...referenced, "zz-not-hex.bin", ".hidden.tmp", "f".repeat(64) + ".bin"];
-    if (symlinkCreated) survivors.push(linkName);
-    expect(await objectNames()).toEqual(survivors.sort());
-    expect(await fs.readFile(linkTarget, "utf8")).toBe("outside the store");
-    value(await runtime.close());
-  });
-
-  it("reclaims an unmarked valid-name object regardless of its content without reading it", async () => {
-    const runtime = value(await open());
-    await fs.mkdir(objectsDir(), { recursive: true });
-    await fs.writeFile(join(objectsDir(), "a".repeat(64) + ".bin"), "not even valid ether data");
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome).toEqual({ scannedObjects: 1, markedReferences: 0, reclaimedObjects: 1, unknownArtifacts: 0 });
-    expect(await objectNames()).toEqual([]);
-    value(await runtime.close());
-  });
-
-  it("never classifies a reachable corrupt-content object as garbage", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: objectBackedContent(), tags: ["gc"], status: "active" }, "gc-corrupt-1"));
-    const referenced = await objectNames();
-    await fs.writeFile(join(objectsDir(), referenced[0]!), "corrupted bytes");
-    const outcome = value(await collectDurableGarbage({ directory, io, files }));
-    expect(outcome.reclaimedObjects).toBe(0);
-    expect(await objectNames()).toEqual(referenced);
-    value(await runtime.close());
-    // Existing recovery semantics remain the corruption authority.
-    const reopened = await open();
-    expect(reopened.ok).toBe(false);
-  });
-
-  it("reclaims the genuine orphan left by a simulated pre-commit crash after object install", async () => {
-    let failWalWrites = false;
-    const crashingFiles: WalIO = {
-      ...nodeWalIO,
-      open: async (path, create) => {
-        const handle = await nodeWalIO.open(path, create);
-        if (failWalWrites && path.includes(join("wal", "wal-"))) {
-          return { ...handle, write: async () => { throw new Error("simulated crash before WAL append"); } } as WalFileHandle;
-        }
-        return handle;
-      }
-    };
-    const runtime = value(await open({ files: crashingFiles }));
-    value(await runtime.addMemory({ content: "inline first", status: "active" }, "gc-crash-0"));
-    failWalWrites = true;
-    const failed = await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-crash-1");
-    expect(failed.ok).toBe(false);
-    failWalWrites = false;
-    // The installed-but-never-committed objects are genuine orphans.
-    const orphans = await objectNames();
-    expect(orphans.length).toBeGreaterThanOrEqual(1);
-    const outcome = value(await collectDurableGarbage({ directory, io, files: crashingFiles }));
-    expect(outcome).toEqual({ scannedObjects: orphans.length, markedReferences: 0,
-      reclaimedObjects: orphans.length, unknownArtifacts: 0 });
-    expect(await objectNames()).toEqual([]);
-    value(await runtime.close());
-  });
-
-  it("keeps every object when interrupted before deletion, then succeeds on retry", async () => {
-    const runtime = value(await open());
-    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-interrupt-1"));
     const orphanName = (await injectOrphan("interrupted orphan")) + ".bin";
     const before = await objectNames();
     const interrupted = await collectDurableGarbage({ directory, io, files,
@@ -1056,5 +753,109 @@ describe("collectGarbage() durable-runtime facade member 19", () => {
     expect("directory" in summary).toBe(false);
     expect("io" in summary).toBe(false);
     value(await runtime.close());
+  });
+});
+describe("cascade production scale and rotation serialization attacks", () => {
+  let parent: string;
+  let directory: string;
+  const io = simulatedDirectoryIO();
+  const files = nodeWalIO;
+  const objectsDir = () => join(directory, "objects");
+  const objectNames = async () => (await fs.readdir(objectsDir())).sort();
+  const objectBackedContent = () => "gc attack large object payload ".repeat(3000);
+
+  beforeEach(async () => {
+    parent = await fs.mkdtemp(join(tmpdir(), "ether-gc-attack-"));
+    directory = join(parent, "store");
+  });
+  afterEach(async () => { await fs.rm(parent, { recursive: true, force: true }); });
+
+  const open = async () => openDurableEtherMemoriesInternal({ userId: "gc-attack-user", directory, openMode: "auto" },
+    { io, files });
+
+  it("cascades past every production input-bank slot with exact sorted-set results and zero owned scratch", async () => {
+    await fs.mkdir(join(directory, ".private"), { recursive: true });
+    const limits = value(gcLimits());
+    expect(limits).toEqual({ namespaceSlots: 128, chunkEntries: 512, unlinkBatch: 64 });
+    const sorter = new GcDigestSorter(directory, "mark", io, files, limits);
+    const count = 66_000;
+    for (let index = 0; index < count; index++) {
+      const added = await sorter.add(digest(index));
+      if (!added.ok) throw new Error(JSON.stringify(added.error));
+    }
+    const finished = value(await sorter.finish());
+    expect(finished!.entries).toBe(count);
+    let seen = 0;
+    let last: string | undefined;
+    for await (const entry of readDigestFile(finished!.path, files)) {
+      if (last !== undefined) expect(compareDigests(entry, last)).toBe(1);
+      last = entry;
+      seen++;
+    }
+    expect(seen).toBe(count);
+    await sorter.sweep();
+    expect(await fs.readdir(join(directory, ".private"))).toEqual([]);
+  }, 120_000);
+
+  it("preserves a rotation-1 object-backed result across three rotations, GC and restart", async () => {
+    const runtime = value(await open());
+    const first = value(await runtime.addMemory({ content: objectBackedContent(), tags: ["t8"], status: "active" }, "gc-rotations-1"));
+    const objectsAfterFirst = await objectNames();
+    value(await runtime.rotate());
+    value(await runtime.addMemory({ content: "second epoch note", status: "active" }, "gc-rotations-2"));
+    value(await runtime.rotate());
+    value(await runtime.deleteMemory(first.id, "gc-rotations-3"));
+    value(await runtime.rotate());
+    const outcome = value(await runtime.collectGarbage());
+    expect(outcome.reclaimedObjects).toBe(0);
+    expect(await objectNames()).toEqual(objectsAfterFirst);
+    const tip = value(runtime.tip);
+    const snapshot = value(runtime.exportData());
+    value(await runtime.close());
+    const restarted = value(await open());
+    expect(value(restarted.tip)).toEqual(tip);
+    expect(value(restarted.exportData())).toEqual(snapshot);
+    const retried = value(await restarted.addMemory({ content: objectBackedContent(), tags: ["t8"], status: "active" }, "gc-rotations-1"));
+    expect(retried.id).toBe(first.id);
+    expect(retried.createdAt.getTime()).toBe(first.createdAt.getTime());
+    const afterRetry = value(await restarted.collectGarbage());
+    expect(afterRetry.reclaimedObjects).toBe(0);
+    expect(await objectNames()).toEqual(objectsAfterFirst);
+    value(await restarted.close());
+  });
+
+  it("serializes GC with rotate() in both queue orders without interference", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-serial-1"));
+    await fs.mkdir(objectsDir(), { recursive: true });
+    await fs.writeFile(join(objectsDir(), "b".repeat(64) + ".bin"), "orphan before rotate");
+    const rotatedFirst = await Promise.all([runtime.rotate(), runtime.collectGarbage()]);
+    expect(value(rotatedFirst[0]).receiptCount).toBeGreaterThanOrEqual(1);
+    expect(value(rotatedFirst[1]).reclaimedObjects).toBe(1);
+    expect(runtime.state).toBe("ready");
+    await fs.writeFile(join(objectsDir(), "c".repeat(64) + ".bin"), "orphan after rotate");
+    const gcFirst = await Promise.all([runtime.collectGarbage(), runtime.rotate()]);
+    expect(value(gcFirst[0]).reclaimedObjects).toBe(1);
+    expect(value(gcFirst[1]).receiptCount).toBeGreaterThanOrEqual(1);
+    expect(runtime.state).toBe("ready");
+    value(await runtime.close());
+  });
+
+  it("recovers byte-equivalently after GC on a cold restart", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-cold-1"));
+    value(await runtime.rotate());
+    await fs.mkdir(objectsDir(), { recursive: true });
+    await fs.writeFile(join(objectsDir(), "d".repeat(64) + ".bin"), "cold restart orphan");
+    const summary = value(await runtime.collectGarbage());
+    expect(summary.reclaimedObjects).toBe(1);
+    const tip = value(runtime.tip);
+    const snapshot = value(runtime.exportData());
+    value(await runtime.close());
+    const restarted = value(await open());
+    expect(value(restarted.tip)).toEqual(tip);
+    expect(value(restarted.exportData())).toEqual(snapshot);
+    expect((await restarted.collectGarbage()).ok).toBe(true);
+    value(await restarted.close());
   });
 });
