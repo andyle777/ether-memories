@@ -523,6 +523,7 @@ export async function collectDurableGarbage(input: GcInput): Promise<Result<GcOu
     let inventoryRun: { path: string; entries: number } | undefined;
     try {
       // G1: deterministic scratch sweep; ENOENT is idempotent success.
+      await instrumentation.at("G1-scratch-sweep");
       const swept = await sweepGcScratch(directory, io, limits.value, phase);
       if (!swept.ok) return swept;
 
