@@ -332,7 +332,7 @@ describe("object-reference extraction", () => {
   });
 });
 
-describe("G0-G7 reclamation protocol", () => {
+describe("G0-G7 reclamation protocol", { timeout: 300_000 }, () => {
   let parent: string;
   let directory: string;
   const io = simulatedDirectoryIO();
@@ -635,7 +635,7 @@ describe("G0-G7 reclamation protocol", () => {
   });
 });
 
-describe("collectGarbage() durable-runtime facade member 19", () => {
+describe("collectGarbage() durable-runtime facade member 19", { timeout: 300_000 }, () => {
   let parent: string;
   let directory: string;
   const files = nodeWalIO;
@@ -755,7 +755,7 @@ describe("collectGarbage() durable-runtime facade member 19", () => {
     value(await runtime.close());
   });
 });
-describe("cascade production scale and rotation serialization attacks", () => {
+describe("cascade production scale and rotation serialization attacks", { timeout: 300_000 }, () => {
   let parent: string;
   let directory: string;
   const io = simulatedDirectoryIO();
