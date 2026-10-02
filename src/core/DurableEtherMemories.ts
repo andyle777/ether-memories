@@ -456,21 +456,27 @@ class DurableRuntime implements DurableEtherMemories {
    * the same single-flight queue as mutations and rotation. GC never changes
    * HEAD, checkpoints, WAL/receipt authority, the published generation or the
    * committed tip; only provably unreachable payload objects are deleted.
-   * Because deleted files are already unreachable, maintenance failures
-   * (unlink, directory barrier, scratch cleanup) return exact partial-reclaim
-   * details while the runtime REMAINS ready - GC has no P6 and no
-   * authority-switch. Only failures that make authoritative data itself
-   * uncertain (corrupt history, a marked object physically missing) move the
+   * The captured committed tip of the published generation is passed to the
+   * collector: G2 proves the scanned active persistence representation reaches
+   * exactly that tip (frozen rotation-P2 precedent) before coverage/deletion,
+   * so a truncated or vanished active segment fails closed instead of
+   * silently omitting committed roots. Because deleted files are already
+   * unreachable, maintenance failures (mark scratch, unlink, directory
+   * barrier, scratch cleanup) return exact partial-reclaim details while the
+   * runtime REMAINS ready - GC has no P6 and no authority-switch. Only
+   * failures that make authoritative data itself uncertain (corrupt history,
+   * terminal-tip mismatch, a marked object physically missing) move the
    * runtime to recovery-required.
    */
   async collectGarbage(): Promise<Result<DurableGcSummary>> {
     return this.enqueue(async () => {
       if (this.#lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
-      if (this.#lifecycle !== "ready") {
+      const generation = this.#generation;
+      if (this.#lifecycle !== "ready" || !generation) {
         return err("RECOVERY_REQUIRED", "Recovery is required before garbage collection.");
       }
       const outcome = await collectDurableGarbage({
-        directory: this.#directory, io: this.#io, files: this.#files
+        directory: this.#directory, io: this.#io, files: this.#files, expectedTip: generation.tip
       });
       if (!outcome.ok) {
         const details = record(outcome.error.details) ? outcome.error.details : {};
@@ -478,9 +484,10 @@ class DurableRuntime implements DurableEtherMemories {
         // GC's own maintenance phases never make authoritative state
         // uncertain; only authoritative-source phases (or authority-layer
         // errors without a GC phase) and corruption classifications do.
-        const authoritative = outcome.error.code === "PERSISTENCE_CORRUPTION"
-          || ((outcome.error.code === "RECOVERY_REQUIRED" || outcome.error.code === "STALE_TRANSACTION_BASE")
-            && (phase === undefined || phase === "G2-mark" || phase === "G4-coverage"));
+        const maintenance = phase !== undefined && ["G1-scratch-sweep", "G2-mark-scratch", "G3-inventory",
+          "G5-validate", "G6-reclaim", "G7-final-cleanup"].includes(phase);
+        const authoritative = !maintenance && (outcome.error.code === "PERSISTENCE_CORRUPTION"
+          || outcome.error.code === "RECOVERY_REQUIRED" || outcome.error.code === "STALE_TRANSACTION_BASE");
         if (authoritative) this.#lifecycle = "recovery-required";
         return outcome;
       }

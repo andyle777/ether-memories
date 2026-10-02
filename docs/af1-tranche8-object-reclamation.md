@@ -78,7 +78,16 @@ unlinked in G6 in batches of 64 with an `objects/` directory barrier per batch.
 - **G1 scratch sweep**: both banks, both streams, both single artifacts; ENOENT
   idempotent; every other failure observable.
 - **G2 mark**: ledger `verify(visit)` (whole-file digest proof) and the frozen
-  WAL scanner; only valid `OBJECT_REFERENCE` digests are marked.
+  WAL scanner; only valid `OBJECT_REFERENCE` digests are marked. Mark-sorter
+  and scratch failures are classified `G2-mark-scratch` (maintenance). When
+  the caller supplies the captured committed tip of a live published
+  generation, G2 additionally proves terminal authority using the frozen T7
+  rotation-P2 precedent: the scanned WAL must terminate at exactly that tip,
+  or — with the WAL legitimately absent after rotation — the frozen checkpoint
+  tip must already represent it. A truncated, foreign or vanished active
+  segment omits committed roots; any mismatch fails
+  `RECOVERY_REQUIRED` before inventory, coverage and any deletion, and the
+  runtime moves to recovery-required.
 - **G3 inventory**: `readNames`; malformed names, dotfiles, directories and
   symlinks are never deleted, never followed and count in `unknownArtifacts`.
 - **G4 coverage**: bidirectional proof; no deletion may occur before it
@@ -93,20 +102,60 @@ proven unreachable, so interruption at any point is safe and retry is
 idempotent; mark/derive/validate complete before the first unlink. GC never
 changes HEAD, checkpoints, WAL authority, receipt authority, StateRoot or tip.
 
+## Core safety theorem
+
+For every object GC unlinks, the complete mark set has been proven before the
+unlink: the digest appears as an `OBJECT_REFERENCE` in NO transaction of the
+authoritative active WAL (whose terminal tip was proven equal to the captured
+committed tip) and NO entry of the authoritative cumulative receipt ledger
+(digest-verified during the mark pass), and the object was revalidated as a
+regular file immediately before deletion. Because every committed transaction
+becomes a receipt entry at rotation, this is equivalent to: no authoritative
+committed history can ever resolve the deleted object again.
+
+## Threat-model boundary (frozen, unchanged by T8)
+
+Concurrent external or malicious mutation of the store namespace while writer
+authority is held is OUTSIDE the frozen persistence contract and always has
+been: `docs/af1-durable-commit.md` — "accidental external modification
+bypassing authority is not prevented", "malicious filesystem owners and
+dishonest backend/registry implementations are not authenticated or fenced by
+this protocol", "there is no defense against a malicious filesystem owner/root
+replacing paths or restoring timestamps between checks";
+`docs/af1-persistence-foundation.md` — "this is not a defense against
+malicious filesystem-owner/root replacement races". Every frozen T1–T7
+operation (object install, rotation candidate activation, authority checks)
+has identical exposure; T8 neither adds nor weakens it. Node's portable
+filesystem API offers no dirfd-based `openat`/`fstatat`/`unlinkat` primitive
+that could enforce check-then-use atomicity against such an actor on the
+supported platforms.
+
+Within that boundary, T8's "no symlink following" means exactly: static
+entries are validated through `kind()` (lstat) — a symlink, junction,
+dotfile, malformed name or directory is never unlinked and never followed;
+`readNames` returns names only; and a final-component unlink removes the link
+entry itself rather than following it, so no GC operation can ever touch a
+path outside the `objects/` namespace. Conforming writers cannot race GC at
+all: every reference-creating path holds the same exclusive writer authority.
+
+
 ## Error and lifecycle semantics (frozen taxonomy)
 
 No new error codes. Every GC error carries `details.gcPhase`:
 
-- Maintenance phases (`G1`, `G3`, `G5`, `G6`, `G7`) and codes
-  `READ_ONLY_LOCKED`/`DURABILITY_UNAVAILABLE` leave the runtime READY with
-  exact partial-reclaim details (`reclaimedObjects`, `remainingCandidates`,
-  counters). Garbage-deletion durability uncertainty never pretends the
-  authoritative runtime needs recovery.
+- Maintenance phases (`G1`, `G2-mark-scratch`, `G3`, `G5`, `G6`, `G7`) and
+  codes `READ_ONLY_LOCKED`/`DURABILITY_UNAVAILABLE` leave the runtime READY
+  with exact partial-reclaim details (`reclaimedObjects`,
+  `remainingCandidates`, counters). Garbage-deletion durability uncertainty
+  never pretends the authoritative runtime needs recovery — including
+  transient mark-scratch create/write/sync/verify failures, which touch only
+  `.private` scratch.
 - Only authoritative uncertainty moves the runtime to recovery-required:
-  `PERSISTENCE_CORRUPTION` anywhere (corrupt history, marked object missing
-  from the inventory), or `RECOVERY_REQUIRED`/`STALE_TRANSACTION_BASE` from the
-  authoritative-source phases (`G2-mark`, `G4-coverage`) or the authority layer
-  (errors without a GC phase).
+  `PERSISTENCE_CORRUPTION` from an authoritative phase (corrupt history,
+  marked object missing from the inventory), or
+  `RECOVERY_REQUIRED`/`STALE_TRANSACTION_BASE` from the authoritative-source
+  phases (`G2-mark`, `G4-coverage`) or the authority layer (errors without a
+  GC phase), including the terminal-tip mismatch proof above.
 
 ## Unknown artifact contract
 

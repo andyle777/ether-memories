@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { err, ok, type Result } from "../utils/result.js";
-import type { PersistenceErrorCode, WalOperation } from "../types/persistence.js";
+import type { CommittedTip, PersistenceErrorCode, WalOperation } from "../types/persistence.js";
+import { sameCommittedTip } from "../utils/durablePersistence.js";
 import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 import { nodeWalIO, type WalIO } from "./walIO.js";
 import { required, withRecoveryAuthority, type RecoveryAuthority } from "./recoveryAuthority.js";
@@ -23,14 +24,34 @@ import { ETHER_DATA_PROFILE } from "./etherData.js";
  * set is therefore provably limited to objects never referenced by committed
  * history (precommit crash orphans and injected debris).
  *
+ * Terminal-authority proof: when the caller supplies the committed tip of a
+ * live published generation (expectedTip), G2 proves that the active
+ * persistence representation scanned - the terminal tip of the active WAL,
+ * or, with the WAL legitimately absent after rotation, the frozen checkpoint
+ * tip - reaches EXACTLY that captured tip, using the same frozen precedent
+ * as T7 rotation P2. Any mismatch is authoritative inconsistency: GC fails
+ * before inventory/coverage/deletion and deletes nothing.
+ *
  * GC never changes HEAD, checkpoints, WAL authority, receipt authority,
  * StateRoot or tip. There is no P6: every deleted file is already proven
  * unreachable, so interruption is safe and retry is idempotent. Maintenance
- * failures (scratch sweep, unlink, directory barrier) leave the runtime ready;
- * only failures that make AUTHORITATIVE data uncertain (corrupt history, a
+ * failures (scratch sweep, mark-run writes, unlink, directory barrier) leave
+ * the runtime ready - including scratch-write failures during the mark pass,
+ * which are classified gcPhase "G2-mark-scratch"; only failures that make
+ * AUTHORITATIVE data uncertain (corrupt history, terminal-tip mismatch, a
  * marked object missing from the physical inventory) are classified for
  * recovery. Every error this module returns carries details.gcPhase so the
  * runtime can apply exactly that distinction.
+ *
+ * Threat-model boundary (frozen at T1/T2, unchanged by T8): concurrent
+ * external/malicious replacement of store namespace entries while authority
+ * is held is OUTSIDE the persistence contract ("this is not a defense against
+ * malicious filesystem-owner/root replacement races"; "accidental external
+ * modification bypassing authority is not prevented"). Static symlink entries
+ * are never followed and never deleted: readNames yields names only, entry
+ * validation uses lstat via kind(), and unlink removes a final-component link
+ * entry itself rather than following it. Conforming writers are excluded by
+ * the held writer authority.
  *
  * Bounded memory, unbounded history: both mark and inventory streams go
  * through a two-bank external cascade sort (`.private/gc-{stream}-{a|b}-{slot}.run`,
@@ -52,7 +73,7 @@ const RECORD_BYTES = 65;
 
 export type GcStream = "mark" | "inventory";
 export type GcPhase =
-  | "G1-scratch-sweep" | "G2-mark" | "G3-inventory" | "G4-coverage"
+  | "G1-scratch-sweep" | "G2-mark" | "G2-mark-scratch" | "G3-inventory" | "G4-coverage"
   | "G5-validate" | "G6-reclaim" | "G7-final-cleanup";
 /** Trusted test instrumentation only; a throw simulates a crash at that boundary. */
 export interface GcInstrumentation { at(phase: GcPhase): Promise<void> }
@@ -490,6 +511,15 @@ export interface GcInput {
   readonly files?: WalIO;
   readonly instrumentation?: GcInstrumentation;
   readonly limits?: GcScratchOptions;
+  /**
+   * The committed tip of a live published generation. When supplied, G2 proves
+   * the scanned active persistence representation reaches exactly this tip
+   * (frozen rotation-P2 precedent) before any coverage or deletion can occur.
+   * Callers without a published generation (direct maintenance) cannot supply
+   * a tip and accept the same trust-in-scanned-representation semantics as a
+   * fresh recovery.
+   */
+  readonly expectedTip?: CommittedTip;
 }
 
 /**
@@ -529,8 +559,18 @@ export async function collectDurableGarbage(input: GcInput): Promise<Result<GcOu
 
       // G2: authoritative mark collection. The ledger is fully digest-verified
       // during traversal; the WAL is scanned by the frozen scanner. Only valid
-      // OBJECT_REFERENCE digests are marked.
+      // OBJECT_REFERENCE digests are marked. Sorter/scratch failures during
+      // marking are MAINTENANCE failures (gcPhase "G2-mark-scratch"): they
+      // never touch authoritative persistence and must not be classified as
+      // authoritative uncertainty.
       await at("G2-mark");
+      const addMark = async (digest: string): Promise<void> => {
+        const added = await markSorter.add(digest);
+        if (!added.ok) {
+          throw new DirectoryIoError(added.error.code as DirectoryIoError["code"], added.error.message,
+            { gcPhase: "G2-mark-scratch" });
+        }
+      };
       const head = authority.head;
       const ledger = await openAuthoritativeReceiptLedger(directory, head.storeId, head.epochId,
         head.checkpoint.checkpointId, files);
@@ -539,7 +579,7 @@ export async function collectDurableGarbage(input: GcInput): Promise<Result<GcOu
         const verified = await ledger.value.verify(async entry => {
           for (const operation of entry.operations) {
             const digest = required(extractObjectDigest(operation));
-            if (digest !== undefined) required(await markSorter.add(digest));
+            if (digest !== undefined) await addMark(digest);
           }
         });
         if (!verified.ok) return err(verified.error.code, verified.error.message, { gcPhase: phase });
@@ -549,6 +589,7 @@ export async function collectDurableGarbage(input: GcInput): Promise<Result<GcOu
       if (walKind === "directory") return err("RECOVERY_REQUIRED", "Unsafe WAL path.", { gcPhase: phase });
       if (walKind === "file") {
         let handle;
+        let terminalTip: CommittedTip | undefined;
         try {
           handle = await files.open(walPath, false);
           const scan = required(await WalFileScan.open(walPath, handle, head, productionRegistry, files,
@@ -560,16 +601,36 @@ export async function collectDurableGarbage(input: GcInput): Promise<Result<GcOu
             for (const transaction of batch.transactions) {
               for (const operation of transaction.operations) {
                 const digest = required(extractObjectDigest(operation));
-                if (digest !== undefined) required(await markSorter.add(digest));
+                if (digest !== undefined) await addMark(digest);
               }
             }
           } while (!cursor.ended);
+          terminalTip = cursor.tip;
         } finally {
           if (handle) await handle.close();
         }
+        // Terminal-authority proof (frozen T7 rotation-P2 precedent): the
+        // scanned WAL must terminate at exactly the captured committed tip.
+        // A truncated or foreign active segment omits committed roots and
+        // must fail before inventory, coverage and any deletion.
+        if (input.expectedTip && !sameCommittedTip(terminalTip!, input.expectedTip)) {
+          return err("RECOVERY_REQUIRED",
+            "The active WAL does not terminate at the captured committed tip; recover before collecting garbage.",
+            { gcPhase: phase, capturedTip: { ...input.expectedTip }, durableTip: { ...terminalTip! } });
+        }
+      } else if (input.expectedTip && !sameCommittedTip(head.checkpoint.tip, input.expectedTip)) {
+        // WAL legitimately absent (post-rotation): the frozen checkpoint
+        // authority must already represent the captured committed tip.
+        return err("RECOVERY_REQUIRED",
+          "The active WAL is absent but the checkpoint does not represent the captured committed tip; recover before collecting garbage.",
+          { gcPhase: phase, capturedTip: { ...input.expectedTip }, checkpointTip: { ...head.checkpoint.tip } });
       }
       await authority.verify();
-      markRun = required(await markSorter.finish());
+      const finishedMark = await markSorter.finish();
+      if (!finishedMark.ok) {
+        return err(finishedMark.error.code, finishedMark.error.message, { gcPhase: "G2-mark-scratch" });
+      }
+      markRun = finishedMark.value;
       markedReferences = markRun?.entries ?? 0;
 
       // G3: physical inventory enumeration. Only valid-name REGULAR files are
@@ -705,12 +766,16 @@ export async function collectDurableGarbage(input: GcInput): Promise<Result<GcOu
     } catch (error) {
       // Any thrown failure inside a phase is classified with its exact phase
       // so the runtime can distinguish maintenance failures (stay ready) from
-      // authoritative uncertainty (recovery). Sorter scratch is swept on the
-      // failure path; debris is inert and deterministically swept next attempt.
+      // authoritative uncertainty (recovery). Sorter-injected errors carry
+      // their own gcPhase detail, which is preserved. Sorter scratch is swept
+      // on the failure path; debris is inert and deterministically swept next attempt.
       await markSorter.sweep();
       await inventorySorter.sweep();
       if (error instanceof DirectoryIoError) {
-        return err(error.code, error.message, { gcPhase: phase });
+        const own = error.details && typeof error.details === "object" && !Array.isArray(error.details)
+          && typeof (error.details as Record<string, unknown>).gcPhase === "string"
+          ? (error.details as Record<string, string>).gcPhase : undefined;
+        return err(error.code, error.message, { gcPhase: own ?? phase });
       }
       return err(ioFailureCode(error), "Payload-object garbage collection failed.", { gcPhase: phase });
     }

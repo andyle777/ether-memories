@@ -859,3 +859,181 @@ describe("cascade production scale and rotation serialization attacks", { timeou
     value(await restarted.close());
   });
 });
+describe("hostile review repairs: terminal tip proof, scratch lifecycle, static symlink boundary", () => {
+  let parent: string;
+  let directory: string;
+  const io = simulatedDirectoryIO();
+  const files = nodeWalIO;
+  const objectsDir = () => join(directory, "objects");
+  const objectNames = async () => (await fs.readdir(objectsDir())).sort();
+  const objectBackedContent = () => "gc review large object payload ".repeat(3000);
+  const walPath = async () => {
+    const names = await fs.readdir(join(directory, "wal"));
+    return join(directory, "wal", names[0]!);
+  };
+
+  beforeEach(async () => {
+    parent = await fs.mkdtemp(join(tmpdir(), "ether-gc-review-"));
+    directory = join(parent, "store");
+  });
+  afterEach(async () => { await fs.rm(parent, { recursive: true, force: true }); });
+
+  const open = async (deps: { io?: DirectoryIO; files?: WalIO } = {}) =>
+    openDurableEtherMemoriesInternal({ userId: "gc-review-user", directory, openMode: "auto" },
+      { io: deps.io ?? io, files: deps.files ?? files });
+
+  const injectOrphan = async (content = "review orphan") => {
+    const digest = createHash("sha256").update(content).digest("hex");
+    await fs.mkdir(objectsDir(), { recursive: true });
+    await fs.writeFile(join(objectsDir(), digest + ".bin"), content);
+    return `${digest}.bin`;
+  };
+
+  it("fails closed before deletion when the active WAL is truncated to an earlier valid prefix", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-trunc-1"));
+    const sizeAfterFirst = (await fs.stat(await walPath())).size;
+
+    value(await runtime.addMemory({ content: objectBackedContent() + " two", status: "active" }, "gc-trunc-2"));
+    value(await runtime.addMemory({ content: objectBackedContent() + " three", status: "active" }, "gc-trunc-3"));
+    const committed = await objectNames();
+    const orphan = await injectOrphan();
+    await fs.truncate(await walPath(), sizeAfterFirst);
+    const result = await runtime.collectGarbage();
+    const error = failure(result);
+    expect(error.code).toBe("RECOVERY_REQUIRED");
+    expect(error.details!.gcPhase).toBe("G2-mark");
+    expect(error.details!.capturedTip).toBeDefined();
+    expect(error.details!.durableTip).toBeDefined();
+    // Authoritative inconsistency is observable in the lifecycle, and NOTHING
+    // was deleted: every committed object and the orphan survive.
+    expect(runtime.state).toBe("recovery-required");
+    expect(await objectNames()).toEqual([...committed, orphan].sort());
+    // Explicit recovery re-establishes coherent (truncated) authority.
+    const recovery = await runtime.recover();
+    expect(recovery.ok).toBe(true);
+    expect(runtime.state).toBe("ready");
+  });
+
+  it("fails closed before deletion when the active WAL disappears under a committed tip", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-vanish-1"));
+    const referenced = await objectNames();
+    const orphan = await injectOrphan();
+    await fs.unlink(await walPath());
+    const result = await runtime.collectGarbage();
+    const error = failure(result);
+    expect(error.code).toBe("RECOVERY_REQUIRED");
+    expect(error.details!.gcPhase).toBe("G2-mark");
+    expect(runtime.state).toBe("recovery-required");
+    expect(await objectNames()).toEqual([...referenced, orphan].sort());
+  });
+
+  it("accepts legitimate post-rotation WAL absence and post-rotation WAL presence", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-absent-1"));
+    value(await runtime.rotate());
+    // Legitimate absence: the checkpoint tip IS the captured committed tip.
+    const afterRotation = value(await runtime.collectGarbage());
+    expect(afterRotation.reclaimedObjects).toBe(0);
+    expect(runtime.state).toBe("ready");
+    // A new post-rotation WAL segment terminates at the captured tip.
+    value(await runtime.addMemory({ content: "inline after rotation", status: "active" }, "gc-absent-2"));
+    const afterCommit = value(await runtime.collectGarbage());
+    expect(afterCommit.reclaimedObjects).toBe(0);
+    expect(runtime.state).toBe("ready");
+    value(await runtime.close());
+  });
+
+  it("documents the direct-call boundary: without a captured tip there is no terminal-tip oracle", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-direct-1"));
+    const sizeAfterFirst = (await fs.stat(await walPath())).size;
+    value(await runtime.addMemory({ content: objectBackedContent() + " two", status: "active" }, "gc-direct-2"));
+    await fs.truncate(await walPath(), sizeAfterFirst);
+    value(await runtime.close());
+    // A direct maintenance call without a published generation trusts the
+    // scanned representation exactly like a fresh recovery would: the
+    // truncated-away transactions are no longer committed history, so their
+    // objects are legitimately unreachable and collectible. The facade's tip
+    // proof is the oracle a LIVE generation needs; a caller with no
+    // generation cannot demand more than recovery itself guarantees.
+    const outcome = value(await collectDurableGarbage({ directory, io, files }));
+    expect(outcome.reclaimedObjects).toBeGreaterThan(0);
+    expect(outcome.markedReferences).toBeGreaterThan(0);
+  });
+
+  it.each(["create", "write", "sync", "verify"] as const)
+  ("keeps the runtime ready through an injected mark-scratch %s failure and recovers by retry", async mode => {
+    let fault = false;
+    const scratchFaultFiles: WalIO = {
+      ...nodeWalIO,
+      open: async (path, create) => {
+        if (!fault || !path.includes("gc-mark")) return nodeWalIO.open(path, create);
+        if (create) {
+          if (mode === "create") throw new Error("injected mark-run create failure");
+          const handle = await nodeWalIO.open(path, create);
+          if (mode === "write") return { ...handle, write: async () => { throw new Error("injected mark-run write failure"); } } as WalFileHandle;
+          if (mode === "sync") return { ...handle, sync: async () => { await handle.close(); throw new Error("injected mark-run sync failure"); } } as WalFileHandle;
+          return handle;
+        }
+        if (mode === "verify") {
+          const handle = await nodeWalIO.open(path, create);
+          return { ...handle, read: async (bytes: Uint8Array) => { bytes.fill(0x7a); return bytes.byteLength; } } as WalFileHandle;
+        }
+        return nodeWalIO.open(path, create);
+      }
+    };
+    const runtime = value(await open({ files: scratchFaultFiles }));
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-scratch-0"));
+    const referenced = await objectNames();
+    const orphan = await injectOrphan();
+    const tip = value(runtime.tip);
+    fault = true;
+    const failed = await runtime.collectGarbage();
+    const error = failure(failed);
+    expect(error.details!.gcPhase).toBe("G2-mark-scratch");
+    // A transient mark-scratch failure is MAINTENANCE: the runtime stays
+    // ready, nothing was deleted, and the generation/tip are untouched.
+    expect(runtime.state).toBe("ready");
+    expect(await objectNames()).toEqual([...referenced, orphan].sort());
+    expect(value(runtime.tip)).toEqual(tip);
+    fault = false;
+    // Still fully usable without recovery; retry completes the collection.
+    const note = value(await runtime.addMemory({ content: "writable after scratch failure", status: "active" }, "gc-scratch-1"));
+    expect(note.id).toBeTruthy();
+    const retry = value(await runtime.collectGarbage());
+    expect(retry.reclaimedObjects).toBe(1);
+    expect(await objectNames()).toEqual(referenced);
+    expect(runtime.state).toBe("ready");
+    value(await runtime.close());
+  });
+
+  it("never unlinks or follows a candidate that is a static final-component symlink", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-link-1"));
+    const referenced = await objectNames();
+    const orphan = await injectOrphan("symlink orphan base");
+    const linkTarget = join(parent, "outside-link-target");
+    await fs.writeFile(linkTarget, "outside the store");
+    await fs.unlink(join(objectsDir(), orphan));
+    let symlinkCreated = true;
+    try { await fs.symlink(linkTarget, join(objectsDir(), orphan), "file"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      symlinkCreated = false;
+    }
+    const outcome = value(await collectDurableGarbage({ directory, io, files }));
+    if (symlinkCreated) {
+      expect(outcome.unknownArtifacts).toBe(1);
+      expect(outcome.reclaimedObjects).toBe(0);
+      expect(await objectNames()).toEqual([...referenced, orphan].sort());
+      expect(await fs.readFile(linkTarget, "utf8")).toBe("outside the store");
+    } else {
+      expect(outcome.unknownArtifacts).toBe(0);
+      expect(await objectNames()).toEqual(referenced);
+    }
+    expect(runtime.state).toBe("ready");
+    value(await runtime.close());
+  });
+});
