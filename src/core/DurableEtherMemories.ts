@@ -49,6 +49,7 @@ import { attachTip, type StateRoot } from "../persistence/stateRoot.js";
 import { encodeSnapshotPayload } from "../persistence/snapshotPayload.js";
 import { DEFAULT_MAX_INDEX_BYTES } from "../persistence/recoveryMutationIndex.js";
 import { rotateDurableStore, MAX_ACTIVE_WAL_BYTES } from "../persistence/checkpointRotation.js";
+import { collectDurableGarbage } from "../persistence/objectReclamation.js";
 import { nodeDirectoryIO, type DirectoryIO } from "../persistence/directoryIO.js";
 import { nodeWalIO, type WalIO } from "../persistence/walIO.js";
 import { DIGEST_ALGORITHM, HEAD_FORMAT, HEAD_VERSION, encodeCheckpoint, type PersistedStoreHead } from "../persistence/codecs.js";
@@ -95,6 +96,21 @@ export interface DurableRotationSummary {
 }
 
 /**
+ * Public garbage-collection summary (Tranche 8). Payload-object orphan
+ * collection is generation-neutral and tip-neutral: the published generation
+ * is IDENTICAL before and after. Only never-referenced payload objects
+ * (precommit crash orphans and injected debris) can ever be reclaimed;
+ * authoritative history - active WAL and cumulative receipts - is permanent
+ * root set and never deleted.
+ */
+export interface DurableGcSummary {
+  readonly scannedObjects: number;
+  readonly markedReferences: number;
+  readonly reclaimedObjects: number;
+  readonly unknownArtifacts: number;
+}
+
+/**
  * Public durable runtime surface. Only supported user-facing types appear
  * here; internal persistence types are deliberately absent.
  */
@@ -116,6 +132,7 @@ export interface DurableEtherMemories {
   addGraphEdge(id: string, source: string, target: string, relationship: string,
     data: Record<string, unknown>, mutationId: string): Promise<Result<MindGraphEdge>>;
   rotate(): Promise<Result<DurableRotationSummary>>;
+  collectGarbage(): Promise<Result<DurableGcSummary>>;
   recover(): Promise<Result<DurableRecoveryReceipt>>;
   close(): Promise<Result<void>>;
 }
@@ -435,6 +452,48 @@ class DurableRuntime implements DurableEtherMemories {
   }
 
   /**
+   * Explicit payload-object orphan collection (Tranche 8). Serialized behind
+   * the same single-flight queue as mutations and rotation. GC never changes
+   * HEAD, checkpoints, WAL/receipt authority, the published generation or the
+   * committed tip; only provably unreachable payload objects are deleted.
+   * Because deleted files are already unreachable, maintenance failures
+   * (unlink, directory barrier, scratch cleanup) return exact partial-reclaim
+   * details while the runtime REMAINS ready - GC has no P6 and no
+   * authority-switch. Only failures that make authoritative data itself
+   * uncertain (corrupt history, a marked object physically missing) move the
+   * runtime to recovery-required.
+   */
+  async collectGarbage(): Promise<Result<DurableGcSummary>> {
+    return this.enqueue(async () => {
+      if (this.#lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
+      if (this.#lifecycle !== "ready") {
+        return err("RECOVERY_REQUIRED", "Recovery is required before garbage collection.");
+      }
+      const outcome = await collectDurableGarbage({
+        directory: this.#directory, io: this.#io, files: this.#files
+      });
+      if (!outcome.ok) {
+        const details = record(outcome.error.details) ? outcome.error.details : {};
+        const phase = typeof details.gcPhase === "string" ? details.gcPhase : undefined;
+        // GC's own maintenance phases never make authoritative state
+        // uncertain; only authoritative-source phases (or authority-layer
+        // errors without a GC phase) and corruption classifications do.
+        const authoritative = outcome.error.code === "PERSISTENCE_CORRUPTION"
+          || ((outcome.error.code === "RECOVERY_REQUIRED" || outcome.error.code === "STALE_TRANSACTION_BASE")
+            && (phase === undefined || phase === "G2-mark" || phase === "G4-coverage"));
+        if (authoritative) this.#lifecycle = "recovery-required";
+        return outcome;
+      }
+      return ok({
+        scannedObjects: outcome.value.scannedObjects,
+        markedReferences: outcome.value.markedReferences,
+        reclaimedObjects: outcome.value.reclaimedObjects,
+        unknownArtifacts: outcome.value.unknownArtifacts
+      });
+    });
+  }
+
+  /**
    * Explicit recovery. While state is "recovery-required", committed reads
    * remain available, recover() is available and durable mutations fail
    * predictably with RECOVERY_REQUIRED. Never performed transparently inside
@@ -567,6 +626,7 @@ const createFacade = (implementation: DurableRuntime): DurableEtherMemories => O
     data: Record<string, unknown>, mutationId: string): Promise<Result<MindGraphEdge>> =>
     implementation.addGraphEdge(id, source, target, relationship, data, mutationId),
   rotate: (): Promise<Result<DurableRotationSummary>> => implementation.rotate(),
+  collectGarbage: (): Promise<Result<DurableGcSummary>> => implementation.collectGarbage(),
   recover: (): Promise<Result<DurableRecoveryReceipt>> => implementation.recover(),
   close: (): Promise<Result<void>> => implementation.close()
 });
