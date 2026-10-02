@@ -353,3 +353,68 @@ describe("explicit durable-store directory foundation", () => {
     expect(target.exportData()).toEqual(source.exportData());
   });
 });
+
+describe("bounded streaming directory-name enumeration", () => {
+  let parent: string;
+  let directory: string;
+  beforeEach(async () => {
+    parent = await fs.mkdtemp(join(tmpdir(), "ether-af1-names-"));
+    directory = join(parent, "names");
+    await fs.mkdir(directory);
+  });
+  afterEach(async () => {
+    if (dirname(resolve(parent)) !== resolve(tmpdir()) || !basename(parent).startsWith("ether-af1-names-")) throw new Error("Unsafe test cleanup path");
+    await fs.rm(parent, { recursive: true, force: true });
+  });
+
+  it("streams an empty directory as zero names", async () => {
+    const names: string[] = [];
+    await nodeDirectoryIO.readNames(directory, name => { names.push(name); });
+    expect(names).toEqual([]);
+  });
+
+  it("streams a missing directory as zero names without failing", async () => {
+    const names: string[] = [];
+    await nodeDirectoryIO.readNames(join(directory, "absent"), name => { names.push(name); });
+    expect(names).toEqual([]);
+  });
+
+  it("streams every entry name exactly once, preserving malformed names verbatim", async () => {
+    const expected = ["a.bin", "b", ".hidden", "UPPER.BIN", "..dots", "z"];
+    for (const name of expected) await fs.writeFile(join(directory, name), "x");
+    const names: string[] = [];
+    await nodeDirectoryIO.readNames(directory, name => { names.push(name); });
+    expect(names.sort()).toEqual([...expected].sort());
+  });
+
+  it("streams many entries one at a time without array accumulation", async () => {
+    const count = 3000;
+    for (let i = 0; i < count; i++) await fs.writeFile(join(directory, `entry-${i}.bin`), "x");
+    let seen = 0;
+    let inVisit = 0;
+    await nodeDirectoryIO.readNames(directory, async name => {
+      inVisit++;
+      expect(typeof name).toBe("string");
+      await Promise.resolve();
+      seen++;
+      inVisit--;
+      expect(inVisit).toBe(0);
+    });
+    expect(seen).toBe(count);
+  });
+
+  it("propagates visitor failures and never silently truncates enumeration", async () => {
+    await fs.writeFile(join(directory, "a"), "x");
+    await expect(nodeDirectoryIO.readNames(directory, () => { throw new Error("visitor rejected"); }))
+      .rejects.toThrow("visitor rejected");
+  });
+
+  it("reports an unreadable non-directory path as recovery-required, never as empty", async () => {
+    const file = join(parent, "not-a-directory");
+    await fs.writeFile(file, "x");
+    const names: string[] = [];
+    await expect(nodeDirectoryIO.readNames(file, name => { names.push(name); }))
+      .rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(names).toEqual([]);
+  });
+});
