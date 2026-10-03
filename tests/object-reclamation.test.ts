@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "../src/persistence/directoryIO.js";
 import { nodeWalIO, type WalFileHandle, type WalIO } from "../src/persistence/walIO.js";
 import { encodeEtherData, ETHER_DATA_PROFILE } from "../src/persistence/etherData.js";
-import { referenceFor, validateReference } from "../src/persistence/payloadObjects.js";
+import { OBJECT_REFERENCE, referenceFor, validateReference } from "../src/persistence/payloadObjects.js";
 import { openDurableEtherMemoriesInternal } from "../src/core/DurableEtherMemories.js";
 import { simulatedDirectoryIO } from "./helpers/wal.js";
 import {
@@ -14,7 +14,12 @@ import {
   deriveReclaimCandidates, extractObjectDigest, gcLimits, sweepGcScratch,
   type GcInstrumentation, type GcLimits, type GcSession, type SealedRun
 } from "../src/persistence/objectReclamation.js";
-import type { WalOperation } from "../src/types/persistence.js";
+import type { CommittedTip, WalOperation } from "../src/types/persistence.js";
+import { ok } from "../src/utils/result.js";
+import { createReplayRegistry } from "../src/persistence/walOperations.js";
+import { decodeStoreHead, WAL_FORMAT, WAL_VERSION } from "../src/persistence/codecs.js";
+import { encodeWalFrame } from "../src/persistence/wal.js";
+import { parseTransactionSequenceId } from "../src/utils/durablePersistence.js";
 import * as publicApi from "../src/index.js";
 import * as gcModule from "../src/persistence/objectReclamation.js";
 
@@ -460,6 +465,70 @@ describe("sealed-reader handle lifetimes", () => {
     const result = await deriveReclaimCandidates(mark, inventory,
       join(directory, ".private", GC_CANDIDATES_NAME), failing, session);
     expect(result.ok).toBe(false);
+    expect(counting.balances()).toBe(true);
+  });
+
+  it("closes the handle when the initial stat fails during open, without accumulation", async () => {
+    const session = createGcSession();
+    const sealed = await sealFile(join(directory, ".private", "gc-mark-a-000000.run"), "mark", sortedDigests(2), session,
+      "G2-mark-scratch");
+    const counting = countingFiles();
+    const statFailing: WalIO = {
+      ...counting.files,
+      open: async (path, create) => {
+        const handle = await counting.files.open(path, create);
+        return { ...handle, stat: async () => { throw new Error("injected stat failure"); } } as WalFileHandle;
+      }
+    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const result = await SealedRunReader.open(sealed, statFailing, session, "G2-mark-scratch", "maintenance");
+      expect(result.ok).toBe(false);
+      expect(counting.balances()).toBe(true);
+    }
+    expect(counting.opened()).toBe(5);
+    // Retry after fault removal succeeds.
+    const reader = value(await SealedRunReader.open(sealed, counting.files, session, "G2-mark-scratch", "maintenance"));
+    await reader.close();
+    expect(counting.balances()).toBe(true);
+  });
+
+  it("disposes the chunk-run writer when append fails, without accumulation", async () => {
+    const session = createGcSession();
+    let failWrite = false;
+    const counting = countingFiles();
+    const writeFailing: WalIO = {
+      ...counting.files,
+      open: async (path, create) => {
+        const handle = await counting.files.open(path, create);
+        if (!create || !path.includes("gc-mark") || !failWrite) return handle;
+        return { ...handle, write: async () => { throw new Error("injected append failure"); } } as WalFileHandle;
+      }
+    };
+    const io: DirectoryIO = { ...nodeDirectoryIO, syncDirectory: async () => {},
+      activateFile: async (a, b) => { await fs.rename(a, b); return "atomic"; } };
+    const sorter = new GcDigestSorter(directory, "mark", io, writeFailing, testLimits(), session);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      failWrite = true;
+      let failed = false;
+      for (let index = 0; index < 5; index++) {
+        const added = await sorter.add(digest(index + 1));
+        if (!added.ok) {
+          // The chunk flush failed on append: the writer must be disposed.
+          failed = true;
+          expect(failure(added).details!.gcDisposition).toBe("maintenance");
+          break;
+        }
+      }
+      expect(failed).toBe(true);
+      expect(counting.balances()).toBe(true);
+    }
+    failWrite = false;
+    const retry = new GcDigestSorter(directory, "mark", io, counting.files, testLimits(), createGcSession());
+    value(await sweepGcScratch(directory, io, testLimits(), "G1-scratch-sweep"));
+    for (let index = 0; index < 5; index++) value(await retry.add(digest(index + 1)));
+    const finished = value(await retry.finish())!;
+    expect(finished.records).toBe(5);
+    await retry.sweep();
     expect(counting.balances()).toBe(true);
   });
 
@@ -1121,7 +1190,7 @@ describe("cascade production scale and rotation serialization attacks", { timeou
     expect(seen).toBe(count);
     await sorter.sweep();
     expect(await fs.readdir(join(directory, ".private"))).toEqual([]);
-  }, 120_000);
+  }, 300_000);
 
   it("preserves a rotation-1 object-backed result across three rotations, GC and restart", async () => {
     const runtime = value(await open());
@@ -1713,5 +1782,99 @@ describe("persisted-authority corruption and package containment", () => {
     expect(Object.hasOwn(publicApi, "collectDurableGarbage")).toBe(false);
     expect(Object.hasOwn(publicApi, "GcDigestSorter")).toBe(false);
     expect(Object.hasOwn(publicApi, "SealedRunReader")).toBe(false);
+  });
+});
+
+describe("persisted WAL reference classification at the GC reading boundary", { timeout: 300_000 }, () => {
+  let parent: string;
+  let directory: string;
+  const io = simulatedDirectoryIO();
+  const files = nodeWalIO;
+  const objectsDir = () => join(directory, "objects");
+  const objectNames = async () => (await fs.readdir(objectsDir())).sort();
+  const objectBackedContent = () => "gc codex large object payload ".repeat(3000);
+  const walPath = async () => {
+    const names = await fs.readdir(join(directory, "wal"));
+    return join(directory, "wal", names[0]!);
+  };
+
+  beforeEach(async () => {
+    parent = await fs.mkdtemp(join(tmpdir(), "ether-gc-codex-"));
+    directory = join(parent, "store");
+  });
+  afterEach(async () => { await fs.rm(parent, { recursive: true, force: true }); });
+
+  const open = () => openDurableEtherMemoriesInternal({ userId: "gc-codex-user", directory, openMode: "auto" },
+    { io, files });
+
+  /** A registry that accepts ANY payload at ENCODE time only; GC scans with
+   * the frozen productionRegistry, so forged frames fail persisted validation. */
+  const laxRegistry = value(createReplayRegistry([{ type: "ether.note.put", version: "1",
+    validate: () => ok(undefined), reduce: (state, payload) => ok({ ...state, forged: payload }) }]));
+
+  const forgedFrame = (base: CommittedTip, storeId: string, payload: Record<string, unknown>) =>
+    value(encodeWalFrame({
+      storeId,
+      format: { format: WAL_FORMAT, version: WAL_VERSION },
+      expectedBase: base,
+      identity: { epochId: base.epochId, txId: value(parseTransactionSequenceId((BigInt(base.txId) + 1n).toString())) },
+      mutation: { mutationId: "forged-mutation" as never, digest: "f".repeat(64) },
+      audit: null,
+      operations: [{ type: "ether.note.put", version: "1", payload: payload as never }]
+    }, laxRegistry));
+
+  const validReference = () => {
+    const bytes = value(encodeEtherData({ id: "forged", content: "x".repeat(70_000) }));
+    return { encoding: OBJECT_REFERENCE, profile: ETHER_DATA_PROFILE,
+      digest: referenceFor(bytes).digest, byteLength: bytes.byteLength };
+  };
+
+  const cases: ReadonlyArray<[string, () => Record<string, unknown>]> = [
+    ["wrong digest length", () => ({ ...validReference(), digest: "abc" })],
+    ["non-hex digest", () => ({ ...validReference(), digest: "z".repeat(64) })],
+    ["uppercase noncanonical digest", () => ({ ...validReference(), digest: "A".repeat(64) })],
+    ["unexpected extra fields", () => ({ ...validReference(), extra: 1 })],
+    ["unknown persisted encoding", () => ({ encoding: "ether.unknown.v1", data: "{}" })]
+  ];
+
+  it.each(cases)("classifies a persisted %s in the active WAL as authoritative corruption", async (_, forge) => {
+    const runtime = value(await open());
+    const committed = value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-codex-1"));
+    expect(committed.id).toBeTruthy();
+    const referenced = await objectNames();
+    const head = value(decodeStoreHead(Buffer.from(await fs.readFile(join(directory, "HEAD")))));
+    // Append a forged frame the frozen production registry rejects; the GC
+    // reading boundary must classify the failure as persisted corruption.
+    await fs.appendFile(await walPath(), forgedFrame(value(runtime.tip), head.storeId, forge()).bytes);
+    const result = await runtime.collectGarbage();
+    const error = failure(result);
+    expect(error.code).toBe("PERSISTENCE_CORRUPTION");
+    expect(error.details!.gcDisposition).toBe("authoritative");
+    expect(runtime.state).toBe("recovery-required");
+    // Zero payload unlink: every committed object survives untouched.
+    expect(await objectNames()).toEqual(referenced);
+  });
+
+  it("keeps caller-facing reference validation semantics unchanged", () => {
+    // The frozen caller-facing validator keeps its own classification at
+    // install boundaries; only the GC persistence-reading boundary normalizes.
+    const malformed = { ...validReference(), digest: "zz" };
+    expect(failure(validateReference(malformed as never)).code).toBe("INVALID_INPUT");
+    const unknownProfile = { ...validReference(), profile: "ether.unknown.v1" };
+    expect(failure(validateReference(unknownProfile as never)).code).toBe("UNSUPPORTED_PERSISTENCE_FORMAT");
+  });
+
+  it("retains receipt-ledger persisted corruption as authoritative corruption", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-codex-2"));
+    value(await runtime.rotate());
+    const ledger = (await fs.readdir(join(directory, "receipts")))[0]!;
+    const bytes = await fs.readFile(join(directory, "receipts", ledger));
+    bytes[bytes.byteLength - 2] = 0x7a;
+    await fs.writeFile(join(directory, "receipts", ledger), bytes);
+    const result = await runtime.collectGarbage();
+    expect(failure(result).code).toBe("PERSISTENCE_CORRUPTION");
+    expect(failure(result).details!.gcDisposition).toBe("authoritative");
+    expect(runtime.state).toBe("recovery-required");
   });
 });

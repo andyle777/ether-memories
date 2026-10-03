@@ -330,7 +330,21 @@ const collectPayloadObjectGarbage = async (input: {
             { mode: "authority-held", verifyAuthority: authority.verify }));
           let cursor = scan.cursor();
           do {
-            const batch = required(await scan.next(cursor));
+            const nextBatch = await scan.next(cursor);
+            if (!nextBatch.ok) {
+              // Persistence-reading boundary: any payload/operation validation
+              // failure here came from AUTHORITATIVE PERSISTED STATE, never
+              // from a caller - malformed persisted references are corruption.
+              // The frozen scanner/registry semantics are unchanged; only the
+              // classification at this reading boundary is normalized.
+              if (nextBatch.error.code === "INVALID_INPUT" || nextBatch.error.code === "UNSUPPORTED_PERSISTENCE_FORMAT") {
+                return gcFailure("PERSISTENCE_CORRUPTION",
+                  "Malformed persisted operation or object reference in authoritative history: " + nextBatch.error.message,
+                  phase, "authoritative");
+              }
+              return gcFailure(nextBatch.error.code as PersistenceErrorCode, nextBatch.error.message, phase, "authoritative");
+            }
+            const batch = nextBatch.value;
             cursor = batch.continuation;
             for (const transaction of batch.transactions) {
               for (const operation of transaction.operations) {

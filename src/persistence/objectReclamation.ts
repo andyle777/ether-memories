@@ -376,11 +376,19 @@ export class SealedRunReader {
   static async open(descriptor: SealedRun, files: WalIO, session: GcSession, phase: GcPhase,
     disposition: GcDisposition): Promise<Result<SealedRunReader>> {
     let handle: WalFileHandle;
-    let stamp: WalFileStamp;
     try {
       handle = await files.open(descriptor.path, false);
+    } catch (error) {
+      return gcFailure(error instanceof DirectoryIoError ? error.code : "RECOVERY_REQUIRED",
+        "GC sealed run open failed.", phase, disposition);
+    }
+    // Strict ownership: a successfully acquired handle gets exactly one
+    // eventual close even when the initial stat fails.
+    let stamp: WalFileStamp;
+    try {
       stamp = await handle.stat();
     } catch (error) {
+      await handle.close().catch(() => undefined);
       return gcFailure(error instanceof DirectoryIoError ? error.code : "RECOVERY_REQUIRED",
         "GC sealed run open failed.", phase, disposition);
     }
@@ -519,6 +527,10 @@ export class GcDigestSorter {
       this.scratchPhase());
     const opened = await writer.open();
     if (!opened.ok) return opened;
+    // Strict ownership: after a successful writer open, every exit path gets
+    // exactly one eventual dispose. dispose() is a safe no-op once close() has
+    // run (success or its own failure paths clear the handle first), so the
+    // finally never double-closes and never masks the original error.
     try {
       for (const digest of sorted) {
         const appended = await writer.append(digest);
@@ -529,8 +541,9 @@ export class GcDigestSorter {
       this.runs[this.bank].push(sealed.value);
       return ok(undefined);
     } catch (error) {
-      await writer.dispose();
       return gcFailure(ioFailureCode(error), "GC chunk run write failed.", this.scratchPhase(), "maintenance");
+    } finally {
+      await writer.dispose();
     }
   }
 
