@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 // Compiled production modules only; never tests/ or src/ development imports.
 import { openDurableEtherMemoriesInternal } from "../dist/core/DurableEtherMemories.js";
-import { collectDurableGarbage } from "../dist/persistence/objectReclamation.js";
 import { encodeSnapshotPayload } from "../dist/persistence/snapshotPayload.js";
 import { nodeDirectoryIO } from "../dist/persistence/directoryIO.js";
 import { nodeWalIO } from "../dist/persistence/walIO.js";
@@ -96,7 +96,8 @@ try {
     if (path.includes(join(directory, "objects"))) throw Object.assign(new Error("denied"), { code: "EACCES" });
     await io.removeOwnedFile(path);
   } };
-  const unlinkFailure = await collectDurableGarbage({ directory, expectedTip: value(restarted.tip), io: denyIo, files });
+  const denyRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" }, { io: denyIo, files }));
+  const unlinkFailure = await denyRuntime.collectGarbage();
   check("an injected unlink failure fails with READ_ONLY_LOCKED and exact partial accounting",
     failureCode(unlinkFailure) === "READ_ONLY_LOCKED"
       && unlinkFailure.error.details.reclaimedObjects === 0 && unlinkFailure.error.details.gcPhase === "G6-reclaim");
@@ -108,7 +109,8 @@ try {
     if (path === join(directory, "objects")) throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "injected barrier failure");
     await io.syncDirectory(path);
   } };
-  const barrierFailure = await collectDurableGarbage({ directory, expectedTip: value(restarted.tip), io: barrierIo, files });
+  const barrierRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" }, { io: barrierIo, files }));
+  const barrierFailure = await barrierRuntime.collectGarbage();
   check("an injected barrier failure fails with DURABILITY_UNAVAILABLE and exact accounting",
     failureCode(barrierFailure) === "DURABILITY_UNAVAILABLE"
       && barrierFailure.error.details.reclaimedObjects === 1 && barrierFailure.error.details.gcPhase === "G6-reclaim");
@@ -118,7 +120,8 @@ try {
     if (path === join(directory, ".private")) throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "injected scratch barrier failure");
     await io.syncDirectory(path);
   } };
-  const scratchFailure = await collectDurableGarbage({ directory, expectedTip: value(restarted.tip), io: scratchIo, files });
+  const scratchRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" }, { io: scratchIo, files }));
+  const scratchFailure = await scratchRuntime.collectGarbage();
   check("an injected scratch-cleanup failure is an observable maintenance failure",
     failureCode(scratchFailure) === "DURABILITY_UNAVAILABLE"
       && scratchFailure.error.details.gcPhase === "G1-scratch-sweep");
@@ -134,6 +137,38 @@ try {
   const finalRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" }, { io, files }));
   check("the store recovers cleanly after reclamation and fault injection", finalRuntime.state === "ready");
   value(await finalRuntime.close());
+
+
+  // CONTAINMENT AUDIT: enumerate every emitted JS module and absolute-import
+  // it; no shipped export may provide an independently callable destructive
+  // collector (the runtime facade is the single GC entry point and captures
+  // its own generation tip).
+  const distRoot = fileURLToPath(new URL("../dist/", import.meta.url));
+  const modules = [];
+  const walk = async dir => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name.endsWith(".js")) modules.push(full);
+    }
+  };
+  await walk(distRoot);
+  let audited = 0;
+  for (const modulePath of modules) {
+    const namespace = await import(pathToFileURL(modulePath).href);
+    audited++;
+    for (const [name, exported] of Object.entries(namespace)) {
+      if (name === "collectDurableGarbage" || name === "collectPayloadObjectGarbage") {
+        throw new Error(`destructive collector exported from ${modulePath}`);
+      }
+      if (typeof exported === "function" && /collect.*garbage|garbage.*collect/i.test(name)) {
+        throw new Error(`suspicious GC export ${name} in ${modulePath}`);
+      }
+    }
+  }
+  check("absolute-path audit: no shipped module exports a destructive collector", audited > 40);
+  // The public facade takes no arguments and no caller-supplied tip.
+  check("collectGarbage is a zero-argument facade operation", finalRuntime.collectGarbage.length === 0);
 
   console.log(`\nAF1 TRANCHE 8 GC PROBE: ${checks}/${checks} checks passed`);
 } finally {

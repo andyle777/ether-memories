@@ -104,34 +104,47 @@ changes HEAD, checkpoints, WAL authority, receipt authority, StateRoot or tip.
 
 ## Core safety theorem
 
-For every object GC unlinks, the complete mark set has been proven before the
-unlink: the digest appears as an `OBJECT_REFERENCE` in NO transaction of the
-authoritative active WAL (whose terminal tip was proven equal to the captured
-committed tip) and NO entry of the authoritative cumulative receipt ledger
-(digest-verified during the mark pass), and the object was revalidated as a
-regular file immediately before deletion. Because every committed transaction
-becomes a receipt entry at rotation, this is equivalent to: no authoritative
-committed history can ever resolve the deleted object again.
+For every payload object GC unlinks, the complete proof chain holds:
+request entered via the runtime facade -> single-flight queue -> trusted
+live generation tip captured internally -> authoritative ledger fully
+verified -> active WAL fully scanned -> durable tip equals the captured
+tip -> marks exactly represent authoritative references (malformed persisted
+references are authoritative corruption) -> every derived scratch run is
+exact-content sealed AND per-record authenticated -> inventory exact ->
+marks subset of inventory proven -> candidates exactly inventory minus
+marks -> the digest passed G5 regular-file validation -> G5 generated an
+HMAC authentication from that exact trusted in-memory digest -> G6 verifies
+that exact record authentication BEFORE the unlink -> a later end-of-stream
+seal failure cannot invalidate earlier deletions because every deletion was
+individually authenticated. No shape-only or EOF-only validation ever serves
+as deletion authority.
 
-## Scratch integrity (exact-content binding)
+## Scratch integrity (two layers, each proving a different property)
 
-Shape-only validation (syntax, count, ordering) is NEVER deletion authority.
-Every generated scratch artifact — mark chunk runs, inventory runs, cascade
-merge outputs, the candidates run and the validated run — is **sealed** with a
-constant-size in-memory descriptor containing the record count, the exact
-canonical byte length and a SHA-256 computed from the INTENDED output while it
-is generated. After write+fsync each artifact is fully read back and verified
-against its binding (digest, count, canonical encoding, strict ordering). A
-sealed run may only be consumed through a `SealedRunReader` that opens ONE
-handle, fully verifies the content binding on that handle, and then streams
-records from the SAME handle (no path reopen between verification and trusted
-consumption), re-hashing as it streams with a second full-content hash
-assertion at end-of-stream, and re-checking the captured file stamp before
-every reclaim unlink. Substituting legal, sorted, same-count digest records at
-any point in the chain therefore fails closed. Descriptors are in-memory
-session state only; crash debris is swept, never resumed as trusted state, so
-no new durable on-disk format exists. Chunk runs collapse within-chunk
-duplicates at flush time so every sealed run is strictly increasing.
+Layer 1 - WHOLE-RUN SEAL (SealedRun): a constant-size in-memory binding - run
+type, record count, exact canonical byte length and a SHA-256 computed from
+the INTENDED output while it is generated - read back and verified after
+write+fsync and re-verified whenever a run is opened. The seal proves
+completeness: exact count, canonical encoding, strict ordering, no
+truncation, extension, omission or duplication of the run as a whole.
+
+Layer 2 - PER-RECORD AUTHENTICATION: every scratch record is
+digest(64 hex) || tag(64 hex) || LF, where tag = HMAC-SHA256 (standard
+WebCrypto HMAC, never concatenated hashes) over a domain-separated canonical
+encoding of runType || index || digest, under an EPHEMERAL 32-byte CSPRNG key
+held only in memory for one GC invocation. The tag is computed from the
+TRUSTED in-memory digest the producing computation just derived (never from
+bytes re-read from scratch) and verified BEFORE the record's digest is
+returned to any consumer - in particular before any unlink decision. A
+whole-run seal that becomes authoritative only at end-of-stream can never
+authorize an early destructive action; per-record authentication supplies
+exactly that missing property. The authenticated index binds each record to
+its exact position (no reordering, skipping or same-run replay); runType
+domain separation prevents cross-stream replay; a different key prevents
+cross-invocation replay. Crash/restart discards the key, automatically
+distrusting all stale authenticated scratch, which G1 sweeps deterministically.
+Tag comparison is constant-time; memory stays bounded (constant-size key and
+HMAC state, no per-record tables); no durable on-disk format exists.
 
 ## Failure disposition model (internal, not public codes)
 
@@ -155,17 +168,18 @@ disposition. The runtime applies the explicit precedence
 - no disposition (authority-acquisition layer) → conservative classification
   by error code.
 
-## Containment: exactly one destructive path
+## Containment: exactly one destructive path (structural)
 
-`expectedTip` is a structurally REQUIRED input: G2 proves the scanned active
-persistence representation reaches exactly that captured committed tip before
-any coverage or deletion. The only supported destructive caller is the runtime
-facade `collectGarbage()`, which captures the tip from its own live published
-generation; repo-internal protocol tests pass the live runtime's tip the same
-way. The package `exports` map (`.` and `./package.json` only) keeps external
-consumers from deep-importing any internal module — the collector, the
-sorter and every other internal persistence module are unreachable from an
-installed package. The frozen root API is unchanged.
+The G0-G7 orchestration that unlinks payload objects is a module-PRIVATE
+closure inside src/core/DurableEtherMemories.ts: it is not exported from any
+shipped module, so absolute-path imports of internal modules reveal only
+non-destructive scratch/planning helpers. The runtime facade
+collectGarbage() is the only caller and captures the committed tip from its
+own live published generation; no public API accepts a caller-supplied tip.
+The package exports map additionally blocks deep package-specifier imports
+for external consumers, and the compiled-production probe audits every
+emitted module by absolute import to prove no destructive collector export
+exists.
 
 ## Threat-model boundary (frozen, unchanged by T8)
 
