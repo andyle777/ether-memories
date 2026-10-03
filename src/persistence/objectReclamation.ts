@@ -260,16 +260,30 @@ export class RunWriter {
     if (!handle) return gcFailure("RECOVERY_REQUIRED", "GC scratch run is not open.", this.phase, "maintenance");
     const descriptor: SealedRun = { path: this.path, runType: this.runType, records: this.records,
       byteLength: this.position, sha256: this.hash.digest("hex") };
+    // Sync first, while ownership is still held. A sync failure remains the
+    // primary failure; cleanup performs the SOLE eventual close attempt for
+    // this handle (ownership still exists because close has not run yet) and
+    // never re-attempts it.
     try {
       await handle.sync();
-      await handle.close();
     } catch (error) {
       this.handle = undefined;
-      await handle.close().catch(() => undefined);
-      return gcFailure(error instanceof DirectoryIoError ? error.code : "DURABILITY_UNAVAILABLE",
+      const primary = gcFailure(error instanceof DirectoryIoError ? error.code : "DURABILITY_UNAVAILABLE",
         "GC scratch run sync failed.", this.phase, "maintenance");
+      try { await handle.close(); } catch { /* the sync failure remains the primary diagnosis */ }
+      return primary;
     }
+    // Relinquish ownership BEFORE the sole close attempt: a close rejection is
+    // surfaced as a close failure (never a false sync diagnosis) and can never
+    // re-enter cleanup for the same handle. Exactly one close attempt occurs
+    // on every path.
     this.handle = undefined;
+    try {
+      await handle.close();
+    } catch (error) {
+      return gcFailure(error instanceof DirectoryIoError ? error.code : "DURABILITY_UNAVAILABLE",
+        "GC scratch run close failed.", this.phase, "maintenance");
+    }
     const verified = await verifySealedRun(descriptor, this.files, this.phase, "maintenance");
     return verified.ok ? ok(descriptor) : verified;
   }

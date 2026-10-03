@@ -468,6 +468,72 @@ describe("sealed-reader handle lifetimes", () => {
     expect(counting.balances()).toBe(true);
   });
 
+  it("surfaces a close rejection as a close failure with exactly one close attempt", async () => {
+    const session = createGcSession();
+    let failClose = false;
+    let closeAttempts = 0;
+    const closeFailing: WalIO = {
+      ...nodeWalIO,
+      open: async (path, create) => {
+        const handle = await nodeWalIO.open(path, create);
+        const originalClose = handle.close.bind(handle);
+        if (!create) return handle;
+        // Count only WRITER handles: the read-back verification opens and
+        // closes its own reader handle outside this accounting.
+        return { ...handle, close: async () => {
+          closeAttempts++;
+          if (failClose) throw new Error("injected close rejection");
+          await originalClose();
+        } } as WalFileHandle;
+      }
+    };
+    const writer = new RunWriter(join(directory, ".private", "gc-mark-a-000000.run"), closeFailing, session,
+      "mark", "G2-mark-scratch");
+    value(await writer.open());
+    value(await writer.append(digest(1)));
+    failClose = true;
+    const result = await writer.close();
+    const error = failure(result);
+    expect(error.code).toBe("DURABILITY_UNAVAILABLE");
+    expect(error.details!.gcDisposition).toBe("maintenance");
+    expect(error.message).toContain("close failed");
+    expect(error.message).not.toContain("sync failed");
+    expect(closeAttempts).toBe(1);
+    // dispose after a completed close path never re-attempts the close.
+    await writer.dispose();
+    expect(closeAttempts).toBe(1);
+    // Retry after fault removal succeeds with exactly one more attempt.
+    failClose = false;
+    const retry = new RunWriter(join(directory, ".private", "gc-mark-a-000001.run"), closeFailing, session,
+      "mark", "G2-mark-scratch");
+    value(await retry.open());
+    value(await retry.append(digest(2)));
+    const sealed = value(await retry.close());
+    expect(sealed.records).toBe(1);
+    expect(closeAttempts).toBe(2);
+  });
+
+  it("keeps the sync failure as the primary diagnosis even when cleanup close also fails", async () => {
+    const session = createGcSession();
+    const failing: WalIO = {
+      ...nodeWalIO,
+      open: async (path, create) => {
+        const handle = await nodeWalIO.open(path, create);
+        return { ...handle, sync: async () => { throw new Error("injected sync failure"); },
+          close: async () => { throw new Error("injected close failure"); } } as WalFileHandle;
+      }
+    };
+    const writer = new RunWriter(join(directory, ".private", "gc-mark-a-000000.run"), failing, session,
+      "mark", "G2-mark-scratch");
+    value(await writer.open());
+    value(await writer.append(digest(1)));
+    const result = await writer.close();
+    const error = failure(result);
+    expect(error.message).toContain("sync failed");
+    expect(error.details!.gcDisposition).toBe("maintenance");
+    await writer.dispose();
+  });
+
   it("closes the handle when the initial stat fails during open, without accumulation", async () => {
     const session = createGcSession();
     const sealed = await sealFile(join(directory, ".private", "gc-mark-a-000000.run"), "mark", sortedDigests(2), session,
@@ -1511,6 +1577,39 @@ describe("exact-content scratch-integrity attacks across every proof stage", { t
     // Nothing was reclaimed: every committed object and the orphan survive.
     expect(await objectNames()).toEqual([...referenced, orphan + ".bin"].sort());
     corrupt = false;
+    const retry = value(await collector.collectGarbage());
+    expect(retry.reclaimedObjects).toBe(1);
+    expect(await objectNames()).toEqual(referenced);
+    value(await runtime.close());
+    value(await collector.close());
+  });
+
+  it("treats a scratch close rejection as maintenance: ready runtime, zero unlink, retry succeeds", async () => {
+    const runtime = value(await open());
+    value(await runtime.addMemory({ content: objectBackedContent(), status: "active" }, "gc-close-1"));
+    const referenced = await objectNames();
+    const orphan = createHash("sha256").update("close orphan").digest("hex");
+    await fs.mkdir(objectsDir(), { recursive: true });
+    await fs.writeFile(join(objectsDir(), orphan + ".bin"), "close orphan");
+    let failClose = false;
+    const closeFailing: WalIO = {
+      ...nodeWalIO,
+      open: async (path, create) => {
+        const handle = await nodeWalIO.open(path, create);
+        if (!create || !path.includes("gc-mark") || !failClose) return handle;
+        return { ...handle, close: async () => { throw new Error("injected scratch close rejection"); } } as WalFileHandle;
+      }
+    };
+    const collector = value(await open({ files: closeFailing }));
+    failClose = true;
+    const result = await collector.collectGarbage();
+    const error = failure(result);
+    expect(error.details!.gcDisposition).toBe("maintenance");
+    expect(["G2-mark-scratch", "G3-inventory"]).toContain(error.details!.gcPhase);
+    expect(collector.state).toBe("ready");
+    // Zero payload unlink: every committed object and the orphan survive.
+    expect(await objectNames()).toEqual([...referenced, orphan + ".bin"].sort());
+    failClose = false;
     const retry = value(await collector.collectGarbage());
     expect(retry.reclaimedObjects).toBe(1);
     expect(await objectNames()).toEqual(referenced);
