@@ -267,8 +267,8 @@ describe("Ether Memories v0.5.0", () => {
     const e = new EtherMemoriesCore({ userId: "u1" });
     const context = e.buildMemoryContext({ purpose: "debug" });
     expect(context.ok).toBe(true);
-    if (context.ok) expect(context.value.libraryVersion).toBe("0.5.0");
-    expect(LIBRARY_VERSION).toBe("0.5.0");
+    if (context.ok) expect(context.value.libraryVersion).toBe("0.6.0");
+    expect(LIBRARY_VERSION).toBe("0.6.0");
   });
 
   it("does not leak nested public state and preserves edge identity", () => {
