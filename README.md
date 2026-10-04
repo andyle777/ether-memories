@@ -1,4 +1,4 @@
-# Ether Memories v0.4.0
+# Ether Memories v0.6.0
 
 **Civilian-grade, local-first memory infrastructure for humans and AI systems.**
 
@@ -10,27 +10,41 @@ Ether Memories has three foundations:
 
 Condensation is a **processing layer**, not a fourth foundation.
 
-## v0.4.0
+## v0.6.0 — Durable Persistence
 
-v0.4 makes the three rooms one reload-safe system and adds a portable recall boundary without putting models inside the library.
+v0.6.0 adds an opt-in durable transactional store for the same three foundations: an append-only write-ahead log, exclusive writer authority, and crash-consistent startup recovery. The in-memory core and all v0.5.0 deterministic-retrieval behavior are unchanged.
 
-### Core improvements
+### Durable persistence
 
-- Identity restoration and user-ID mismatch protection.
-- Full Diary CRUD.
-- FoundationLinker between Notes, Diary, and Mind Graph.
-- Stable UUID-based IDs.
-- Provenance and thin lifecycle status.
-- Pinned-edit protection.
-- Deterministic retrieval with explainable matches.
-- Graph neighbors and typed starter relations.
-- Candidate promotion and expiry purge.
-- `MemoryContext`: bounded, citeable, explainable transport.
-- Pure Agent Tool and RLM environment adapters.
-- Validated transactional imports with stable graph-edge identities.
-- Injectable storage and crash-safer filesystem replacement.
-- Clone-on-read results, opt-in graph-assisted recall, and portable records.
-- No LLM, embedding, vector database, autonomous agent, or network dependency.
+- `openDurableEtherMemories()` — explicit asynchronous factory for the durable runtime; the classic in-memory core is untouched and remains fully supported.
+- WAL-transactional commits with caller-supplied mutation IDs: lost acknowledgments reconcile deterministically without duplicate effects, including after restart.
+- Crash-consistent startup recovery that distinguishes two cases: a repairable incomplete final transaction tail is truncated at the last complete transaction under writer authority, synchronized, and the WAL is rescanned — startup may then succeed — while complete or structural corruption always fails closed and requires explicit recovery.
+- Explicit `rotate()`: activates a new checkpoint, writes a cumulative durable receipt ledger, preserves exact historical result reconstruction, and reclaims the retired WAL segment only after the new lineage is authoritative.
+- Explicit `collectGarbage()`: reclaims only payload objects that are provably unreachable from every authoritative structure — committed objects are permanent roots, and no tombstone engine exists.
+- Bounded-memory operation for unbounded histories: streamed directory inventory, external cascade sorting, sealed and per-record-authenticated scratch processing, and captured-tip plus exact coverage proofs (`marks ⊆ inventory`) before any unlink.
+- Deterministic failure classification: maintenance failures alone leave the runtime ready; authority uncertainty and authoritative corruption retain precedence and can require recovery.
+
+### Platform support
+
+Durable mode requires a platform with native file and directory durability barriers (Linux and macOS). On Windows, native directory durability is unavailable: durable-mode initialization fails closed with `DURABILITY_UNAVAILABLE` rather than weakening the protocol, and the test suite and probes run with simulated directory barriers. Native Windows power-loss durability is not claimed.
+
+### Compatibility
+
+v0.6.0 preserves the persisted schema contracts:
+
+- Store: `ether.memory_store.v0.3`
+- MemoryContext: `ether.memory_context.v1`
+- Portable Record: `ether.portable_record.v1`
+
+The durable store persists the same canonical snapshot payload; its on-disk layout (HEAD, checkpoints, WAL, receipts) is an internal implementation detail, not a public path contract. Legacy snapshot persistence (`EtherMemoriesCore` with a `StoragePort`/`storagePath`) is unchanged.
+
+### Release verification
+
+v0.6.0 verification (AF1 Tranches 1–9) runs:
+
+- Full test suite (664 tests at the v0.6.0 candidate), TypeScript typecheck, and production build.
+- Compiled recovery, runtime, rotation, and garbage-collection probes, with simulated directory barriers on Windows.
+- Frozen wire-fixture digest gates, package-root public-surface and declaration gates, a destructive-collector containment audit over every emitted module, and packed-consumer verification.
 
 ## Architecture
 
@@ -53,13 +67,15 @@ The core is provider-neutral. OpenAI, Anthropic, Gemini, local models, agent hos
 
 ### RAG boundary
 
-v0.4 is retrieval-native but deliberately does **not** require embeddings or a vector database. A future RAG adapter can turn `MemoryContext` records into chunks; semantic/vector implementations are planned for a later release.
+Ether Memories is retrieval-native but deliberately does **not** require embeddings or a vector database. A future RAG adapter can turn `MemoryContext` records into chunks; semantic/vector implementations remain outside this release.
 
 ### RLM boundary
 
 `toRlmEnv()` provides stable handles and a bounded context. An RLM host may re-enter Ether through ordinary APIs. Ether does not contain an RLM runtime.
 
 ## Quick start
+
+In-memory core:
 
 ```ts
 import { EtherMemoriesCore } from "ether-memories";
@@ -86,6 +102,37 @@ const result = ether.buildMemoryContext({
 });
 ```
 
+Durable mode (Linux/macOS):
+
+```ts
+import { openDurableEtherMemories, createMutationId } from "ether-memories";
+
+const opened = await openDurableEtherMemories({
+  userId: "local-user",
+  directory: "./ether-store"
+});
+
+if (!opened.ok) {
+  // The factory returns Result<DurableEtherMemories>: handle failure explicitly.
+  throw new Error(`durable open failed: ${opened.error.message}`);
+}
+
+const ether = opened.value;
+
+// The mutation ID is the caller's stable identity: retain it, and a retry
+// after a lost acknowledgment reconciles to the original committed
+// transaction instead of duplicating it.
+const addProjectNote = createMutationId();
+await ether.addMemory(
+  { content: "My project uses TypeScript.", tags: ["project"] },
+  addProjectNote
+);
+
+await ether.rotate();          // explicit checkpoint + receipt ledger rotation
+await ether.collectGarbage();  // explicit reclamation of orphaned payload objects
+await ether.close();
+```
+
 ## Scope fence
 
 Ether Memories is a standalone public memory infrastructure project. Agent orchestration, distributed coordination, personality systems, autonomous self-modification, private framework integrations, and unrelated experimental architectures are intentionally outside project scope.
@@ -104,5 +151,9 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+## Contributors and acknowledgements
+
+Created and maintained by Andy Le, with assistance from ChatGPT (OpenAI), GitHub Copilot, and Mistral Vibe. See [CONTRIBUTORS.md](CONTRIBUTORS.md) for contribution details.
 
 MIT licensed.
