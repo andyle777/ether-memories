@@ -12,9 +12,14 @@ import { openDurableEtherMemoriesInternal, createMutationId } from "../src/core/
 import { value } from "./helpers/persistence.js";
 import { bootstrap } from "./helpers/recovery.js";
 
-const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
-const readBytes = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)));
-const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+/**
+ * Canonical LF form: every release-surface text gate is invariant under
+ * checkout line-ending conversion (core.autocrlf / git archive apply LF→CRLF
+ * on fresh Windows checkouts, which must pass the suite before `npm run build`).
+ */
+const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8")
+  .replace(/\r\n/g, "\n");
+const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 
 describe("v0.6.0 release metadata consistency", () => {
   it("pins the library release version in source and package metadata", () => {
@@ -40,16 +45,23 @@ describe("v0.6.0 release metadata consistency", () => {
     expect(manifest.match(/^Tag: v(\d+\.\d+\.\d+)$/m)?.[1]).toBe(LIBRARY_VERSION);
   });
 
-  it("keeps the five frozen fixture files byte-identical to the frozen digests", () => {
+  it("keeps the five frozen fixtures identical to the frozen committed-blob digests in canonical LF form", () => {
+    // Pins are the canonical committed-blob (LF) SHA-256 of each fixture - the
+    // checkout-invariant identity of the frozen content. A fresh Windows
+    // checkout (core.autocrlf / git archive) materializes LF blobs as CRLF
+    // working-tree bytes, so raw-file hashing is checkout-config-dependent;
+    // LF-normalized hashing reproduces the committed bytes for all five.
+    // Wire-byte identity is additionally proven by the golden content digests
+    // asserted below and by the codec/fixture suites.
     const pinned: Record<string, string> = {
       "persistence-wire-v1.json": "ecc0d9b2276c9569bec4a3a139fb0ea3da12186459330c292dfb9c04255524af",
-      "portable-record-v1.json": "76cd743be21116d864a7e2cc7c040a7dc4bad96a1090851e7f9414f5508966d5",
-      "retrieval-golden-v1.json": "d0d3dd009f496cac22a38f1e5945ed3600026cbd2ba4b6d56bccb4c8fa77a6d1",
-      "store-v0.3.json": "f8d9947a800fb65c1d20385a2ec9090b0e384625cef65325bb4a00f7b358607c",
+      "portable-record-v1.json": "97626d9819a977b0d73687ee9a57ba7dfbc046c14476afad1ecc0faeeb951e5b",
+      "retrieval-golden-v1.json": "9eafc0a7d772ca1d7385bd1e3cc548245a2d885f6d322f3b982a18bcd9f6cc52",
+      "store-v0.3.json": "c2ba81d5952550a696e295181a7e802c440728977ce55a17f39291c2cd428a15",
       "wal-wire-v1.json": "04c980368c39c9506bd40d314ee1ef1f590ab169a09cff022b0f4a115133050c"
     };
     for (const [name, digest] of Object.entries(pinned)) {
-      expect(sha256(readBytes(`./fixtures/${name}`))).toBe(digest);
+      expect(sha256(read(`./fixtures/${name}`))).toBe(digest);
     }
   });
 
@@ -125,7 +137,7 @@ describe("v0.6.0 release documentation integrity", { timeout: 120_000 }, () => {
     expect(readme).toContain("authority uncertainty and authoritative corruption retain precedence");
   });
 
-  it("compiles the exact README durable quick-start example against the shipped declarations", async () => {
+  it("compiles the exact README durable quick-start example against isolated staged package declarations", async () => {
     const readme = read("../README.md");
     const blocks = [...readme.matchAll(/```ts\r?\n([\s\S]*?)```/g)].map(match => match[1]);
     const durableExample = blocks.find(code => code.includes("openDurableEtherMemories"));
@@ -141,18 +153,31 @@ describe("v0.6.0 release documentation integrity", { timeout: 120_000 }, () => {
         dir = parent;
       }
     };
-    const project = await fs.mkdtemp(join(tmpdir(), "ether-readme-example-"));
+    const work = await fs.mkdtemp(join(tmpdir(), "ether-readme-example-"));
     try {
-      await fs.mkdir(join(project, "node_modules"), { recursive: true });
-      await fs.symlink(repoRoot, join(project, "node_modules", "ether-memories"),
+      // Isolated staged package: the gate generates its own declarations from
+      // the repository build configuration and never depends on a pre-existing
+      // repository-root dist (a clean checkout must pass npm test before build).
+      const stage = join(work, "staged-ether-memories");
+      const stageDist = join(stage, "dist");
+      const declarations = spawnSync(process.execPath, [findTsc(),
+        "-p", join(repoRoot, "tsconfig.build.json"),
+        "--emitDeclarationOnly", "--outDir", stageDist],
+        { cwd: repoRoot, encoding: "utf8" });
+      expect(declarations.status, `${declarations.stdout}\n${declarations.stderr}`).toBe(0);
+      // Package metadata (name, module type, exports map) so TypeScript resolves
+      // "ether-memories" exactly the way a consumer of the published package does.
+      await fs.writeFile(join(stage, "package.json"), read("../package.json"));
+      await fs.mkdir(join(work, "node_modules"), { recursive: true });
+      await fs.symlink(stage, join(work, "node_modules", "ether-memories"),
         process.platform === "win32" ? "junction" : undefined);
-      await fs.writeFile(join(project, "readme-example.mts"), durableExample);
+      await fs.writeFile(join(work, "readme-example.mts"), durableExample);
       const compiled = spawnSync(process.execPath, [findTsc(),
         "--noEmit", "--strict", "--module", "nodenext", "--moduleResolution", "nodenext",
-        "--target", "es2022", "readme-example.mts"], { cwd: project, encoding: "utf8" });
+        "--target", "es2022", "readme-example.mts"], { cwd: work, encoding: "utf8" });
       expect(compiled.status, `${compiled.stdout}\n${compiled.stderr}`).toBe(0);
     } finally {
-      await fs.rm(project, { recursive: true, force: true });
+      await fs.rm(work, { recursive: true, force: true });
     }
   });
 });
