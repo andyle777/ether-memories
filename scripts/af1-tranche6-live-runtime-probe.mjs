@@ -40,7 +40,8 @@ for (const forbidden of ["DirectoryIO", "WalIO", "indexDiskBytes", "openDurableE
   assert.equal(rootDeclarations.includes(forbidden), false, `package-root declarations must not mention ${forbidden}`);
 }
 for (const required of ["openDurableEtherMemories", "createMutationId", "DurableEtherMemoriesOptions",
-  "DurableRuntimeState", "DurableEtherMemories", "DurableRecoveryReceipt", "DurableRotationSummary"]) {
+  "DurableRuntimeState", "DurableEtherMemories", "DurableRecoveryReceipt", "DurableRotationSummary",
+  "DurableGcSummary", "DurableMaintenanceReceipt"]) {
   assert.equal(rootDeclarations.includes(required), true, `package-root declarations must declare ${required}`);
 }
 
