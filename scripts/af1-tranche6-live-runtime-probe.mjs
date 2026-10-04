@@ -71,7 +71,7 @@ try {
   assert.equal(Object.getPrototypeOf(runtime).constructor.open, undefined);
   const approvedNames = ["state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
     "getSystemState", "exportData", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
-    "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "recover", "close"].sort();
+    "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "collectGarbage", "recover", "close"].sort();
   assert.deepEqual(Object.getOwnPropertyNames(runtime).sort(), approvedNames);
   assert.deepEqual(Reflect.ownKeys(runtime).sort(), approvedNames);
   assert.equal(value(runtime.exportData()).memoryNotes.length, 0);
