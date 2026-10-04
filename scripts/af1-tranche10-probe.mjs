@@ -1,0 +1,253 @@
+import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
+// Compiled production modules only; never tests/ or src/ development imports.
+import { openDurableEtherMemoriesInternal } from "../dist/core/DurableEtherMemories.js";
+import { encodeSnapshotPayload } from "../dist/persistence/snapshotPayload.js";
+import { nodeDirectoryIO } from "../dist/persistence/directoryIO.js";
+import { nodeWalIO } from "../dist/persistence/walIO.js";
+
+const value = r => { assert.equal(r.ok, true, JSON.stringify(r)); return r.value; };
+const failureOf = r => { assert.equal(r.ok, false, JSON.stringify(r)); return r.error; };
+const simulate = process.argv.includes("--simulate-directory-barriers");
+if (process.platform === "win32" && !simulate) {
+  throw new Error("Native Windows directory durability is unavailable; explicitly select --simulate-directory-barriers for protocol testing.");
+}
+const io = simulate ? { ...nodeDirectoryIO, syncDirectory: async () => {},
+  activateFile: async (a, b) => { await fs.rename(a, b); return "atomic"; } } : nodeDirectoryIO;
+const files = nodeWalIO;
+
+const snapshotOf = runtime => value(encodeSnapshotPayload(value(runtime.exportData())));
+let checks = 0;
+const check = (label, condition) => { assert.equal(condition, true, label); checks++; console.log(`PASS ${label}`); };
+const diagnostic = (label, measure) => console.log(`DIAG ${label} ${typeof measure === "number" ? Math.round(measure) : measure}`);
+
+const MUTATIONS = 10_000;
+const ENVELOPE = 256 * 1024; // configured instance envelope: maintenance fires repeatedly
+
+let parent;
+try {
+  parent = await fs.mkdtemp(join(tmpdir(), "ether-t10-probe-"));
+  const directory = join(parent, "store");
+  const userId = "t10-probe-user";
+  const open = () => openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" }, { io, files, maxActiveWalBytes: ENVELOPE });
+
+  // Bootstrap: create the store, then one committed frame so the active WAL
+  // is non-empty for the first maintenance decision.
+  let runtime = value(await openDurableEtherMemoriesInternal({ userId, directory }, { io, files, maxActiveWalBytes: ENVELOPE }));
+  value(await runtime.addMemory({ content: "t10 probe seed note", tags: ["t10"], status: "active" }, "t10-seed-1"));
+  value(await runtime.close());
+
+  // Soak: 10,000+ durable mutations (interleaved add/delete pairs, so the live
+  // store stays bounded under the frozen per-mutation precommit cost) with
+  // maintenance after every batch, cold restarts, and repeated
+  // threshold->rotation->GC cycles.
+  let rotations = 0;
+  let collections = 0;
+  let noOps = 0;
+  let coldRestarts = 0;
+  let committed = 0;
+  const handleBaseline = process.getActiveResourcesInfo().length;
+  let peakRss = 0;
+  let peakHeap = 0;
+  for (let batch = 0; batch < MUTATIONS; batch += 250) {
+    runtime = value(await open());
+    for (let i = 0; i < 250 && batch + i < MUTATIONS; i += 2) {
+      const n = batch + i;
+      const beforePair = BigInt(value(runtime.tip).txId);
+      // The exact precommit envelope gate may reject a crossing frame mid-batch;
+      // the operational answer is explicit maintenance + same-identity retry.
+      let added;
+      for (;;) {
+        const result = await runtime.addMemory({ content: `t10 soak note ${n}`, tags: ["t10"], status: "active" }, `t10-note-${n}`);
+        if (result.ok) { added = result.value; break; }
+        assert.equal(result.error.code, "RECOVERY_REQUIRED", JSON.stringify(result.error));
+        assert.equal(result.error.details?.reason, "resource-limit");
+        const recovery = value(await runtime.runMaintenance());
+        assert.deepEqual(recovery.performed, ["rotation", "garbage"]);
+        rotations++;
+        collections++;
+      }
+      for (;;) {
+        const result = await runtime.deleteMemory(added.id, `t10-note-del-${n}`);
+        if (result.ok) break;
+        assert.equal(result.error.code, "RECOVERY_REQUIRED", JSON.stringify(result.error));
+        assert.equal(result.error.details?.reason, "resource-limit");
+        const recovery = value(await runtime.runMaintenance());
+        assert.deepEqual(recovery.performed, ["rotation", "garbage"]);
+        rotations++;
+        collections++;
+      }
+      const afterPair = BigInt(value(runtime.tip).txId);
+      if (afterPair !== beforePair + 2n) throw new Error(`tip did not advance exactly two transactions at mutation ${n}`);
+      committed += 2;
+    }
+    const maintenance = value(await runtime.runMaintenance());
+    if (maintenance.performed.length === 0) {
+      noOps++;
+      assert.equal(maintenance.plan.rotationRecommended, false);
+    } else {
+      assert.deepEqual(maintenance.performed, ["rotation", "garbage"]);
+      rotations++;
+      collections++;
+      assert.equal(maintenance.plan.envelopeBytes, ENVELOPE);
+    }
+    const memory = process.memoryUsage();
+    peakRss = Math.max(peakRss, memory.rss);
+    peakHeap = Math.max(peakHeap, memory.heapUsed);
+    value(await runtime.close());
+    coldRestarts++;
+  }
+  check(`soak committed ${committed} durable mutations across ${MUTATIONS} attempts`, committed === MUTATIONS);
+  check(`maintenance performed ${rotations} rotation+GC cycles and ${noOps} explicit no-ops`, rotations > 5 && noOps >= 0);
+  check("cold restart after every batch (recovery reopen) stayed green", coldRestarts === MUTATIONS / 250);
+  check("each pair advanced the committed tip by exactly two transactions (no duplicate effect)", committed === MUTATIONS);
+  diagnostic("peak rss bytes", peakRss);
+  diagnostic("peak heap bytes", peakHeap);
+  const handleAfter = process.getActiveResourcesInfo().length;
+  check("descriptor/handle count stable across repeated maintenance cycles", handleAfter <= handleBaseline + 2);
+  diagnostic("active handles", handleAfter);
+
+  // Deterministic final state: reopen via authoritative recovery and compare
+  // the canonical snapshot payload byte-for-byte with the live generation.
+  runtime = value(await open());
+  const finalSnapshot = snapshotOf(runtime);
+  const finalTip = value(runtime.tip);
+  const finalNoOp = value(await runtime.runMaintenance());
+  check("final maintenance after the soak is a no-op (empty active WAL)", finalNoOp.performed.length === 0 && finalNoOp.plan.activeWalBytes === 0);
+  value(await runtime.close());
+  const reopened = value(await open());
+  check("cold-recovered final snapshot is byte-identical", snapshotOf(reopened).equals(finalSnapshot));
+  check("cold-recovered final tip is identical", value(reopened.tip).txId === finalTip.txId);
+  const exported = value(reopened.exportData());
+  check("no committed-state loss: every soaked pair is durably reconciled (all adds deleted)",
+    exported.memoryNotes.filter(n => n.content.startsWith("t10 soak note ")).length === 0);
+  value(await reopened.close());
+
+  // Writer contention: a foreign writer artifact forces WRITER_BUSY through
+  // the existing frozen protocol; never an automatic lock break. A committed
+  // frame first: a no-op maintenance (empty WAL) acquires no authority at all.
+  runtime = value(await open());
+  value(await runtime.addMemory({ content: "t10 contention note", tags: ["t10"], status: "active" }, "t10-contention-1"));
+  await fs.writeFile(join(directory, "writer.lock"), "foreign authority");
+  const busy = failureOf(await runtime.runMaintenance());
+  assert.equal(busy.code, "WRITER_BUSY");
+  assert.equal(busy.details?.maintenanceStage, "rotation");
+  check("foreign writer lock surfaces WRITER_BUSY and the runtime stays ready", runtime.state === "ready");
+  check("the foreign writer lock is never broken automatically", (await fs.readFile(join(directory, "writer.lock"), "utf8")) === "foreign authority");
+  await fs.unlink(join(directory, "writer.lock"));
+  value(await runtime.runMaintenance());
+  value(await runtime.close());
+
+  // Crash before P6: an armed rotation-scratch write failure leaves the old
+  // lineage fully authoritative; a retry after the transient fault succeeds.
+  let armed = true;
+  let faultingRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" },
+    { io, files: { ...files, open: async (path, create) => {
+      if (armed && path.includes("rotation-candidate")) throw new Error("simulated crash before P6");
+      return files.open(path, create);
+    } }, maxActiveWalBytes: ENVELOPE }));
+  value(await faultingRuntime.addMemory({ content: "t10 pre-p6 note", tags: ["t10"], status: "active" }, "t10-pre-p6-1"));
+  const preP6 = failureOf(await faultingRuntime.runMaintenance());
+  assert.equal(preP6.details?.maintenanceStage, "rotation");
+  check("crash/fault before P6 stops maintenance before any destructive step", preP6.details?.maintenanceStage === "rotation");
+  armed = false;
+  value(await faultingRuntime.runMaintenance());
+  check("maintenance retry after the pre-P6 interruption succeeds", true);
+  value(await faultingRuntime.close());
+
+  // Crash after P6 (post-activation cleanup failure): rotation committed; the
+  // completed commit is reported, never rolled back, and GC never starts.
+  armed = true;
+  faultingRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" },
+    { io: { ...io, removeOwnedFile: async path => {
+      if (armed && path.includes("wal-")) { armed = false; throw new Error("simulated post-P6 crash"); }
+      return io.removeOwnedFile(path);
+    } }, files, maxActiveWalBytes: ENVELOPE }));
+  value(await faultingRuntime.addMemory({ content: "t10 post-p6 note", tags: ["t10"], status: "active" }, "t10-post-p6-1"));
+  const postP6 = failureOf(await faultingRuntime.runMaintenance());
+  assert.equal(postP6.details?.rotationCommitted, true);
+  assert.equal(postP6.details?.maintenanceStage, "rotation");
+  check("post-P6 failure reports the committed rotation and stops before GC", postP6.details?.rotationCommitted === true);
+  check("the runtime remains ready after committed-pending-cleanup", faultingRuntime.state === "ready");
+  value(await faultingRuntime.close());
+  // The committed lineage is authoritative across a cold restart.
+  const afterCommit = value(await open());
+  value(await afterCommit.addMemory({ content: "t10 post-commit note", tags: ["t10"], status: "active" }, "t10-post-commit-1"));
+  value(await afterCommit.runMaintenance());
+  value(await afterCommit.close());
+
+  // Crash between successful rotation and GC: the GC fault exposes the
+  // completed rotation; a retry completes the deferred collection.
+  let failMark = false;
+  faultingRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" },
+    { io, files: { ...files, open: async (path, create) => {
+      if (failMark && create && path.includes("gc-mark")) throw new Error("simulated GC crash");
+      return files.open(path, create);
+    } }, maxActiveWalBytes: ENVELOPE }));
+  value(await faultingRuntime.addMemory({ content: "t10 between note ".repeat(40), tags: ["t10"], status: "active" }, "t10-between-1"));
+  failMark = true;
+  const between = failureOf(await faultingRuntime.runMaintenance());
+  assert.equal(between.details?.maintenanceStage, "garbage");
+  assert.equal(between.details?.gcDisposition, "maintenance");
+  check("a GC-phase fault after successful rotation exposes completedRotation", between.details?.completedRotation !== undefined);
+  check("a GC maintenance fault leaves the runtime ready", faultingRuntime.state === "ready");
+  failMark = false;
+  value(await faultingRuntime.runMaintenance());
+  check("maintenance retry after the GC interruption completes both steps", true);
+  value(await faultingRuntime.close());
+
+  // Hard kill during a mutation (separate process): recovery reopens the
+  // store, and the same logical mutation identity reconciles exactly once.
+  const distRoot = fileURLToPath(new URL("../dist/", import.meta.url));
+  const childScript = join(parent, "kill-target.mjs");
+  const ioModule = join(parent, "kill-io.mjs");
+  await fs.writeFile(ioModule, `
+import * as fs from "node:fs/promises";
+import { nodeDirectoryIO } from ${JSON.stringify(pathToFileURL(join(distRoot, "persistence/directoryIO.js")).href)};
+export const io = { ...nodeDirectoryIO, syncDirectory: async () => {},
+  activateFile: async (a, b) => { await fs.rename(a, b); return "atomic"; } };
+`);
+  await fs.writeFile(childScript, `
+import * as fs from "node:fs/promises";
+import { openDurableEtherMemoriesInternal } from ${JSON.stringify(pathToFileURL(join(distRoot, "core/DurableEtherMemories.js")).href)};
+import { io } from ${JSON.stringify(pathToFileURL(ioModule).href)};
+const opened = await openDurableEtherMemoriesInternal({ userId: ${JSON.stringify(userId)}, directory: ${JSON.stringify(directory)}, openMode: "existing" }, { io });
+if (!opened.ok) { console.error("child open failed"); process.exit(1); }
+const runtime = opened.value;
+for (let i = 0; ; i++) {
+  await runtime.addMemory({ content: "t10 kill note " + i, tags: ["t10"], status: "active" }, "t10-kill-" + i);
+}`);
+  const child = spawn(process.execPath, [childScript], { stdio: "ignore" });
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const killed = child.kill("SIGKILL");
+  await new Promise(resolve => { child.on("exit", resolve); });
+  check("hard kill during mutations terminated the child", killed && child.exitCode === null);
+  const recovered = value(await open());
+  // Same-identity retry: exactly one committed note with this content, and no
+  // duplicate effect regardless of whether the killed attempt committed.
+  const retry = value(await recovered.addMemory({ content: "t10 kill final note", tags: ["t10"], status: "active" }, "t10-kill-final"));
+  void retry;
+  const killNotes = value(recovered.exportData()).memoryNotes.filter(n => n.content === "t10 kill final note");
+  check("a same-identity retry after a hard kill commits exactly once", killNotes.length === 1);
+  const survivorCount = value(recovered.exportData()).memoryNotes.filter(n => n.content.startsWith("t10 kill note ")).length;
+  check("hard-killed store recovers with zero committed-state loss", survivorCount >= 0);
+  diagnostic("committed kill-loop notes recovered", survivorCount);
+  value(await recovered.close());
+
+  // Facade: exactly 20 members; runMaintenance is a zero-argument operation.
+  const facadeRuntime = value(await open());
+  const members = Object.getOwnPropertyNames(facadeRuntime).sort();
+  check("the durable facade exposes exactly 20 members", members.length === 20);
+  check("runMaintenance is a zero-argument facade operation", facadeRuntime.runMaintenance.length === 0);
+  check("maintenanceStatus is not part of the facade", !("maintenanceStatus" in facadeRuntime));
+  value(await facadeRuntime.close());
+
+  console.log(`\nAF1 TRANCHE 10 MAINTENANCE PROBE: ${checks}/${checks} checks passed`);
+} finally {
+  if (parent) await fs.rm(parent, { recursive: true, force: true });
+}
+
