@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { LIBRARY_VERSION, STORE_SCHEMA_VERSION, MEMORY_CONTEXT_SCHEMA_VERSION,
   PORTABLE_RECORD_SCHEMA_VERSION } from "../src/version.js";
 import { openDurableEtherMemoriesInternal, createMutationId } from "../src/core/DurableEtherMemories.js";
@@ -93,5 +95,64 @@ describe("v0.6.0 durable release-integrity smoke", () => {
     expect(checkpointBytes.includes(Buffer.from(LIBRARY_VERSION, "utf8"))).toBe(false);
     const walBytes = await fs.readFile(store.walPath);
     expect(walBytes.includes(Buffer.from(LIBRARY_VERSION, "utf8"))).toBe(false);
+  });
+});
+
+describe("v0.6.0 release documentation integrity", { timeout: 120_000 }, () => {
+  it("resolves every local link in the release README", () => {
+    const readme = read("../README.md");
+    const links = [...readme.matchAll(/\]\(([^)]+)\)/g)].map(match => match[1])
+      .filter(target => !/^(https?:|#|mailto:)/.test(target));
+    expect(links.length).toBeGreaterThan(0);
+    for (const target of links) {
+      const resolved = fileURLToPath(new URL(`../${target.replace(/^\.?\//, "")}`, import.meta.url));
+      expect(existsSync(resolved), `README links to missing file: ${target}`).toBe(true);
+    }
+  });
+
+  it("documents repairable incomplete tails as distinct from authoritative corruption", () => {
+    const readme = read("../README.md");
+    expect(readme).toContain("repairable incomplete final transaction tail");
+    expect(readme).toContain("always fails closed");
+    const manifest = read("../RELEASE-MANIFEST.md");
+    expect(manifest).toContain("repairable incomplete final WAL tail");
+    expect(manifest).toContain("always fails closed");
+  });
+
+  it("documents garbage-collection failure precedence accurately", () => {
+    const readme = read("../README.md");
+    expect(readme).toContain("maintenance failures alone leave the runtime ready");
+    expect(readme).toContain("authority uncertainty and authoritative corruption retain precedence");
+  });
+
+  it("compiles the exact README durable quick-start example against the shipped declarations", async () => {
+    const readme = read("../README.md");
+    const blocks = [...readme.matchAll(/```ts\r?\n([\s\S]*?)```/g)].map(match => match[1]);
+    const durableExample = blocks.find(code => code.includes("openDurableEtherMemories"));
+    if (durableExample === undefined) throw new Error("README durable quick-start example not found.");
+    const repoRoot = fileURLToPath(new URL("../", import.meta.url));
+    const findTsc = (): string => {
+      let dir = repoRoot;
+      for (;;) {
+        const candidate = join(dir, "node_modules", "typescript", "lib", "tsc.js");
+        if (existsSync(candidate)) return candidate;
+        const parent = dirname(dir);
+        if (parent === dir) throw new Error("TypeScript compiler not found in any ancestor node_modules.");
+        dir = parent;
+      }
+    };
+    const project = await fs.mkdtemp(join(tmpdir(), "ether-readme-example-"));
+    try {
+      await fs.mkdir(join(project, "node_modules"), { recursive: true });
+      await fs.symlink(repoRoot, join(project, "node_modules", "ether-memories"),
+        process.platform === "win32" ? "junction" : undefined);
+      await fs.writeFile(join(project, "readme-example.mts"), durableExample);
+      const compiled = spawnSync(process.execPath, [findTsc(),
+        "--noEmit", "--strict", "--module", "nodenext", "--moduleResolution", "nodenext",
+        "--target", "es2022", "readme-example.mts"], { cwd: project, encoding: "utf8" });
+      expect(compiled.status, `${compiled.stdout}\n${compiled.stderr}`).toBe(0);
+    } finally {
+      await fs.rm(project, { recursive: true, force: true });
+    }
   });
 });

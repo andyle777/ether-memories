@@ -23,7 +23,9 @@ This manifest describes the v0.6.0 release surface.
 
 - `openDurableEtherMemories()` explicit durable factory; in-memory core unchanged.
 - Caller-supplied mutation IDs reconcile lost acknowledgments without duplicate effects.
-- Fail-closed startup recovery; no silent repair of corrupt or partial histories.
+- Startup recovery distinguishes a repairable incomplete final WAL tail (synchronized
+  truncation at the last complete transaction, then a full rescan) from authoritative
+  corruption, which always fails closed and requires explicit recovery.
 - `rotate()` activates a new checkpoint plus cumulative receipt ledger; retired WAL bytes
   are reclaimed only after the new lineage is authoritative.
 - `collectGarbage()` reclaims only payload objects unreachable from every authoritative
