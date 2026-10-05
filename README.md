@@ -1,5 +1,7 @@
 # Ether Memories v0.6.0
 
+Canonical project name: **Ether Memories**; package and repository: `ether-memories`.
+
 **Civilian-grade, local-first memory infrastructure for humans and AI systems.**
 
 Ether Memories has three foundations:
@@ -32,7 +34,7 @@ authority. GC runs only after rotation fully succeeds, and a GC failure does not
 roll back that committed rotation. Writer locks are never auto-broken. T10 adds no
 persisted maintenance state and changes no schema, wire, receipt, or checkpoint
 format. See [maintenance orchestration](docs/af1-tranche10-maintenance-orchestration.md)
-for the unfrozen T10 candidate contract.
+for the frozen T10 contract and code-lineage receipt.
 
 ### Platform support
 
@@ -50,9 +52,14 @@ The durable store persists the same canonical snapshot payload; its on-disk layo
 
 ### Release verification
 
-v0.6.0 verification (AF1 Tranches 1–10; T10 is an unfrozen implementation candidate) runs:
+AF1 Tranche 10 is frozen by owner decision at code-lineage SHA
+`6f298aea2cd0278078bf49344f75807355a4e09b`. Subsequent naming and status documentation
+commits do not replace that frozen SHA. PR integration, tagging, and publication
+remain separate actions.
 
-- Full test suite (29 files / 685 tests at the T10 implementation candidate), TypeScript typecheck, and production build.
+v0.6.0 verification (AF1 Tranches 1–10) runs:
+
+- Full test suite (29 files / 687 tests at the frozen T10 SHA), TypeScript typecheck, and production build.
 - Compiled recovery, runtime, rotation, garbage-collection, and 10,000-mutation maintenance probes, with simulated directory barriers on Windows.
 - Frozen wire-fixture digest gates, package-root public-surface and declaration gates, a destructive-collector containment audit over every emitted module, and packed-consumer verification.
 

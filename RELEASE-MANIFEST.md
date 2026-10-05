@@ -3,7 +3,13 @@
 Version: 0.6.0
 Tag: v0.6.0
 Lineage: v0.5.0 → v0.6.0
-Status: AF1 Tranche 10 implementation candidate (unfrozen; frozen T9 code lineage preserved)
+Status: AF1 Tranche 10 frozen by owner decision; PR integration and publication pending
+Frozen T10 code-lineage SHA: `6f298aea2cd0278078bf49344f75807355a4e09b`
+Frozen T9 code-lineage parent: `5db87810b60b6693f0953402cdc06f980f5691af`
+
+The canonical project name is **Ether Memories** (`ether-memories`). Post-freeze
+naming/status documentation commits do not replace the frozen T10 code-lineage
+SHA or authorize merging, tagging, publishing, or releasing.
 
 This manifest describes the v0.6.0 release surface.
 
@@ -19,7 +25,7 @@ This manifest describes the v0.6.0 release surface.
   receipts, exact historical result reconstruction, safe retired-WAL reclamation, and
   explicit reclamation of provably orphaned payload objects only.
 
-## Durable persistence (AF1 Tranches 1–10 candidate)
+## Durable persistence (AF1 Tranches 1–10)
 
 - `openDurableEtherMemories()` explicit durable factory; in-memory core unchanged.
 - Caller-supplied mutation IDs reconcile lost acknowledgments without duplicate effects.
@@ -38,7 +44,7 @@ This manifest describes the v0.6.0 release surface.
   remains the admission authority. GC runs only after rotation fully succeeds; its
   failure does not roll back rotation. Writer locks are never auto-broken, and there
   is zero new persisted maintenance state or policy. See
-  [the T10 candidate contract](docs/af1-tranche10-maintenance-orchestration.md).
+  [the frozen T10 contract](docs/af1-tranche10-maintenance-orchestration.md).
 - Bounded-memory operation for unbounded histories with sealed, per-record-authenticated
   scratch processing and bidirectional coverage proofs before any unlink.
 - Persisted formats unchanged: store schema `ether.memory_store.v0.3`; HEAD/checkpoint
@@ -56,8 +62,9 @@ This manifest describes the v0.6.0 release surface.
 
 ## Release gates
 
-The T10 candidate suite contains 29 files / 685 tests, including 21 maintenance
-orchestration tests. T10 is not frozen or published by this local integration pass.
+The frozen T10 suite contains 29 files / 687 tests, including 21 maintenance
+orchestration tests. The owner freeze records code lineage; publication remains
+a separate release action.
 
 Run:
 ```bash

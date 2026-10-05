@@ -16,7 +16,9 @@
   rotation recommendation from the configured active-WAL envelope and the frozen WAL v1
   frame cap, performing the existing rotation only when recommended, and following a fully
   successful rotation with the existing orphan collection. No background maintenance.
-- T10 remains an unfrozen implementation candidate. Maintenance adds no persisted
+- T10 is frozen by owner decision at code-lineage SHA
+  `6f298aea2cd0278078bf49344f75807355a4e09b`; subsequent naming/status documentation
+  cleanup is separate from that frozen code lineage. Maintenance adds no persisted
   policy or formats, does not auto-break writer locks, and does not weaken exact
   mutation admission; GC failures preserve the already-committed rotation.
 - Added bounded-memory operation for unbounded histories: streamed directory inventory,

@@ -1,8 +1,18 @@
 # AF1 Tranche 10 — Explicit Deterministic Maintenance Orchestration
 
-Status: implemented on `feat/v0.6.0-af1-tranche10` (unfrozen; awaiting independent
-hostile review). Frozen parent: T9 `5db87810b60b6693f0953402cdc06f980f5691af`. This document describes the T10
-architecture exactly as implemented.
+Project: **Ether Memories** (`ether-memories`).
+
+Status: frozen by explicit owner decision on 5 October 2026, following the final
+adversarial referee's GREEN result with zero Critical or Important findings.
+Frozen T10 code-lineage SHA: `6f298aea2cd0278078bf49344f75807355a4e09b`.
+Frozen parent: T9 `5db87810b60b6693f0953402cdc06f980f5691af`.
+Branch: `feat/v0.6.0-af1-tranche10`.
+
+Post-freeze naming/status documentation cleanup is a separate additive commit;
+it does not replace the frozen T10 code-lineage SHA. The freeze does not merge
+PR #17, mark it ready, tag, publish, or release. Further T10 code changes require
+a genuine post-freeze correctness defect; other work is deferred beyond v0.6.0.
+This document describes the frozen T10 architecture exactly as implemented.
 
 ## Scope (approved)
 
