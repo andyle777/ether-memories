@@ -1,11 +1,8 @@
 import { join } from "node:path";
-import type { BuildMemoryContextInput, EtherSnapshot, MindGraphEdge, GraphRelation } from "../types/index.js";
+import type { BuildMemoryContextInput, EtherSnapshot } from "../types/index.js";
 import type { CommittedTip, MutationId } from "../types/persistence.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { cloneValue } from "../utils/clone.js";
-import { MemoryNotes } from "../core/MemoryNotes.js";
-import { DiarySystem } from "../core/DiarySystem.js";
-import { MindGraphManager, STARTER_RELATIONS } from "../core/MindGraph.js";
 import { MemoryRetriever, type QueryOptions } from "../core/MemoryRetriever.js";
 import { MemoryContextBuilder } from "../core/MemoryContext.js";
 import { LIBRARY_VERSION } from "../version.js";
@@ -14,72 +11,21 @@ import { nodeDirectoryIO, DirectoryIoError, type DirectoryIO } from "./directory
 import { nodeWalIO, sameWalStamp, type WalFileHandle, type WalIO } from "./walIO.js";
 import { WalFileScan } from "./walFileScan.js";
 import { withRecoveryAuthority, required, type RecoveryAuthority } from "./recoveryAuthority.js";
-import { decodeCheckpointSnapshotPayload, encodeSnapshotPayload, snapshotData } from "./snapshotPayload.js";
+import { buildStateRoot, type StateRoot } from "./stateRoot.js";
+export { normalizeSnapshotGraph } from "./stateRoot.js";
+import { decodeCheckpointSnapshotPayload, snapshotData } from "./snapshotPayload.js";
 import { productionRegistry, reduceProduction, resolveOperation, validateCandidate } from "./productionOperations.js";
 import { PayloadObjects } from "./payloadObjects.js";
 import { encodeEtherData } from "./etherData.js";
 import { DiskBackedMutationIndex, DEFAULT_MAX_INDEX_BYTES } from "./recoveryMutationIndex.js";
+import { openAuthoritativeReceiptLedger } from "./receiptLedger.js";
+import { MutationHistoryVerifier } from "./mutationHistoryVerification.js";
 import type { JsonObject } from "./walJson.js";
 
 export type RecoveryPhase = "checkpoint" | "transaction" | "tail-repair" | "indexes" | "before-publication" | "after-publication";
 /** Trusted test instrumentation only, never invoked inside the publication assignment. */
 export interface RecoveryInstrumentation { at(phase: RecoveryPhase, txId?: string): Promise<void> }
 
-/** Normalize graph relationships to ensure consistency between snapshot and Graph module (RED 4A/4B) */
-function normalizeEdgeRelationship(relationship: string): GraphRelation {
-  return STARTER_RELATIONS.includes(relationship as GraphRelation) ? relationship as GraphRelation : "related_to";
-}
-
-/** Normalize snapshot graph edges to use canonical relationships */
-/** Internal deterministic graph normalization; idempotent by construction (RED 4). */
-export function normalizeSnapshotGraph(snapshot: EtherSnapshot): EtherSnapshot {
-  return {
-    ...snapshot,
-    graph: {
-      nodes: [...snapshot.graph.nodes],
-      edges: snapshot.graph.edges.map(edge => ({
-        ...edge,
-        relationship: normalizeEdgeRelationship(edge.relationship)
-      }))
-    }
-  };
-}
-
-/** Verify that the normalized snapshot graph matches the Graph module representation (RED 4C) */
-function verifyGraphConsistency(snapshot: EtherSnapshot, graph: MindGraphManager): void {
-  // Get all edges from the Graph module
-  const graphEdges = graph.getAllEdges();
-  const graphNodes = graph.getAllNodes();
-  
-  // Compare edge relationships - they should all be normalized
-  for (const edge of graphEdges) {
-    const normalized = normalizeEdgeRelationship(edge.relationship);
-    if (edge.relationship !== normalized) {
-      throw new DirectoryIoError("PERSISTENCE_CORRUPTION", 
-        `Graph edge has non-normalized relationship: ${edge.relationship} should be ${normalized}`);
-    }
-  }
-  
-  // Verify that the snapshot edges, when normalized, match the graph edges
-  const snapshotEdges = snapshot.graph.edges;
-  for (const edge of snapshotEdges) {
-    const normalized = normalizeEdgeRelationship(edge.relationship);
-    if (edge.relationship !== normalized) {
-      throw new DirectoryIoError("PERSISTENCE_CORRUPTION",
-        `Snapshot edge has non-normalized relationship: ${edge.relationship} should be ${normalized}`);
-    }
-  }
-}
-
-interface StateRoot {
-  readonly snapshot: EtherSnapshot;
-  readonly bytes: Uint8Array;
-  readonly tip: CommittedTip;
-  readonly notes: MemoryNotes;
-  readonly diary: DiarySystem;
-  readonly graph: MindGraphManager;
-  readonly retriever: MemoryRetriever;
-}
 export interface RecoveryReceipt { readonly tip: CommittedTip; readonly repairedTailBytes: number; readonly transactions: number }
 
 /**
@@ -100,6 +46,16 @@ export class StartupRecovery {
     const root = this.root;
     return root ? ok({ snapshot: cloneValue(root.snapshot), tip: { ...root.tip } })
       : err("RECOVERY_REQUIRED", "Durable canonical state is unavailable before successful recovery.");
+  }
+  /**
+   * Internal single-ownership hand-off of the frozen recovered generation to
+   * the durable runtime. The receiver owns the generation exclusively; this
+   * recovery object must be discarded afterwards, and the generation is only
+   * as immutable as its frozen StateRoot contract.
+   */
+  generation(): Result<StateRoot> {
+    const root = this.root;
+    return root ? ok(root) : err("RECOVERY_REQUIRED", "Durable canonical generation is unavailable before successful recovery.");
   }
   queryMemories(text: string, options?: QueryOptions) {
     const root = this.root;
@@ -132,6 +88,23 @@ export class StartupRecovery {
     // Exact disk-backed mutation index: duplicate detection across the entire
     // WAL lineage with bounded RAM; disk usage scales with active WAL history.
     const mutationIndex = new DiskBackedMutationIndex(authority.directory, this.io, this.files, this.indexDiskBytes);
+    // T7 authoritative cumulative receipt history for this lineage: absent for
+    // a non-rotated checkpoint, REQUIRED (and fully verified) after rotation.
+    // Receipt history is never replayed into state; it exists only for
+    // mutation identity/reconciliation, and every payload object it references
+    // is validated as a permanent reachability root (missing/corrupt = fail closed).
+    const receiptLedger = required(await openAuthoritativeReceiptLedger(authority.directory,
+      head.storeId, head.epochId, head.checkpoint.checkpointId, this.files));
+    if (receiptLedger) {
+      required(await receiptLedger.verify(async entry => {
+        for (const operation of entry.operations) {
+          required(await resolveOperation(operation, authority, objects));
+        }
+      }));
+    }
+    // Source-aware identity verification across the two logical namespaces
+    // (cumulative receipts + active WAL), bounded independently of history size.
+    const history = new MutationHistoryVerifier(authority.directory, this.io, this.files, this.indexDiskBytes);
     
     try {
     for (let pass = 0; pass < 2; pass++) {
@@ -157,6 +130,8 @@ export class StartupRecovery {
               // index; verifyExact() compares the entire WAL lineage below.
               required(await mutationIndex.record(tx.mutation.mutationId as MutationId,
                 { digest: tx.mutation.digest, txId: tx.identity.txId }));
+              required(await history.recordWal({ mutationId: tx.mutation.mutationId as MutationId,
+                intentDigest: tx.mutation.digest, txId: tx.identity.txId }));
               for (const operation of tx.operations) {
                 const semantic = required(await resolveOperation(operation, authority, objects));
                 candidate = required(reduceProduction(candidate, operation.type, semantic));
@@ -173,6 +148,7 @@ export class StartupRecovery {
           // Exact duplicate verification across the entire active WAL lineage
           // must complete before tail repair or publication.
           required(await mutationIndex.verifyExact());
+          required(await history.verify(receiptLedger));
           required(await scan.checkSource());
           if (cursor.tail === "incomplete") {
             if (pass !== 0 || !file.truncate) {
@@ -208,36 +184,25 @@ export class StartupRecovery {
             tip = cursor.tip;
           }
         }
-      } finally { 
-        if (file) await file.close(); 
-        if (!repaired) await mutationIndex.reset();
+      } finally {
+        if (file) await file.close();
+        if (!repaired) { await mutationIndex.reset(); await history.cleanup(); }
       }
       if (repaired) {
         // Pass 1 rescans the repaired WAL from its checkpoint; index records
         // from pass 0 must not carry over into the rescan.
         required(await mutationIndex.reset());
+        await history.cleanup();
         continue;
       }
       break;
     }
-    // One normalized semantic graph feeds the published persisted snapshot,
-    // the published read() state and the runtime Graph representation (RED 4).
-    const normalizedSnapshot = normalizeSnapshotGraph(snapshot);
-    const bytes = required(encodeSnapshotPayload(normalizedSnapshot));
-    const notes = new MemoryNotes(), diary = new DiarySystem(), graph = new MindGraphManager();
-    notes.replaceAll(normalizedSnapshot.memoryNotes);
-    diary.replaceAll(normalizedSnapshot.diary);
-    for (const node of normalizedSnapshot.graph.nodes) required(graph.addNode(node));
-    for (const edge of normalizedSnapshot.graph.edges) required(graph.addEdgeWithId(edge.id, edge.source, edge.target, edge.relationship, edge.data));
-    
-    // Verify that the normalized snapshot produces the same graph as what we built
-    verifyGraphConsistency(normalizedSnapshot, graph);
-    const retriever = new MemoryRetriever(() => notes.valuesUnsafe(), () => diary.valuesUnsafe(), graph, () => notes.revision, () => diary.revision);
+    // One shared construction path: recovery and the live durable runtime
+    // publish generations built by the same internal helper (RED 4 + T6).
     await this.phase("indexes");
-    retriever.rebuildIndex();
+    const root = required(buildStateRoot(snapshot, tip));
     // Clean up the mutation index after successful recovery
     await mutationIndex.reset();
-    const root: StateRoot = Object.freeze({ snapshot: normalizedSnapshot, bytes, tip: Object.freeze({ ...tip }), notes, diary, graph, retriever });
     await this.phase("before-publication");
     await authority.verify();
     // No awaits, callbacks, I/O, or independent state/tip assignments in this boundary.
@@ -248,6 +213,7 @@ export class StartupRecovery {
     } catch (error) {
       // Clean up mutation index on any error
       await mutationIndex.reset();
+      await history.cleanup();
       throw error;
     }
   }

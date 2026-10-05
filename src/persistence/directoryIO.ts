@@ -14,6 +14,13 @@ export class DirectoryIoError extends Error {
 export interface DirectoryIO {
   kind(path: string): Promise<"missing" | "file" | "directory">;
   readBounded(path: string, maxBytes: number): Promise<Uint8Array>;
+  /**
+   * Stream exactly the entry NAMES of one directory to `visit`, one at a time.
+   * Never materializes a name array, never stats or reads entries, never follows
+   * entry symlinks (names only; callers validate entries through kind()).
+   * A missing directory is zero names; every other failure is observable.
+   */
+  readNames(path: string, visit: (name: string) => Promise<void> | void): Promise<void>;
   mkdirExclusive(path: string): Promise<void>;
   writeExclusive(path: string, bytes: Uint8Array): Promise<void>;
   syncDirectory(path: string): Promise<void>;
@@ -33,6 +40,28 @@ export const nodeDirectoryIO: DirectoryIO = {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
       throw error;
     }
+  },
+  async readNames(path, visit) {
+    let dir: Awaited<ReturnType<typeof fs.opendir>>;
+    try {
+      dir = await fs.opendir(path);
+    } catch (error) {
+      const native = (error as NodeJS.ErrnoException).code;
+      if (native === "ENOENT") return;
+      if (native === "EACCES" || native === "EPERM" || native === "EROFS") {
+        throw new DirectoryIoError("READ_ONLY_LOCKED", "Directory enumeration is unavailable.");
+      }
+      throw new DirectoryIoError("RECOVERY_REQUIRED", "Directory enumeration failed.");
+    }
+    try {
+      // dir.read() yields one entry at a time: names stream with no array
+      // accumulation regardless of directory size.
+      for (;;) {
+        const entry = await dir.read();
+        if (entry === null) return;
+        await visit(entry.name);
+      }
+    } finally { await dir.close(); }
   },
   async readBounded(path, maxBytes) {
     const before = await fs.lstat(path);

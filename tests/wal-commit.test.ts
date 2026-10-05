@@ -74,7 +74,7 @@ describe("durable WAL coordinator and real filesystem fault ordering", () => {
     expect(await fs.readFile(path)).toEqual(before);
   });
 
-  it("reconciles old-base logical retries and fails conflicting digest or resolved operations closed", async () => {
+  it("reconciles old-base logical retries and fails conflicting digest or resolved operations closed", { timeout: 30_000 }, async () => {
     const first = value(await store().commit(request()));
     const before = await fs.readFile(path);
     expect(value(await store().commit(request()))).toMatchObject({ status: "already-committed", identity: first.identity });

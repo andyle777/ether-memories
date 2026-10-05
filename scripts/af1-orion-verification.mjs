@@ -1,27 +1,19 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
+import { verifyFrozenFixtures } from "./af1-fixture-verification.mjs";
 
 /**
  * Durable ORION verification receipt.
  *
  * Runs every mapped suite from docs/af1-tranche5-recovery.md, verifies the
- * five frozen fixtures byte-for-byte, executes the checked-in Tranche 5
+ * five frozen fixtures in canonical LF form, executes the checked-in Tranche 5
  * production recovery probe at its default 1,050 transactions, and prints a
  * fourteen-row PASS/FAIL receipt. The mapping lists the exact test names so
  * any single property can also be traced with:
  *   npx vitest run <suite> -t "<test name>"
  */
-
-const FIXTURE_HASHES = {
-  "tests/fixtures/persistence-wire-v1.json": "ecc0d9b2276c9569bec4a3a139fb0ea3da12186459330c292dfb9c04255524af",
-  "tests/fixtures/portable-record-v1.json": "76cd743be21116d864a7e2cc7c040a7dc4bad96a1090851e7f9414f5508966d5",
-  "tests/fixtures/retrieval-golden-v1.json": "d0d3dd009f496cac22a38f1e5945ed3600026cbd2ba4b6d56bccb4c8fa77a6d1",
-  "tests/fixtures/store-v0.3.json": "f8d9947a800fb65c1d20385a2ec9090b0e384625cef65325bb4a00f7b358607c",
-  "tests/fixtures/wal-wire-v1.json": "04c980368c39c9506bd40d314ee1ef1f590ab169a09cff022b0f4a115133050c"
-};
 
 const PROPERTIES = [
   [1, "no candidate visibility", ["tests/startup-recovery.test.ts"]],
@@ -69,12 +61,9 @@ for (const suite of suiteQueue) {
   console.log(JSON.stringify({ suite, pass: vitest.code === 0 }));
 }
 
-let fixturesPass = true;
-for (const [file, expected] of Object.entries(FIXTURE_HASHES)) {
-  const actual = createHash("sha256").update(readFileSync(file)).digest("hex");
-  if (actual !== expected) fixturesPass = false;
-  console.log(JSON.stringify({ fixture: file, sha256: actual, pass: actual === expected }));
-}
+const fixtureReceipts = verifyFrozenFixtures();
+const fixturesPass = fixtureReceipts.every(row => row.pass);
+for (const row of fixtureReceipts) console.log(JSON.stringify(row));
 
 const simulate = process.argv.includes("--simulate-directory-barriers");
 if (process.platform === "win32" && !simulate) throw new Error("Select --simulate-directory-barriers for protocol testing on win32.");
