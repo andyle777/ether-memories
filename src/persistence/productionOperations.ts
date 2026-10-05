@@ -295,6 +295,34 @@ export class ProductionWalStore {
   }
 
   /**
+   * Internal active-WAL envelope observation (Tranche 10). The exact HEAD ->
+   * selected `wal-<checkpointDigest>.bin` -> stamp-size read the precommit
+   * envelope check performs, together with the CONFIGURED instance envelope
+   * (`this.maxActiveWalBytes`, never an independent constant) and the HEAD
+   * store identity the precommit exact-frame encoding also needs. Read-only,
+   * unlocked, never persisted; the observation itself grants no writer or
+   * destructive authority (races remain caught by each operation's own
+   * authority verification, exactly as in the precommit path).
+   */
+  async observeActiveWalEnvelope(): Promise<Result<{ activeWalBytes: number; envelopeBytes: number; storeId: string }>> {
+    let activeWalBytes = 0;
+    let storeId = "";
+    try {
+      const headBytes = Buffer.from(await this.io.readBounded(join(this.directory, "HEAD"), PERSISTENCE_LIMITS.headBytes));
+      const head = decodeStoreHead(headBytes);
+      if (!head.ok) return head;
+      storeId = head.value.storeId;
+      const walPath = join(this.directory, "wal", `wal-${head.value.checkpoint.digest}.bin`);
+      if (await this.io.kind(walPath) === "file") {
+        activeWalBytes = (await this.files.stamp(walPath)).size;
+      }
+    } catch {
+      return err("RECOVERY_REQUIRED", "Active WAL envelope check could not read the store.");
+    }
+    return ok({ activeWalBytes, envelopeBytes: this.maxActiveWalBytes, storeId });
+  }
+
+  /**
    * Precommit active-WAL envelope check (Tranche 7). Reads HEAD and the WAL
    * stamp conservatively (unlocked: any concurrent-authority race is caught
    * by the commit's own authority verification) and computes the EXACT
@@ -311,20 +339,10 @@ export class ProductionWalStore {
     if (!Number.isSafeInteger(this.maxActiveWalBytes) || this.maxActiveWalBytes <= 0) {
       return err("INVALID_INPUT", "Invalid active WAL envelope.");
     }
-    let segmentBytes = 0;
-    let storeId = "";
-    try {
-      const headBytes = Buffer.from(await this.io.readBounded(join(this.directory, "HEAD"), PERSISTENCE_LIMITS.headBytes));
-      const head = decodeStoreHead(headBytes);
-      if (!head.ok) return head;
-      storeId = head.value.storeId;
-      const walPath = join(this.directory, "wal", `wal-${head.value.checkpoint.digest}.bin`);
-      if (await this.io.kind(walPath) === "file") {
-        segmentBytes = (await this.files.stamp(walPath)).size;
-      }
-    } catch {
-      return err("RECOVERY_REQUIRED", "Active WAL envelope check could not read the store.");
-    }
+    const observation = await this.observeActiveWalEnvelope();
+    if (!observation.ok) return observation;
+    const segmentBytes = observation.value.activeWalBytes;
+    const storeId = observation.value.storeId;
     const plan = planTransport(operations);
     if (!plan.ok) return plan;
     const frameInput = (transport: readonly WalOperation[]) => ({

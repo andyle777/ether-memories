@@ -12,6 +12,15 @@
 - Added explicit `collectGarbage()`: reclaims only payload objects provably unreachable from
   every authoritative structure; committed objects are permanent roots and no tombstone
   engine exists.
+- Added explicit `runMaintenance()`: one deterministic maintenance operation deriving a
+  rotation recommendation from the configured active-WAL envelope and the frozen WAL v1
+  frame cap, performing the existing rotation only when recommended, and following a fully
+  successful rotation with the existing orphan collection. No background maintenance.
+- T10 is frozen by owner decision at code-lineage SHA
+  `6f298aea2cd0278078bf49344f75807355a4e09b`; subsequent naming/status documentation
+  cleanup is separate from that frozen code lineage. Maintenance adds no persisted
+  policy or formats, does not auto-break writer locks, and does not weaken exact
+  mutation admission; GC failures preserve the already-committed rotation.
 - Added bounded-memory operation for unbounded histories: streamed directory inventory,
   external cascade sorting, sealed and per-record-authenticated scratch processing, and
   captured-tip plus exact `marks ⊆ inventory` coverage proofs before any unlink.
