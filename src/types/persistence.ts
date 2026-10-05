@@ -100,7 +100,9 @@ export type PersistenceErrorCode =
   | "READ_ONLY_LOCKED"
   | "RECOVERY_REQUIRED"
   | "UNSUPPORTED_PERSISTENCE_FORMAT"
-  | "DURABILITY_UNAVAILABLE";
+  | "DURABILITY_UNAVAILABLE"
+  /** Tranche 6: a deliberately closed durable runtime; not a durability failure. */
+  | "CLOSED";
 
 /** Operations are valid only during the enclosing withWriter callback. */
 export interface DurableWriterOperations {

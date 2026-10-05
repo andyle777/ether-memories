@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, parse, resolve } from "node:path";
-import type { CommittedTip, MutationIdentity, WalOperation, WriterAuthorityIdentity } from "../types/persistence.js";
+import type { CommittedTip, MutationId, MutationIdentity, WalOperation, WriterAuthorityIdentity } from "../types/persistence.js";
 import { parseTransactionSequenceId, sameCommittedTip } from "../utils/durablePersistence.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint, WAL_FORMAT, WAL_VERSION, type PersistedStoreHead } from "./codecs.js";
@@ -91,11 +91,29 @@ export class FsWalStore {
     const prepared = this.prepare(request);
     if (!prepared.ok) return err(prepared.error.code, prepared.error.message,
       { phase: "prepare", outcome: "not-committed", visibility: "none", durability: "unconfirmed" });
-    return this.run(prepared.value) as Promise<Result<CommitReceipt>>;
+    return this.run(prepared.value) as unknown as Promise<Result<CommitReceipt>>;
   }
 
   /** Acquires authority and crosses barriers; not a read-only observation or Core recovery. */
-  async readTip(): Promise<Result<CommittedTip>> { return this.run() as Promise<Result<CommittedTip>>; }
+  async readTip(): Promise<Result<CommittedTip>> { return this.run() as unknown as Promise<Result<CommittedTip>>; }
+
+  /**
+   * Authoritative committed-mutation lookup over the active WAL from the
+   * HEAD/checkpoint lineage, using the existing bounded streaming scanner
+   * under writer authority. Exact per frozen semantics:
+   * - no occurrence -> undefined (ABSENT);
+   * - exactly one logical committed transaction -> its committed receipt;
+   * - the same mutationId under more than one distinct logical transaction
+   *   -> PERSISTENCE_CORRUPTION (the scan does not stop at the first match).
+   * RAM stays bounded regardless of WAL length: only the matching record and
+   * the bounded history cache are retained.
+   */
+  async readCommittedMutation(mutationId: MutationId): Promise<Result<CommitReceipt | undefined>> {
+    if (typeof mutationId !== "string" || !mutationId.length || mutationId.length > WAL_LIMITS.mutationIdBytes) {
+      return err("INVALID_INPUT", "Invalid mutation identity for reconciliation.");
+    }
+    return this.run(undefined, mutationId) as unknown as Promise<Result<CommitReceipt | undefined>>;
+  }
 
   private async layout(): Promise<void> {
     if (!this.directory || this.directory.startsWith("\\\\") || Buffer.byteLength(this.directory, "utf8") > DIRECTORY_BYTES) {
@@ -146,13 +164,13 @@ export class FsWalStore {
     return { tip: cursor.tip, entries, completeIndex, found, stamp: scanner.stamp };
   }
 
-  private async run(request?: CommitRequest): Promise<Result<CommitReceipt | CommittedTip>> {
+  private async run(request?: CommitRequest, lookup?: MutationId): Promise<Result<CommitReceipt | CommittedTip | undefined>> {
     const state: Attempt = { phase: "preflight", outcome: "not-committed", visibility: "none", durability: "unconfirmed" };
     const lock = join(this.directory, "writer.lock");
     let lockBytes: Buffer | undefined;
     let ownsLock = false;
     let file: WalFileHandle | undefined;
-    let result: Result<CommitReceipt | CommittedTip>;
+    let result: Result<CommitReceipt | CommittedTip | undefined>;
     try {
       await this.layout();
       // Refuse unsupported barriers before creating even an authority artifact.
@@ -186,8 +204,8 @@ export class FsWalStore {
       if (kind === "directory") throw new DirectoryIoError("RECOVERY_REQUIRED", "WAL path is not a regular file.");
       if (kind === "file") file = await this.walIO.open(path, false);
       state.phase = "history-validate";
-      const history: History = file ? await this.history(path, file, head, headBytes, verifyAuthority, request?.mutation.mutationId)
-        : { tip: head.checkpoint.tip, entries: new Map(), completeIndex: true };
+      const history: History = file ? await this.history(path, file, head, headBytes, verifyAuthority, request?.mutation.mutationId ?? lookup)
+        : { tip: head.checkpoint.tip, entries: new Map(), completeIndex: true, found: undefined };
       const before = history.stamp;
       let validatedStamp = before;
       let receipt: CommitReceipt | undefined;
@@ -250,7 +268,15 @@ export class FsWalStore {
         this.cache = { ...history, tip: appended?.identity ?? history.tip, headBytes, stamp: after,
           completeIndex: history.completeIndex && (!appended || history.entries.has(appended.mutation.mutationId)) };
       }
-      result = ok(receipt ? Object.freeze(receipt) : history.tip);
+      if (lookup && !request) {
+        // Mutation receipt lookup: reconcile from committed history without
+        // re-running any preparation.
+        const found = history.found;
+        result = ok(found ? Object.freeze({ status: "already-committed", identity: found.identity,
+          mutation: found.mutation, durability: "confirmed" as const }) : undefined);
+      } else {
+        result = ok(receipt ? Object.freeze(receipt) : history.tip);
+      }
     } catch (error) {
       this.cache = undefined;
       result = failure(error, state);

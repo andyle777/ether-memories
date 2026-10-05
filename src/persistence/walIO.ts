@@ -16,6 +16,8 @@ export interface WalFileHandle {
   write(bytes: Uint8Array, position: number): Promise<number>;
   sync(): Promise<void>;
   close(): Promise<void>;
+  /** Optional only for older injected backends; recovery fails closed without it. */
+  truncate?(size: number): Promise<void>;
 }
 /** Trusted syscall boundary, not application callbacks or durability capability flags. */
 export interface WalIO {
@@ -50,7 +52,8 @@ export const nodeWalIO: WalIO = {
       async read(bytes, position) { return (await handle.read(bytes, 0, bytes.byteLength, position)).bytesRead; },
       async write(bytes, position) { return (await handle.write(bytes, 0, bytes.byteLength, position)).bytesWritten; },
       async sync() { await handle.sync(); },
-      async close() { await handle.close(); }
+      async close() { await handle.close(); },
+      async truncate(size) { await handle.truncate(size); }
     };
   }
 };
