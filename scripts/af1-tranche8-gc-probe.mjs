@@ -167,6 +167,7 @@ try {
     }
   }
   check("absolute-path audit: no shipped module exports a destructive collector", audited > 40);
+  console.log(JSON.stringify({ containmentModules: audited, scope: "every emitted dist/**/*.js module" }));
   // The public facade takes no arguments and no caller-supplied tip.
   check("collectGarbage is a zero-argument facade operation", finalRuntime.collectGarbage.length === 0);
 

@@ -168,6 +168,19 @@ descriptor evidence. This is not process-wide native handle enumeration.
 Memory and timing data are diagnostic only. `--tail-only` is an explicitly
 labeled debugging mode and never evidence for the 10,000-mutation soak.
 
+## Verification receipt correction
+
+ORION hashes frozen fixture text in canonical LF form, using the committed-blob
+digests pinned by the release-integrity tests. LF and synthetic CRLF inputs must
+produce the same identities; changed content must still fail verification.
+This does not normalize or change any decoded persistence wire bytes.
+
+The containment audit imports every emitted `dist/**/*.js` module. A clean build
+emits **50 modules**, not the earlier receipt's 51. The earlier local `dist`
+included a stale `core/foundationEffects.js` with no current source counterpart;
+TypeScript build does not remove stale outputs. Clean-build/package inventory
+verification excludes that artifact and the probe reports its actual audit count.
+
 ## Non-goals (out of T10 scope)
 
 Background or implicit threshold-triggered maintenance; automatic/background

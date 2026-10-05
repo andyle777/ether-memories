@@ -22,6 +22,14 @@ const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.m
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 
 describe("v0.6.0 release metadata consistency", () => {
+  const pinned: Record<string, string> = {
+    "persistence-wire-v1.json": "ecc0d9b2276c9569bec4a3a139fb0ea3da12186459330c292dfb9c04255524af",
+    "portable-record-v1.json": "97626d9819a977b0d73687ee9a57ba7dfbc046c14476afad1ecc0faeeb951e5b",
+    "retrieval-golden-v1.json": "9eafc0a7d772ca1d7385bd1e3cc548245a2d885f6d322f3b982a18bcd9f6cc52",
+    "store-v0.3.json": "c2ba81d5952550a696e295181a7e802c440728977ce55a17f39291c2cd428a15",
+    "wal-wire-v1.json": "04c980368c39c9506bd40d314ee1ef1f590ab169a09cff022b0f4a115133050c"
+  };
+
   it("pins the library release version in source and package metadata", () => {
     expect(LIBRARY_VERSION).toBe("0.6.0");
     const pkg = JSON.parse(read("../package.json"));
@@ -53,16 +61,34 @@ describe("v0.6.0 release metadata consistency", () => {
     // LF-normalized hashing reproduces the committed bytes for all five.
     // Wire-byte identity is additionally proven by the golden content digests
     // asserted below and by the codec/fixture suites.
-    const pinned: Record<string, string> = {
-      "persistence-wire-v1.json": "ecc0d9b2276c9569bec4a3a139fb0ea3da12186459330c292dfb9c04255524af",
-      "portable-record-v1.json": "97626d9819a977b0d73687ee9a57ba7dfbc046c14476afad1ecc0faeeb951e5b",
-      "retrieval-golden-v1.json": "9eafc0a7d772ca1d7385bd1e3cc548245a2d885f6d322f3b982a18bcd9f6cc52",
-      "store-v0.3.json": "c2ba81d5952550a696e295181a7e802c440728977ce55a17f39291c2cd428a15",
-      "wal-wire-v1.json": "04c980368c39c9506bd40d314ee1ef1f590ab169a09cff022b0f4a115133050c"
-    };
     for (const [name, digest] of Object.entries(pinned)) {
       expect(sha256(read(`./fixtures/${name}`))).toBe(digest);
     }
+  });
+
+  it.each(["LF", "CRLF"])("ORION verifies canonical fixture identities from %s text and rejects changed content", ending => {
+    const fixtures = Object.fromEntries(Object.keys(pinned).map(name => {
+      const lf = read(`./fixtures/${name}`);
+      expect(lf).toContain("\n");
+      return [`tests/fixtures/${name}`, ending === "CRLF" ? lf.replace(/\n/g, "\r\n") : lf];
+    }));
+    const helper = new URL("../scripts/af1-fixture-verification.mjs", import.meta.url).href;
+    const verified = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { readFileSync } from "node:fs";
+      import { verifyFrozenFixtures } from ${JSON.stringify(helper)};
+      const fixtures = JSON.parse(readFileSync(0, "utf8"));
+      const receipts = verifyFrozenFixtures(file => fixtures[file]);
+      const changed = { ...fixtures };
+      for (const file of Object.keys(changed)) changed[file] += " ";
+      console.log(JSON.stringify({ receipts, changed: verifyFrozenFixtures(file => changed[file]) }));
+    `], { input: JSON.stringify(fixtures), encoding: "utf8" });
+    expect(verified.status, verified.stderr).toBe(0);
+    const result = JSON.parse(verified.stdout);
+    expect(result.receipts).toEqual(Object.entries(pinned).map(([name, sha256]) => ({
+      fixture: `tests/fixtures/${name}`, sha256, pass: true
+    })));
+    expect(result.changed).toHaveLength(5);
+    expect(result.changed.every((row: { pass: boolean }) => row.pass === false)).toBe(true);
   });
 
   it("does not leak the release version into frozen persistence wire bytes", () => {
