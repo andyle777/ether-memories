@@ -3,7 +3,7 @@
 Version: 0.6.0
 Tag: v0.6.0
 Lineage: v0.5.0 → v0.6.0
-Status: Release candidate (AF1 Tranche 9 verification/integration; pending independent freeze review)
+Status: AF1 Tranche 10 implementation candidate (unfrozen; frozen T9 code lineage preserved)
 
 This manifest describes the v0.6.0 release surface.
 
@@ -19,7 +19,7 @@ This manifest describes the v0.6.0 release surface.
   receipts, exact historical result reconstruction, safe retired-WAL reclamation, and
   explicit reclamation of provably orphaned payload objects only.
 
-## Durable persistence (AF1 Tranches 1–9)
+## Durable persistence (AF1 Tranches 1–10 candidate)
 
 - `openDurableEtherMemories()` explicit durable factory; in-memory core unchanged.
 - Caller-supplied mutation IDs reconcile lost acknowledgments without duplicate effects.
@@ -31,6 +31,14 @@ This manifest describes the v0.6.0 release surface.
 - `collectGarbage()` reclaims only payload objects unreachable from every authoritative
   structure (active WAL refs ∪ cumulative receipt refs); committed objects are permanent
   roots; no tombstone engine exists.
+- `runMaintenance()` composes the frozen rotation and orphan collection under one
+  explicit deterministic recommendation (configured active-WAL envelope vs. the frozen
+  WAL v1 frame cap); no background or implicitly threshold-triggered maintenance exists.
+  No-op receipts describe that invocation's observation only; exact mutation precommit
+  remains the admission authority. GC runs only after rotation fully succeeds; its
+  failure does not roll back rotation. Writer locks are never auto-broken, and there
+  is zero new persisted maintenance state or policy. See
+  [the T10 candidate contract](docs/af1-tranche10-maintenance-orchestration.md).
 - Bounded-memory operation for unbounded histories with sealed, per-record-authenticated
   scratch processing and bidirectional coverage proofs before any unlink.
 - Persisted formats unchanged: store schema `ether.memory_store.v0.3`; HEAD/checkpoint
@@ -48,6 +56,9 @@ This manifest describes the v0.6.0 release surface.
 
 ## Release gates
 
+The T10 candidate suite contains 29 files / 685 tests, including 21 maintenance
+orchestration tests. T10 is not frozen or published by this local integration pass.
+
 Run:
 ```bash
 npm ci
@@ -55,7 +66,8 @@ npm run typecheck
 npm test
 npm run build
 ```
-plus the compiled recovery, runtime, rotation, and garbage-collection probes
+plus the compiled recovery, runtime, rotation, garbage-collection, and default
+10,000-mutation maintenance probes
 (`--simulate-directory-barriers` on Windows), frozen fixture digest gates,
 public-surface and declaration gates, the destructive-collector containment audit over
 every emitted module, and packed-consumer verification, before publishing.

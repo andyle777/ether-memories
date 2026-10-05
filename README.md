@@ -21,8 +21,18 @@ v0.6.0 adds an opt-in durable transactional store for the same three foundations
 - Crash-consistent startup recovery that distinguishes two cases: a repairable incomplete final transaction tail is truncated at the last complete transaction under writer authority, synchronized, and the WAL is rescanned — startup may then succeed — while complete or structural corruption always fails closed and requires explicit recovery.
 - Explicit `rotate()`: activates a new checkpoint, writes a cumulative durable receipt ledger, preserves exact historical result reconstruction, and reclaims the retired WAL segment only after the new lineage is authoritative.
 - Explicit `collectGarbage()`: reclaims only payload objects that are provably unreachable from every authoritative structure — committed objects are permanent roots, and no tombstone engine exists.
+- Explicit `runMaintenance()`: one deterministic maintenance operation that derives a rotation recommendation from the configured active-WAL envelope and the frozen WAL frame cap, performs the existing rotation only when recommended, and follows a fully successful rotation with the existing orphan collection. Failures return the existing errors with the original details plus the maintenance stage; maintenance never runs in the background.
 - Bounded-memory operation for unbounded histories: streamed directory inventory, external cascade sorting, sealed and per-record-authenticated scratch processing, and captured-tip plus exact coverage proofs (`marks ⊆ inventory`) before any unlink.
 - Deterministic failure classification: maintenance failures alone leave the runtime ready; authority uncertainty and authoritative corruption retain precedence and can require recovery.
+
+Maintenance is operator-driven: there is no background scheduler or automatic GC
+threshold. A no-op reports only that no rotation was recommended from that
+invocation's observation; exact mutation precommit remains the envelope admission
+authority. GC runs only after rotation fully succeeds, and a GC failure does not
+roll back that committed rotation. Writer locks are never auto-broken. T10 adds no
+persisted maintenance state and changes no schema, wire, receipt, or checkpoint
+format. See [maintenance orchestration](docs/af1-tranche10-maintenance-orchestration.md)
+for the unfrozen T10 candidate contract.
 
 ### Platform support
 
@@ -40,10 +50,10 @@ The durable store persists the same canonical snapshot payload; its on-disk layo
 
 ### Release verification
 
-v0.6.0 verification (AF1 Tranches 1–9) runs:
+v0.6.0 verification (AF1 Tranches 1–10; T10 is an unfrozen implementation candidate) runs:
 
-- Full test suite (664 tests at the v0.6.0 candidate), TypeScript typecheck, and production build.
-- Compiled recovery, runtime, rotation, and garbage-collection probes, with simulated directory barriers on Windows.
+- Full test suite (29 files / 685 tests at the T10 implementation candidate), TypeScript typecheck, and production build.
+- Compiled recovery, runtime, rotation, garbage-collection, and 10,000-mutation maintenance probes, with simulated directory barriers on Windows.
 - Frozen wire-fixture digest gates, package-root public-surface and declaration gates, a destructive-collector containment audit over every emitted module, and packed-consumer verification.
 
 ## Architecture
