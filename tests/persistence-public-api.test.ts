@@ -1,0 +1,47 @@
+import { expect, it } from "vitest";
+import * as publicApi from "../src/index.js";
+
+// @ts-expect-error Wire types are internal, not package-root exports.
+type Head = import("../src/index.js").PersistedStoreHead;
+// @ts-expect-error Wire types are internal, not package-root exports.
+type Limits = import("../src/index.js").PersistenceLimits;
+// @ts-expect-error Wire types are internal, not package-root exports.
+type LimitOptions = import("../src/index.js").PersistenceLimitOptions;
+// @ts-expect-error Wire types are internal, not package-root exports.
+type Checkpoint = import("../src/index.js").CheckpointMetadata;
+// @ts-expect-error Layout types are internal, not package-root exports.
+type Options = import("../src/index.js").FsDurableStoreOptions;
+// @ts-expect-error Layout types are internal, not package-root exports.
+type Inspection = import("../src/index.js").DurableStoreInspection;
+// @ts-expect-error Layout types are internal, not package-root exports.
+type Receipt = import("../src/index.js").HeadActivationReceipt;
+
+it("does not publish internal persistence wire or layout operations at the package root", () => {
+  for (const name of ["HEAD_FORMAT", "CHECKPOINT_FORMAT", "PERSISTENCE_VERSION", "WAL_FORMAT", "DIGEST_ALGORITHM",
+    "PERSISTENCE_LIMITS", "persistenceLimits", "encodeStoreHead", "decodeStoreHead", "encodeCheckpoint",
+    "verifyCheckpoint", "FsDurableStore", "HEAD_VERSION", "CHECKPOINT_VERSION", "WAL_VERSION"]) {
+    expect(Object.hasOwn(publicApi, name), name).toBe(false);
+  }
+  expect(publicApi.parseTransactionSequenceId("1").ok).toBe(true);
+  expect(typeof publicApi.getDurableOperations).toBe("function");
+  // The Tranche 8 destructive collector is internal-only: the runtime facade
+  // is the single supported destructive path, and the package exports map
+  // blocks deep imports of internal modules from external consumers.
+  for (const name of ["collectDurableGarbage", "GcDigestSorter", "SealedRunReader", "deriveReclaimCandidates"]) {
+    expect(Object.hasOwn(publicApi, name), name).toBe(false);
+  }
+});
+
+it("does not publish snapshot preparation or any internal persistence helper at the package root", () => {
+  // The moved snapshot-preparation helper and every other internal helper it
+  // lives beside must stay unreachable from the public root.
+  for (const name of ["prepareSnapshot", "commitSnapshot", "persistedSnapshot", "hydrateSnapshot",
+    "encodeSnapshotPayload", "decodeSnapshotPayload", "decodeLegacySnapshotPayload", "snapshotData",
+    "SNAPSHOT_PAYLOAD_PROFILE", "reduceProduction", "resolveOperation", "validateCandidate",
+    "productionRegistry", "ProductionWalStore", "StartupRecovery", "DiskBackedMutationIndex",
+    "PayloadObjects", "prepareCoreMutation", "encodeEtherData", "decodeEtherData", "ETHER_DATA_PROFILE",
+    "foundationNoteNode", "foundationDerivedEdge", "normalizeGraphRelationship", "normalizeSnapshotGraph"]) {
+    expect(Object.hasOwn(publicApi, name), name).toBe(false);
+    expect((publicApi as Record<string, unknown>)[name], name).toBeUndefined();
+  }
+});

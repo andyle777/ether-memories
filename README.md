@@ -1,4 +1,6 @@
-# Ether Memories v0.5.0
+# Ether Memories v0.6.0
+
+Canonical project name: **Ether Memories**; package and repository: `ether-memories`.
 
 **Civilian-grade, local-first memory infrastructure for humans and AI systems.**
 
@@ -10,43 +12,57 @@ Ether Memories has three foundations:
 
 Condensation is a **processing layer**, not a fourth foundation.
 
-## v0.5.0 — Deterministic Retrieval & Memory Intelligence
+## v0.6.0 — Durable Persistence
 
-v0.5.0 strengthens deterministic retrieval, memory processing, portability, and evidence accuracy while preserving the provider-neutral, local-first architecture.
+v0.6.0 adds an opt-in durable transactional store for the same three foundations: an append-only write-ahead log, exclusive writer authority, and crash-consistent startup recovery. The in-memory core and all v0.5.0 deterministic-retrieval behavior are unchanged.
 
-### Core improvements
+### Durable persistence
 
-- **Match-class gated deterministic retrieval**: strict precedence from `explicit_id` through `exact_phrase`, `full_token_match`, `partial_token_match`, `tag_metadata_match`, and `graph_only`, with stable tie-breaking.
-- **Canonical Unicode tokenizer**: NFC normalization, locale-independent processing, and deterministic punctuation and whitespace handling without stemming or stop-word heuristics.
-- **Revision-aware lexical index**: derived, in-memory, and rebuildable; manager mutation revisions keep retrieval current while Notes and Diary remain canonical truth.
-- **Explicit `asOf`**: reproducible expiry-sensitive retrieval for the same store, query, options, and frozen time.
-- **Structured Retrieval Evidence v2**: match-class, lexical, token, and graph evidence explains selection without phantom scoring or retrieval signals.
-- **Deterministic bounded Graph Recall v2**: opt-in traversal with best-path selection, stable edge evidence, direction and relation filtering, and authoritative live Note lifecycle state.
-- **Transactional Portable Record v1 import**: bounded Note/Diary ingestion with timestamp and citation validation, duplicate/conflict detection, deterministic validation receipts, and zero-mutation rejection on blocking failures.
-- **Deterministic Condensation v2**: side-effect-free analysis derives rule-based facts, tags, category, and confidence; committing the analysis creates a candidate note through the Core lifecycle. Analysis is reproducible; generated IDs and creation timestamps are not required to be.
-- **Candidate isolation and promotion**: condensed memories remain hidden from default retrieval until explicitly promoted; explicit MemoryContext Note IDs also respect candidate, archive, and expiry filters.
-- Existing identity restoration, Diary CRUD, FoundationLinker coherence, pinned-edit protection, persistence, bounded MemoryContext, and pure Agent Tool and RLM adapters remain available.
-- No LLM, embedding, vector database, autonomous agent, or network dependency.
+- `openDurableEtherMemories()` — explicit asynchronous factory for the durable runtime; the classic in-memory core is untouched and remains fully supported.
+- WAL-transactional commits with caller-supplied mutation IDs: lost acknowledgments reconcile deterministically without duplicate effects, including after restart.
+- Crash-consistent startup recovery that distinguishes two cases: a repairable incomplete final transaction tail is truncated at the last complete transaction under writer authority, synchronized, and the WAL is rescanned — startup may then succeed — while complete or structural corruption always fails closed and requires explicit recovery.
+- Explicit `rotate()`: activates a new checkpoint, writes a cumulative durable receipt ledger, preserves exact historical result reconstruction, and reclaims the retired WAL segment only after the new lineage is authoritative.
+- Explicit `collectGarbage()`: reclaims only payload objects that are provably unreachable from every authoritative structure — committed objects are permanent roots, and no tombstone engine exists.
+- Explicit `runMaintenance()`: one deterministic maintenance operation that derives a rotation recommendation from the configured active-WAL envelope and the frozen WAL frame cap, performs the existing rotation only when recommended, and follows a fully successful rotation with the existing orphan collection. Failures return the existing errors with the original details plus the maintenance stage; maintenance never runs in the background.
+- Bounded-memory operation for unbounded histories: streamed directory inventory, external cascade sorting, sealed and per-record-authenticated scratch processing, and captured-tip plus exact coverage proofs (`marks ⊆ inventory`) before any unlink.
+- Deterministic failure classification: maintenance failures alone leave the runtime ready; authority uncertainty and authoritative corruption retain precedence and can require recovery.
+
+Maintenance is operator-driven: there is no background scheduler or automatic GC
+threshold. A no-op reports only that no rotation was recommended from that
+invocation's observation; exact mutation precommit remains the envelope admission
+authority. GC runs only after rotation fully succeeds, and a GC failure does not
+roll back that committed rotation. Writer locks are never auto-broken. T10 adds no
+persisted maintenance state and changes no schema, wire, receipt, or checkpoint
+format. See [maintenance orchestration](docs/af1-tranche10-maintenance-orchestration.md)
+for the frozen T10 contract and code-lineage receipt.
+
+### Platform support
+
+Durable mode requires a platform with native file and directory durability barriers (Linux and macOS). On Windows, native directory durability is unavailable: durable-mode initialization fails closed with `DURABILITY_UNAVAILABLE` rather than weakening the protocol, and the test suite and probes run with simulated directory barriers. Native Windows power-loss durability is not claimed.
 
 ### Compatibility
 
-v0.5.0 preserves v0.4 persistence compatibility and the existing schema contracts:
+v0.6.0 preserves the persisted schema contracts:
 
 - Store: `ether.memory_store.v0.3`
 - MemoryContext: `ether.memory_context.v1`
 - Portable Record: `ether.portable_record.v1`
 
-Snapshots provide canonical persistence for the complete library state. Portable Record v1 is Note/Diary interchange only; it does not import identity or graph state and is not a snapshot replacement.
+The durable store persists the same canonical snapshot payload; its on-disk layout (HEAD, checkpoints, WAL, receipts) is an internal implementation detail, not a public path contract. Legacy snapshot persistence (`EtherMemoriesCore` with a `StoragePort`/`storagePath`) is unchanged.
 
 ### Release verification
 
-The [published v0.5.0 release](https://github.com/andyle777/ether-memories/releases/tag/v0.5.0) passed:
+AF1 Tranche 10 is frozen by owner decision at code-lineage SHA
+`6f298aea2cd0278078bf49344f75807355a4e09b`. Subsequent naming and status documentation
+commits do not replace that frozen SHA. Merge commits record integration into the
+stacked bases and `main`; see [integration lineage](docs/v0.6.0-integration.md).
+Tagging and publication remain separate actions.
 
-- 73 tests.
-- TypeScript typecheck and production build.
-- `npm pack` and packed-consumer runtime verification.
-- External TypeScript declaration compilation.
-- GitHub CI on Ubuntu with Node 22/24 and Windows with Node 22/24.
+v0.6.0 verification (AF1 Tranches 1–10) runs:
+
+- Full test suite (29 files / 687 tests at the frozen T10 SHA), TypeScript typecheck, and production build.
+- Compiled recovery, runtime, rotation, garbage-collection, and 10,000-mutation maintenance probes, with simulated directory barriers on Windows.
+- Frozen wire-fixture digest gates, package-root public-surface and declaration gates, a destructive-collector containment audit over every emitted module, and packed-consumer verification.
 
 ## Architecture
 
@@ -69,13 +85,15 @@ The core is provider-neutral. OpenAI, Anthropic, Gemini, local models, agent hos
 
 ### RAG boundary
 
-v0.5.0 is retrieval-native but deliberately does **not** require embeddings or a vector database. A future RAG adapter can turn `MemoryContext` records into chunks; semantic/vector implementations remain outside this release.
+Ether Memories is retrieval-native but deliberately does **not** require embeddings or a vector database. A future RAG adapter can turn `MemoryContext` records into chunks; semantic/vector implementations remain outside this release.
 
 ### RLM boundary
 
 `toRlmEnv()` provides stable handles and a bounded context. An RLM host may re-enter Ether through ordinary APIs. Ether does not contain an RLM runtime.
 
 ## Quick start
+
+In-memory core:
 
 ```ts
 import { EtherMemoriesCore } from "ether-memories";
@@ -100,6 +118,37 @@ const result = ether.buildMemoryContext({
     }
   }
 });
+```
+
+Durable mode (Linux/macOS):
+
+```ts
+import { openDurableEtherMemories, createMutationId } from "ether-memories";
+
+const opened = await openDurableEtherMemories({
+  userId: "local-user",
+  directory: "./ether-store"
+});
+
+if (!opened.ok) {
+  // The factory returns Result<DurableEtherMemories>: handle failure explicitly.
+  throw new Error(`durable open failed: ${opened.error.message}`);
+}
+
+const ether = opened.value;
+
+// The mutation ID is the caller's stable identity: retain it, and a retry
+// after a lost acknowledgment reconciles to the original committed
+// transaction instead of duplicating it.
+const addProjectNote = createMutationId();
+await ether.addMemory(
+  { content: "My project uses TypeScript.", tags: ["project"] },
+  addProjectNote
+);
+
+await ether.rotate();          // explicit checkpoint + receipt ledger rotation
+await ether.collectGarbage();  // explicit reclamation of orphaned payload objects
+await ether.close();
 ```
 
 ## Scope fence
