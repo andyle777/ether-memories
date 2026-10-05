@@ -384,4 +384,3 @@ throw new Error("ACK escaped the armed barrier: " + JSON.stringify(result));
 } finally {
   if (parent) await fs.rm(parent, { recursive: true, force: true });
 }
-
