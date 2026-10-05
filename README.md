@@ -54,8 +54,9 @@ The durable store persists the same canonical snapshot payload; its on-disk layo
 
 AF1 Tranche 10 is frozen by owner decision at code-lineage SHA
 `6f298aea2cd0278078bf49344f75807355a4e09b`. Subsequent naming and status documentation
-commits do not replace that frozen SHA. PR integration, tagging, and publication
-remain separate actions.
+commits do not replace that frozen SHA. Merge commits record integration into the
+stacked bases and `main`; see [integration lineage](docs/v0.6.0-integration.md).
+Tagging and publication remain separate actions.
 
 v0.6.0 verification (AF1 Tranches 1–10) runs:
 

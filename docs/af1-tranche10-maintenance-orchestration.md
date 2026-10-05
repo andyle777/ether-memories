@@ -9,8 +9,10 @@ Frozen parent: T9 `5db87810b60b6693f0953402cdc06f980f5691af`.
 Branch: `feat/v0.6.0-af1-tranche10`.
 
 Post-freeze naming/status documentation cleanup is a separate additive commit;
-it does not replace the frozen T10 code-lineage SHA. The freeze does not merge
-PR #17, mark it ready, tag, publish, or release. Further T10 code changes require
+it does not replace the frozen T10 code-lineage SHA. The owner subsequently
+authorized PR integration; [merge receipts](v0.6.0-integration.md) record the
+integration lineage. Tagging, publishing, and releasing remain separate actions.
+Further T10 code changes require
 a genuine post-freeze correctness defect; other work is deferred beyond v0.6.0.
 This document describes the frozen T10 architecture exactly as implemented.
 

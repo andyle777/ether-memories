@@ -3,13 +3,15 @@
 Version: 0.6.0
 Tag: v0.6.0
 Lineage: v0.5.0 → v0.6.0
-Status: AF1 Tranche 10 frozen by owner decision; PR integration and publication pending
+Status: AF1 Tranche 10 frozen; v0.6.0 integration lineage recorded; publication pending
 Frozen T10 code-lineage SHA: `6f298aea2cd0278078bf49344f75807355a4e09b`
 Frozen T9 code-lineage parent: `5db87810b60b6693f0953402cdc06f980f5691af`
 
 The canonical project name is **Ether Memories** (`ether-memories`). Post-freeze
 naming/status documentation commits do not replace the frozen T10 code-lineage
-SHA or authorize merging, tagging, publishing, or releasing.
+SHA. The owner separately authorized PR integration; merge receipts are recorded
+in [integration lineage](docs/v0.6.0-integration.md). Tagging, publishing, and
+releasing remain separate actions.
 
 This manifest describes the v0.6.0 release surface.
 
