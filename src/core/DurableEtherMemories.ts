@@ -50,6 +50,7 @@ import { attachTip, type StateRoot } from "../persistence/stateRoot.js";
 import { encodeSnapshotPayload } from "../persistence/snapshotPayload.js";
 import { DEFAULT_MAX_INDEX_BYTES } from "../persistence/recoveryMutationIndex.js";
 import { rotateDurableStore, MAX_ACTIVE_WAL_BYTES } from "../persistence/checkpointRotation.js";
+import { WAL_LIMITS } from "../persistence/wal.js";
 import {
   GC_CANDIDATES_NAME, GC_VALIDATED_NAME, GcDigestSorter, type GcInstrumentation, type GcLimits,
   type GcScratchOptions, OBJECT_NAME_PATTERN, RunWriter, type SealedRun,
@@ -121,6 +122,35 @@ export interface DurableGcSummary {
 }
 
 /**
+ * Public maintenance receipt (Tranche 10). `runMaintenance()` is the single
+ * explicit maintenance operation: it derives one deterministic rotation
+ * recommendation from the configured active-WAL envelope and the frozen WAL
+ * v1 frame cap, performs the existing Tranche 7 rotation only when the
+ * recommendation fires, and follows a FULLY successful rotation with the
+ * existing Tranche 8 orphan collection. The plan block is an OBSERVATION
+ * derived while the maintenance operation held the runtime's single-flight
+ * queue slot: a no-op receipt means maintenance was not recommended from the
+ * active-WAL state observed during this run — it is NOT a snapshot guarantee
+ * that another conforming writer cannot append afterward. Mutation admission
+ * keeps its own exact precommit envelope check, and every destructive
+ * operation still acquires the frozen Tranche 7/8 writer authority.
+ */
+export interface DurableMaintenanceReceipt {
+  /** Derived at decision time under the maintenance queue slot. */
+  readonly plan: {
+    readonly activeWalBytes: number;
+    /** The CONFIGURED instance envelope (production default: 30 MiB). */
+    readonly envelopeBytes: number;
+    readonly headroomBytes: number;
+    readonly rotationRecommended: boolean;
+    readonly reason: "within-headroom" | "rotation-headroom";
+  };
+  readonly performed: readonly ("rotation" | "garbage")[];
+  readonly rotation?: DurableRotationSummary;
+  readonly garbage?: DurableGcSummary;
+}
+
+/**
  * Public durable runtime surface. Only supported user-facing types appear
  * here; internal persistence types are deliberately absent.
  */
@@ -143,6 +173,7 @@ export interface DurableEtherMemories {
     data: Record<string, unknown>, mutationId: string): Promise<Result<MindGraphEdge>>;
   rotate(): Promise<Result<DurableRotationSummary>>;
   collectGarbage(): Promise<Result<DurableGcSummary>>;
+  runMaintenance(): Promise<Result<DurableMaintenanceReceipt>>;
   recover(): Promise<Result<DurableRecoveryReceipt>>;
   close(): Promise<Result<void>>;
 }
@@ -169,6 +200,57 @@ export interface DurableDependencies {
 }
 
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * Shared internal rotation-outcome classification (Tranche 10). ONE routing
+ * table consumed by both public rotate() and public runMaintenance(); no
+ * duplicated branch logic. Public rotate() remains observable-equivalent to
+ * the frozen Tranche 7 behavior: the returned error keeps its code, message
+ * and original details, with exactly the additive detail marks the frozen
+ * wrapper already produced, and the lifecycle transition is identical.
+ */
+export const classifyRotationFailure = (failure: { code: string; details?: unknown }): {
+  moveToRecoveryRequired: boolean;
+  /** Present only for the two cases whose details gain an additive mark. */
+  markedDetails?: Record<string, unknown>;
+} => {
+  const details = record(failure.details) ? failure.details : {};
+  // P6 already committed the new lineage: pending cleanup must never be
+  // reported as if the old lineage were still authoritative.
+  if (details.activated === true) {
+    return { moveToRecoveryRequired: false, markedDetails: { ...details, rotationCommitted: true } };
+  }
+  // HEAD may already point at the new lineage but crash durability of the
+  // switch is unconfirmed: the runtime must not casually remain writable.
+  if (details.activationState === "head-renamed-durability-unconfirmed") {
+    return { moveToRecoveryRequired: true, markedDetails: { ...details, rotationDurabilityUncertain: true } };
+  }
+  // Same staleness semantics as durable mutations.
+  if (failure.code === "RECOVERY_REQUIRED" || failure.code === "STALE_TRANSACTION_BASE") {
+    return { moveToRecoveryRequired: true };
+  }
+  // Ordinary pre-activation failure: the old lineage remains fully
+  // authoritative and the runtime stays ready.
+  return { moveToRecoveryRequired: false };
+};
+
+/**
+ * Shared internal garbage-collection failure routing (frozen Tranche 8
+ * precedence, unchanged): authority-release uncertainty > authoritative data
+ * uncertainty > ordinary maintenance failure, with the conservative
+ * code-based classification when no GC disposition is present. Returns
+ * whether the runtime must move to recovery-required; the returned error
+ * itself is always passed through verbatim by both callers.
+ */
+export const gcFailureRequiresRecovery = (failure: { code: string; details?: unknown }): boolean => {
+  const details = record(failure.details) ? failure.details : {};
+  if (details.authorityReleaseFailed === true) return true;
+  const disposition = details.gcDisposition;
+  if (disposition === "authoritative") return true;
+  if (disposition === "maintenance") return false;
+  return failure.code === "PERSISTENCE_CORRUPTION" || failure.code === "RECOVERY_REQUIRED"
+    || failure.code === "STALE_TRANSACTION_BASE";
+};
 const INITIAL_ANCHOR_TX = "9007199254740993";
 const INITIAL_ANCHOR_DIGEST = "0".repeat(64);
 
@@ -787,27 +869,15 @@ class DurableRuntime implements DurableEtherMemories {
           receiptCount: outcome.value.receiptCount
         });
       }
-      const details = record(outcome.error.details) ? outcome.error.details : {};
-      if (details.activated === true) {
-        // P6 already committed the new lineage: pending cleanup must never be
-        // reported as if the old lineage were still authoritative. The
-        // published generation is unchanged and remains exactly correct.
-        return err(outcome.error.code, outcome.error.message, { ...details, rotationCommitted: true });
-      }
-      if (details.activationState === "head-renamed-durability-unconfirmed") {
-        // HEAD may already point at the new lineage but crash durability of
-        // the switch is unconfirmed: the runtime must not casually remain
-        // writable; explicit recovery re-establishes coherent authority.
-        this.#lifecycle = "recovery-required";
-        return err(outcome.error.code, outcome.error.message, { ...details, rotationDurabilityUncertain: true });
-      }
-      // Same staleness semantics as durable mutations: a recovery-requiring
-      // failure means the runtime can no longer prove its generation matches
-      // durable history; the caller recovers explicitly and retries.
-      if (outcome.error.code === "RECOVERY_REQUIRED" || outcome.error.code === "STALE_TRANSACTION_BASE") {
+      // One shared internal routing table (Tranche 10): identical observable
+      // behavior to the frozen Tranche 7 wrapper - same lifecycle
+      // transitions, code, message, original details and additive marks.
+      const disposition = classifyRotationFailure(outcome.error);
+      if (disposition.moveToRecoveryRequired) {
         this.#lifecycle = "recovery-required";
       }
-      return outcome;
+      if (disposition.markedDetails === undefined) return outcome;
+      return err(outcome.error.code, outcome.error.message, disposition.markedDetails);
     });
   }
 
@@ -840,27 +910,14 @@ class DurableRuntime implements DurableEtherMemories {
         instrumentation: this.#gcInstrumentation
       });
       if (!outcome.ok) {
-        // Explicit lifecycle precedence: AUTHORITY UNCERTAINTY (writer-lock
-        // release/barrier failure, marked by the authority coordinator) >
-        // AUTHORITATIVE DATA UNCERTAINTY (gcDisposition "authoritative") >
-        // MAINTENANCE FAILURE (gcDisposition "maintenance"). The disposition
-        // is an explicit internal classification, never inferred from a
-        // possibly stale phase string.
-        const details = record(outcome.error.details) ? outcome.error.details : {};
-        if (details.authorityReleaseFailed === true) {
-          this.#lifecycle = "recovery-required";
-          return outcome;
-        }
-        const disposition = details.gcDisposition;
-        if (disposition === "authoritative") {
-          this.#lifecycle = "recovery-required";
-          return outcome;
-        }
-        if (disposition === "maintenance") return outcome;
-        // No GC disposition: the failure came from the authority layer
-        // (acquisition, layout, HEAD change) - conservative classification.
-        if (outcome.error.code === "PERSISTENCE_CORRUPTION" || outcome.error.code === "RECOVERY_REQUIRED"
-          || outcome.error.code === "STALE_TRANSACTION_BASE") {
+        // One shared internal routing table (Tranche 10): the frozen Tranche 8
+        // precedence - AUTHORITY UNCERTAINTY (writer-lock release/barrier
+        // failure, marked by the authority coordinator) > AUTHORITATIVE DATA
+        // UNCERTAINTY (gcDisposition "authoritative") > MAINTENANCE FAILURE
+        // (gcDisposition "maintenance"), with the conservative code-based
+        // classification when no explicit disposition exists - is applied
+        // unchanged; the error itself is returned verbatim.
+        if (gcFailureRequiresRecovery(outcome.error)) {
           this.#lifecycle = "recovery-required";
         }
         return outcome;
@@ -871,6 +928,109 @@ class DurableRuntime implements DurableEtherMemories {
         reclaimedObjects: outcome.value.reclaimedObjects,
         unknownArtifacts: outcome.value.unknownArtifacts
       });
+    });
+  }
+
+  /**
+   * Explicit deterministic maintenance orchestration (Tranche 10). ONE
+   * queue slot; never invokes the public rotate()/collectGarbage() (they
+   * enqueue themselves and nested entry would self-deadlock) - it calls the
+   * same non-enqueue module helpers those wrappers call, directly under this
+   * single hold. The maintenance plan is derived under the held slot: the
+   * single rotation recommendation uses the CONFIGURED instance envelope and
+   * the frozen WAL v1 total-frame cap (`effectiveNextFrameBound =
+   * min(WAL_LIMITS.frameBytes, envelopeBytes)`; recommendation iff
+   * `activeWalBytes + effectiveNextFrameBound > envelopeBytes`, strict, so
+   * equality - exactly enough room for a maximal legal frame - remains
+   * admissible and an empty WAL under a sub-cap envelope never repeats empty
+   * rotations). No recommendation -> successful no-op receipt. Otherwise the
+   * existing Tranche 7 rotation runs; ONLY a fully successful rotation
+   * proceeds to the existing Tranche 8 orphan collection. Failures return
+   * the EXISTING underlying error (code, message, every original detail)
+   * plus only additive orchestration context (`maintenanceStage`, and
+   * `completedRotation` when a fully committed rotation precedes a GC
+   * failure - the rotation is never implied to have rolled back). A genuine
+   * failure is never reported through ok(). No timers, no background
+   * scheduling, no persisted maintenance state: maintenance executes only
+   * when the caller explicitly invokes this method, and the plan remains an
+   * observation, not a durable snapshot or an authority receipt.
+   */
+  async runMaintenance(): Promise<Result<DurableMaintenanceReceipt>> {
+    return this.enqueue(async () => {
+      if (this.#lifecycle === "closed") return err("CLOSED", "This durable runtime is closed.");
+      const generation = this.#generation;
+      if (this.#lifecycle !== "ready" || !generation) {
+        return err("RECOVERY_REQUIRED", "Recovery is required before maintenance.");
+      }
+      const observation = await this.#store.observeActiveWalEnvelope();
+      if (!observation.ok) {
+        // Same unlocked-observation failure class as the precommit envelope
+        // check: an ordinary read failure, returned verbatim; the runtime
+        // stays ready and the caller may retry.
+        return observation;
+      }
+      const activeWalBytes = observation.value.activeWalBytes;
+      const envelopeBytes = observation.value.envelopeBytes;
+      const effectiveNextFrameBound = Math.min(WAL_LIMITS.frameBytes, envelopeBytes);
+      const rotationRecommended = activeWalBytes + effectiveNextFrameBound > envelopeBytes;
+      const plan = {
+        activeWalBytes,
+        envelopeBytes,
+        headroomBytes: envelopeBytes - activeWalBytes,
+        rotationRecommended,
+        reason: (rotationRecommended ? "rotation-headroom" : "within-headroom") as
+          "within-headroom" | "rotation-headroom"
+      };
+      if (!rotationRecommended) {
+        const noOp: DurableMaintenanceReceipt = { plan, performed: [] };
+        return ok(noOp);
+      }
+      const rotation = await rotateDurableStore({
+        directory: this.#directory,
+        generation: { bytes: generation.bytes, tip: generation.tip },
+        io: this.#io,
+        files: this.#files
+      });
+      if (!rotation.ok) {
+        const disposition = classifyRotationFailure(rotation.error);
+        if (disposition.moveToRecoveryRequired) this.#lifecycle = "recovery-required";
+        const details = disposition.markedDetails !== undefined ? disposition.markedDetails
+          : (record(rotation.error.details) ? rotation.error.details : {});
+        return err(rotation.error.code, rotation.error.message,
+          { ...details, maintenanceStage: "rotation" as const });
+      }
+      const rotationSummary: DurableRotationSummary = {
+        newCheckpointId: rotation.value.newCheckpointId,
+        newCheckpointDigest: rotation.value.newCheckpointDigest,
+        ledgerDigest: rotation.value.ledgerDigest,
+        retiredWalBytes: rotation.value.retiredWalBytes,
+        receiptCount: rotation.value.receiptCount
+      };
+      // The published generation (state and tip) is identical across a
+      // successful rotation; the captured tip remains the committed tip the
+      // collector must prove the authoritative representation reaches.
+      const garbage = await collectPayloadObjectGarbage({
+        directory: this.#directory, io: this.#io, files: this.#files, expectedTip: generation.tip,
+        instrumentation: this.#gcInstrumentation
+      });
+      if (!garbage.ok) {
+        if (gcFailureRequiresRecovery(garbage.error)) this.#lifecycle = "recovery-required";
+        const details = record(garbage.error.details) ? garbage.error.details : {};
+        return err(garbage.error.code, garbage.error.message,
+          { ...details, maintenanceStage: "garbage" as const, completedRotation: rotationSummary });
+      }
+      const completed: DurableMaintenanceReceipt = {
+        plan,
+        performed: ["rotation", "garbage"],
+        rotation: rotationSummary,
+        garbage: {
+          scannedObjects: garbage.value.scannedObjects,
+          markedReferences: garbage.value.markedReferences,
+          reclaimedObjects: garbage.value.reclaimedObjects,
+          unknownArtifacts: garbage.value.unknownArtifacts
+        }
+      };
+      return ok(completed);
     });
   }
 
@@ -1008,6 +1168,7 @@ const createFacade = (implementation: DurableRuntime): DurableEtherMemories => O
     implementation.addGraphEdge(id, source, target, relationship, data, mutationId),
   rotate: (): Promise<Result<DurableRotationSummary>> => implementation.rotate(),
   collectGarbage: (): Promise<Result<DurableGcSummary>> => implementation.collectGarbage(),
+  runMaintenance: (): Promise<Result<DurableMaintenanceReceipt>> => implementation.runMaintenance(),
   recover: (): Promise<Result<DurableRecoveryReceipt>> => implementation.recover(),
   close: (): Promise<Result<void>> => implementation.close()
 });

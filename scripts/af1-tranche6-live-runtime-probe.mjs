@@ -40,7 +40,8 @@ for (const forbidden of ["DirectoryIO", "WalIO", "indexDiskBytes", "openDurableE
   assert.equal(rootDeclarations.includes(forbidden), false, `package-root declarations must not mention ${forbidden}`);
 }
 for (const required of ["openDurableEtherMemories", "createMutationId", "DurableEtherMemoriesOptions",
-  "DurableRuntimeState", "DurableEtherMemories", "DurableRecoveryReceipt", "DurableRotationSummary"]) {
+  "DurableRuntimeState", "DurableEtherMemories", "DurableRecoveryReceipt", "DurableRotationSummary",
+  "DurableGcSummary", "DurableMaintenanceReceipt"]) {
   assert.equal(rootDeclarations.includes(required), true, `package-root declarations must declare ${required}`);
 }
 
@@ -71,7 +72,7 @@ try {
   assert.equal(Object.getPrototypeOf(runtime).constructor.open, undefined);
   const approvedNames = ["state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
     "getSystemState", "exportData", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
-    "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "collectGarbage", "recover", "close"].sort();
+    "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "collectGarbage", "runMaintenance", "recover", "close"].sort();
   assert.deepEqual(Object.getOwnPropertyNames(runtime).sort(), approvedNames);
   assert.deepEqual(Reflect.ownKeys(runtime).sort(), approvedNames);
   assert.equal(value(runtime.exportData()).memoryNotes.length, 0);
