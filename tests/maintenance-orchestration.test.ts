@@ -511,4 +511,53 @@ describe("Tranche 10 maintenance orchestration", { timeout: 300_000 }, () => {
     expect(retried.content).toBe("crossing the envelope");
     value(await runtime.close());
   });
+
+  it("cannot make a frame larger than an empty tiny envelope admissible", async () => {
+    const s = await setup();
+    const runtime = await openRuntime(s, { maxActiveWalBytes: 1 });
+    const before = snapshotBytes(runtime);
+    const tip = tipOf(runtime);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(value(await runtime.runMaintenance()).performed).toEqual([]);
+      const rejected = await note(runtime, "larger than the entire envelope", "tiny-envelope-1");
+      expect(failureDetails(rejected)).toMatchObject({ reason: "resource-limit", phase: "precommit-validation" });
+      expect(snapshotBytes(runtime)).toEqual(before);
+      expect(tipOf(runtime)).toEqual(tip);
+      expect(await walBytes(s.directory)).toBe(0);
+    }
+    value(await runtime.close());
+  });
+
+  it("a no-op acquires no writer authority and does not break a foreign lock", async () => {
+    const s = await setup();
+    const runtime = await openRuntime(s);
+    await fs.writeFile(join(s.directory, "writer.lock"), "foreign authority");
+    expect(value(await runtime.runMaintenance()).performed).toEqual([]);
+    expect(await fs.readFile(join(s.directory, "writer.lock"), "utf8")).toBe("foreign authority");
+    value(await runtime.close());
+  });
+
+  it("stale live state fails rotation closed without starting GC, then recovers explicitly", async () => {
+    const s = await setup();
+    const gcPhases: string[] = [];
+    const runtime = await openRuntime(s, { maxActiveWalBytes: 512 * 1024, gcPhases });
+    const other = await openRuntime(s);
+    value(await note(other, "another runtime committed this", "other-runtime-1"));
+    const outcome = await runtime.runMaintenance();
+    // Frozen T7 detects the mismatch while scanning the active WAL, before
+    // activation; this path reports RECOVERY_REQUIRED, not mutation staleness.
+    expect(failure(outcome).code).toBe("RECOVERY_REQUIRED");
+    expect(failure(outcome).message).toContain("does not terminate at the captured committed tip");
+    expect(failureDetails(outcome).maintenanceStage).toBe("rotation");
+    expect(runtime.state).toBe("recovery-required");
+    expect(gcPhases).toEqual([]);
+    expect(failure(await runtime.runMaintenance()).code).toBe("RECOVERY_REQUIRED");
+    expect(gcPhases).toEqual([]);
+    value(await other.close());
+    value(await runtime.recover());
+    expect(value(await runtime.runMaintenance()).performed).toEqual(["rotation", "garbage"]);
+    expect(gcPhases.length).toBeGreaterThan(0);
+    value(await runtime.close());
+    expect(failure(await runtime.runMaintenance()).code).toBe("CLOSED");
+  });
 });

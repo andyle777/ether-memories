@@ -13,14 +13,36 @@ import { nodeWalIO } from "../dist/persistence/walIO.js";
 const value = r => { assert.equal(r.ok, true, JSON.stringify(r)); return r.value; };
 const failureOf = r => { assert.equal(r.ok, false, JSON.stringify(r)); return r.error; };
 const simulate = process.argv.includes("--simulate-directory-barriers");
+const tailOnly = process.argv.includes("--tail-only");
 if (process.platform === "win32" && !simulate) {
   throw new Error("Native Windows directory durability is unavailable; explicitly select --simulate-directory-barriers for protocol testing.");
 }
 const io = simulate ? { ...nodeDirectoryIO, syncDirectory: async () => {},
   activateFile: async (a, b) => { await fs.rename(a, b); return "atomic"; } } : nodeDirectoryIO;
-const files = nodeWalIO;
+// Active-resource counts do not include idle fs.FileHandles. Track the actual
+// WAL/scratch handles instead, releasing ownership only after successful close.
+const handles = new Set();
+let openedHandles = 0;
+let closedHandles = 0;
+let peakHandles = 0;
+const files = { ...nodeWalIO, open: async (path, create) => {
+  const handle = await nodeWalIO.open(path, create);
+  const token = { path };
+  handles.add(token);
+  openedHandles++;
+  peakHandles = Math.max(peakHandles, handles.size);
+  return { ...handle, close: async () => {
+    await handle.close();
+    if (handles.delete(token)) closedHandles++;
+  } };
+} };
+const assertHandlesClosed = () => assert.equal(handles.size, 0,
+  `unclosed WAL/scratch handles: ${JSON.stringify([...handles])}`);
 
 const snapshotOf = runtime => value(encodeSnapshotPayload(value(runtime.exportData())));
+// Compare persisted JSON values: undefined optional properties are not bytes
+// in the snapshot, while timestamps/IDs and all defined fields remain exact.
+const persistedView = object => JSON.parse(JSON.stringify(object));
 let checks = 0;
 const check = (label, condition) => { assert.equal(condition, true, label); checks++; console.log(`PASS ${label}`); };
 const diagnostic = (label, measure) => console.log(`DIAG ${label} ${typeof measure === "number" ? Math.round(measure) : measure}`);
@@ -31,6 +53,13 @@ const ENVELOPE = 256 * 1024; // configured instance envelope: maintenance fires 
 let parent;
 try {
   parent = await fs.mkdtemp(join(tmpdir(), "ether-t10-probe-"));
+  const idlePath = join(parent, "idle-handle-control");
+  const idle = await files.open(idlePath, true);
+  assert.throws(assertHandlesClosed, /unclosed WAL\/scratch handles/);
+  await idle.close();
+  await fs.unlink(idlePath);
+  assertHandlesClosed();
+  check("descriptor guard detects a real idle file handle and clears only after close", true);
   const directory = join(parent, "store");
   const userId = "t10-probe-user";
   const open = () => openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" }, { io, files, maxActiveWalBytes: ENVELOPE });
@@ -39,7 +68,13 @@ try {
   // is non-empty for the first maintenance decision.
   let runtime = value(await openDurableEtherMemoriesInternal({ userId, directory }, { io, files, maxActiveWalBytes: ENVELOPE }));
   value(await runtime.addMemory({ content: "t10 probe seed note", tags: ["t10"], status: "active" }, "t10-seed-1"));
+  const seedNotes = persistedView(value(runtime.exportData()).memoryNotes);
+  const seedTip = value(runtime.tip);
+  if (tailOnly) value(await runtime.runMaintenance());
+  let lastLiveSnapshot = snapshotOf(runtime);
+  let lastLiveTip = value(runtime.tip);
   value(await runtime.close());
+  assertHandlesClosed();
 
   // Soak: 10,000+ durable mutations (interleaved add/delete pairs, so the live
   // store stays bounded under the frozen per-mutation precommit cost) with
@@ -50,10 +85,9 @@ try {
   let noOps = 0;
   let coldRestarts = 0;
   let committed = 0;
-  const handleBaseline = process.getActiveResourcesInfo().length;
   let peakRss = 0;
   let peakHeap = 0;
-  for (let batch = 0; batch < MUTATIONS; batch += 250) {
+  for (let batch = 0; !tailOnly && batch < MUTATIONS; batch += 250) {
     runtime = value(await open());
     for (let i = 0; i < 250 && batch + i < MUTATIONS; i += 2) {
       const n = batch + i;
@@ -98,33 +132,43 @@ try {
     const memory = process.memoryUsage();
     peakRss = Math.max(peakRss, memory.rss);
     peakHeap = Math.max(peakHeap, memory.heapUsed);
+    assert.deepEqual(persistedView(value(runtime.exportData()).memoryNotes), seedNotes);
+    lastLiveSnapshot = snapshotOf(runtime);
+    lastLiveTip = value(runtime.tip);
     value(await runtime.close());
+    assertHandlesClosed();
     coldRestarts++;
+    diagnostic("committed soak mutations", committed);
   }
+  if (!tailOnly) {
   check(`soak committed ${committed} durable mutations across ${MUTATIONS} attempts`, committed === MUTATIONS);
   check(`maintenance performed ${rotations} rotation+GC cycles and ${noOps} explicit no-ops`, rotations > 5 && noOps >= 0);
   check("cold restart after every batch (recovery reopen) stayed green", coldRestarts === MUTATIONS / 250);
   check("each pair advanced the committed tip by exactly two transactions (no duplicate effect)", committed === MUTATIONS);
   diagnostic("peak rss bytes", peakRss);
   diagnostic("peak heap bytes", peakHeap);
-  const handleAfter = process.getActiveResourcesInfo().length;
-  check("descriptor/handle count stable across repeated maintenance cycles", handleAfter <= handleBaseline + 2);
-  diagnostic("active handles", handleAfter);
+  check("no WAL/scratch handles survive any completed soak batch", handles.size === 0 && openedHandles === closedHandles);
+  diagnostic("active resources (not a descriptor count)", process.getActiveResourcesInfo().length);
+  assert.equal(lastLiveTip.epochId, seedTip.epochId);
+  assert.equal(BigInt(lastLiveTip.txId), BigInt(seedTip.txId) + BigInt(MUTATIONS));
+  }
 
   // Deterministic final state: reopen via authoritative recovery and compare
   // the canonical snapshot payload byte-for-byte with the live generation.
   runtime = value(await open());
   const finalSnapshot = snapshotOf(runtime);
   const finalTip = value(runtime.tip);
+  check("first cold recovery matches the last live generation byte-for-byte", finalSnapshot.equals(lastLiveSnapshot));
+  assert.deepEqual(finalTip, lastLiveTip);
   const finalNoOp = value(await runtime.runMaintenance());
   check("final maintenance after the soak is a no-op (empty active WAL)", finalNoOp.performed.length === 0 && finalNoOp.plan.activeWalBytes === 0);
   value(await runtime.close());
   const reopened = value(await open());
   check("cold-recovered final snapshot is byte-identical", snapshotOf(reopened).equals(finalSnapshot));
-  check("cold-recovered final tip is identical", value(reopened.tip).txId === finalTip.txId);
+  check("cold-recovered full tip is identical", JSON.stringify(value(reopened.tip)) === JSON.stringify(finalTip));
   const exported = value(reopened.exportData());
-  check("no committed-state loss: every soaked pair is durably reconciled (all adds deleted)",
-    exported.memoryNotes.filter(n => n.content.startsWith("t10 soak note ")).length === 0);
+  assert.deepEqual(persistedView(exported.memoryNotes), seedNotes);
+  check("no committed-state loss: the acknowledged seed is the exact final note collection", true);
   value(await reopened.close());
 
   // Writer contention: a foreign writer artifact forces WRITER_BUSY through
@@ -145,13 +189,15 @@ try {
   // Crash before P6: an armed rotation-scratch write failure leaves the old
   // lineage fully authoritative; a retry after the transient fault succeeds.
   let armed = true;
+  let preP6Hits = 0;
   let faultingRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" },
     { io, files: { ...files, open: async (path, create) => {
-      if (armed && path.includes("rotation-candidate")) throw new Error("simulated crash before P6");
+      if (armed && path.includes("rotation-candidate")) { preP6Hits++; throw new Error("simulated crash before P6"); }
       return files.open(path, create);
     } }, maxActiveWalBytes: ENVELOPE }));
   value(await faultingRuntime.addMemory({ content: "t10 pre-p6 note", tags: ["t10"], status: "active" }, "t10-pre-p6-1"));
   const preP6 = failureOf(await faultingRuntime.runMaintenance());
+  assert.equal(preP6Hits, 1);
   assert.equal(preP6.details?.maintenanceStage, "rotation");
   check("crash/fault before P6 stops maintenance before any destructive step", preP6.details?.maintenanceStage === "rotation");
   // The frozen rotate() routing for this fault class requires explicit
@@ -166,13 +212,15 @@ try {
   // Crash after P6 (post-activation cleanup failure): rotation committed; the
   // completed commit is reported, never rolled back, and GC never starts.
   armed = true;
+  let postP6Hits = 0;
   faultingRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" },
     { io: { ...io, removeOwnedFile: async path => {
-      if (armed && path.includes("wal-")) { armed = false; throw new Error("simulated post-P6 crash"); }
+      if (armed && path.includes("wal-")) { postP6Hits++; armed = false; throw new Error("simulated post-P6 crash"); }
       return io.removeOwnedFile(path);
     } }, files, maxActiveWalBytes: ENVELOPE }));
   value(await faultingRuntime.addMemory({ content: "t10 post-p6 note", tags: ["t10"], status: "active" }, "t10-post-p6-1"));
   const postP6 = failureOf(await faultingRuntime.runMaintenance());
+  assert.equal(postP6Hits, 1);
   assert.equal(postP6.details?.rotationCommitted, true);
   assert.equal(postP6.details?.maintenanceStage, "rotation");
   check("post-P6 failure reports the committed rotation and stops before GC", postP6.details?.rotationCommitted === true);
@@ -187,14 +235,16 @@ try {
   // Crash between successful rotation and GC: the GC fault exposes the
   // completed rotation; a retry completes the deferred collection.
   let failMark = false;
+  let markHits = 0;
   faultingRuntime = value(await openDurableEtherMemoriesInternal({ userId, directory, openMode: "existing" },
     { io, files: { ...files, open: async (path, create) => {
-      if (failMark && create && path.includes("gc-mark")) throw new Error("simulated GC crash");
+      if (failMark && create && path.includes("gc-mark")) { markHits++; throw new Error("simulated GC crash"); }
       return files.open(path, create);
     } }, maxActiveWalBytes: ENVELOPE }));
   value(await faultingRuntime.addMemory({ content: "t10 between object note ".repeat(4000), tags: ["t10"], status: "active" }, "t10-between-1"));
   failMark = true;
   const between = failureOf(await faultingRuntime.runMaintenance());
+  assert.equal(markHits, 1);
   assert.equal(between.details?.maintenanceStage, "garbage");
   assert.equal(between.details?.gcDisposition, "maintenance");
   check("a GC-phase fault after successful rotation exposes completedRotation", between.details?.completedRotation !== undefined);
@@ -209,53 +259,114 @@ try {
     deferredGc.scannedObjects >= 0);
   value(await faultingRuntime.close());
 
-  // Hard kill during a mutation (separate process): recovery reopens the
-  // store, and the same logical mutation identity reconciles exactly once.
+  // Kill at a deterministic boundary: the original mutation's WAL bytes have
+  // synced and the WAL directory barrier completed, but its ACK cannot return.
+  // A timeout is execution allowance only, never the trigger for the kill.
+  runtime = value(await open());
+  const beforeKillSnapshot = value(runtime.exportData());
+  const beforeKillTip = value(runtime.tip);
+  value(await runtime.close());
+  assertHandlesClosed();
   const distRoot = fileURLToPath(new URL("../dist/", import.meta.url));
   const childScript = join(parent, "kill-target.mjs");
-  const ioModule = join(parent, "kill-io.mjs");
-  await fs.writeFile(ioModule, `
-import * as fs from "node:fs/promises";
-import { nodeDirectoryIO } from ${JSON.stringify(pathToFileURL(join(distRoot, "persistence/directoryIO.js")).href)};
-export const io = { ...nodeDirectoryIO, syncDirectory: async () => {},
-  activateFile: async (a, b) => { await fs.rename(a, b); return "atomic"; } };
-`);
   await fs.writeFile(childScript, `
 import * as fs from "node:fs/promises";
+import { join } from "node:path";
+import { nodeDirectoryIO } from ${JSON.stringify(pathToFileURL(join(distRoot, "persistence/directoryIO.js")).href)};
+import { nodeWalIO } from ${JSON.stringify(pathToFileURL(join(distRoot, "persistence/walIO.js")).href)};
 import { openDurableEtherMemoriesInternal } from ${JSON.stringify(pathToFileURL(join(distRoot, "core/DurableEtherMemories.js")).href)};
-import { io } from ${JSON.stringify(pathToFileURL(ioModule).href)};
-const opened = await openDurableEtherMemoriesInternal({ userId: ${JSON.stringify(userId)}, directory: ${JSON.stringify(directory)}, openMode: "existing" }, { io });
-if (!opened.ok) { console.error("child open failed"); process.exit(1); }
-const runtime = opened.value;
-for (let i = 0; ; i++) {
-  await runtime.addMemory({ content: "t10 kill note " + i, tags: ["t10"], status: "active" }, "t10-kill-" + i);
-}`);
-  const child = spawn(process.execPath, [childScript], { stdio: "ignore" });
-  await new Promise(resolve => setTimeout(resolve, 1200));
-  const killed = child.kill("SIGKILL");
-  await new Promise(resolve => { child.on("exit", resolve); });
-  check("hard kill terminated the child process", killed === true);
-  // The child may have died during open recovery or during mutations. If it
-  // died while holding writer authority, the stale writer.lock remains and is
-  // NEVER broken automatically: explicit operator handling removes it.
-  const staleLock = join(directory, "writer.lock");
-  const lockPresent = await fs.stat(staleLock).then(() => true, () => false);
-  if (lockPresent) {
-    check("hard kill left a stale writer lock that is never auto-broken (explicit operator handling)", true);
-    await fs.unlink(staleLock);
+const directory = ${JSON.stringify(directory)};
+const baseIO = ${simulate} ? { ...nodeDirectoryIO, syncDirectory: async () => {},
+  activateFile: async (a, b) => { await fs.rename(a, b); return "atomic"; } } : nodeDirectoryIO;
+let armed = false;
+let walSynced = false;
+const files = { ...nodeWalIO, open: async (path, create) => {
+  const handle = await nodeWalIO.open(path, create);
+  let wrote = false;
+  return { ...handle, write: async (bytes, position) => {
+    const count = await handle.write(bytes, position);
+    if (armed && count > 0) wrote = true;
+    return count;
+  }, sync: async () => {
+    await handle.sync();
+    if (armed && wrote) walSynced = true;
+  } };
+} };
+const io = { ...baseIO, syncDirectory: async path => {
+  await baseIO.syncDirectory(path);
+  if (armed && walSynced && path === join(directory, "wal")) {
+    armed = false;
+    process.channel.ref();
+    process.send({ phase: "committed-before-ack", mutationId: "t10-kill-final" });
+    await new Promise(() => {});
   }
-  // Either way the store must recover coherently with zero committed-state loss.
+} };
+const opened = await openDurableEtherMemoriesInternal({ userId: ${JSON.stringify(userId)}, directory, openMode: "existing" }, { io, files });
+if (!opened.ok) throw new Error(JSON.stringify(opened.error));
+const runtime = opened.value;
+armed = true;
+const result = await runtime.addMemory({ content: "t10 kill final note", tags: ["t10"], status: "active" }, "t10-kill-final");
+throw new Error("ACK escaped the armed barrier: " + JSON.stringify(result));
+`);
+  const child = spawn(process.execPath, [childScript], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
+  let timer;
+  let exited = false;
+  const childExit = new Promise((resolve, reject) => {
+    child.once("exit", (code, signal) => { exited = true; resolve({ code, signal }); });
+    child.once("error", reject);
+  });
+  try {
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        child.once("message", message => {
+          try {
+            assert.deepEqual(message, { phase: "committed-before-ack", mutationId: "t10-kill-final" });
+            resolve();
+          } catch (error) { reject(error); }
+        });
+        timer = setTimeout(() => reject(new Error("child did not reach the WAL-sync/before-ACK boundary")), 120_000);
+      }),
+      childExit.then(exit => { throw new Error(`child exited before kill boundary: ${JSON.stringify(exit)}`); }),
+    ]);
+    check("child reached the original mutation's synced-WAL/before-ACK boundary", true);
+    assert.equal(child.kill("SIGKILL"), true);
+    await childExit;
+    check("hard kill terminated the child before its acknowledgment", true);
+  } finally {
+    clearTimeout(timer);
+    if (!exited) { child.kill("SIGKILL"); await childExit; }
+  }
+  // The dead writer's authority remains fail-closed until explicit operator
+  // handling. The runtime must not silently break it on recovery.
+  const staleLock = join(directory, "writer.lock");
+  await fs.stat(staleLock);
+  const lockBytes = await fs.readFile(staleLock);
+  assert.equal(failureOf(await open()).code, "WRITER_BUSY");
+  assert.deepEqual(await fs.readFile(staleLock), lockBytes);
+  check("hard kill leaves writer authority intact; recovery does not auto-break it", true);
+  await fs.unlink(staleLock);
   const recovered = value(await open());
-  // Same-identity retry: exactly one committed note with this content.
-  value(await recovered.addMemory({ content: "t10 kill final note", tags: ["t10"], status: "active" }, "t10-kill-final"));
-  const killNotes = value(recovered.exportData()).memoryNotes.filter(n => n.content === "t10 kill final note");
-  check("a same-identity retry after a hard kill commits exactly once", killNotes.length === 1);
-  const survivorCount = value(recovered.exportData()).memoryNotes.filter(n => n.content.startsWith("t10 kill note ")).length;
-  diagnostic("committed kill-loop notes recovered", survivorCount);
+  assert.equal(value(recovered.exportData()).memoryNotes.filter(n => n.content === "t10 kill final note").length, 1,
+    "the original child mutation must exist before a same-identity retry");
+  const killSnapshot = snapshotOf(recovered);
+  const killTip = value(recovered.tip);
+  assert.equal(killTip.epochId, beforeKillTip.epochId);
+  assert.equal(BigInt(killTip.txId), BigInt(beforeKillTip.txId) + 1n);
+  assert.deepEqual(persistedView(value(recovered.exportData()).memoryNotes.filter(n => n.content !== "t10 kill final note")), persistedView(beforeKillSnapshot.memoryNotes));
+  const originalNote = value(recovered.queryMemories("t10 kill final note")).find(n => n.content === "t10 kill final note");
+  assert.ok(originalNote);
+  for (let retry = 0; retry < 2; retry++) {
+    const result = value(await recovered.addMemory({ content: "t10 kill final note", tags: ["t10"], status: "active" }, "t10-kill-final"));
+    assert.deepEqual(persistedView(result), persistedView(originalNote));
+    assert.deepEqual(value(recovered.tip), killTip);
+    assert.deepEqual(snapshotOf(recovered), killSnapshot);
+  }
+  check("original-ID retries reconstruct the original generated note without a new transaction or state loss", true);
   value(await recovered.close());
   const killReopened = value(await open());
   check("hard-killed store recovers cleanly and the retry survives another cold restart",
-    value(killReopened.exportData()).memoryNotes.filter(n => n.content === "t10 kill final note").length === 1);
+    snapshotOf(killReopened).equals(killSnapshot));
+  assert.deepEqual(value(killReopened.tip), killTip);
   value(await killReopened.close());
 
   // Facade: exactly 20 members; runMaintenance is a zero-argument operation.
@@ -265,8 +376,11 @@ for (let i = 0; ; i++) {
   check("runMaintenance is a zero-argument facade operation", facadeRuntime.runMaintenance.length === 0);
   check("maintenanceStatus is not part of the facade", !("maintenanceStatus" in facadeRuntime));
   value(await facadeRuntime.close());
+  assertHandlesClosed();
+  check("all settled fault/recovery paths release tracked WAL/scratch handles", openedHandles === closedHandles);
+  diagnostic("tracked handles opened/closed/peak", `${openedHandles}/${closedHandles}/${peakHandles}`);
 
-  console.log(`\nAF1 TRANCHE 10 MAINTENANCE PROBE: ${checks}/${checks} checks passed`);
+  console.log(`\nAF1 TRANCHE 10 ${tailOnly ? "TAIL ONLY (NO SOAK)" : "MAINTENANCE PROBE"}: ${checks}/${checks} checks passed`);
 } finally {
   if (parent) await fs.rm(parent, { recursive: true, force: true });
 }
