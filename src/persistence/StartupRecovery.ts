@@ -18,6 +18,8 @@ import { productionRegistry, reduceProduction, resolveOperation, validateCandida
 import { PayloadObjects } from "./payloadObjects.js";
 import { encodeEtherData } from "./etherData.js";
 import { DiskBackedMutationIndex, DEFAULT_MAX_INDEX_BYTES } from "./recoveryMutationIndex.js";
+import { openAuthoritativeReceiptLedger } from "./receiptLedger.js";
+import { MutationHistoryVerifier } from "./mutationHistoryVerification.js";
 import type { JsonObject } from "./walJson.js";
 
 export type RecoveryPhase = "checkpoint" | "transaction" | "tail-repair" | "indexes" | "before-publication" | "after-publication";
@@ -86,6 +88,23 @@ export class StartupRecovery {
     // Exact disk-backed mutation index: duplicate detection across the entire
     // WAL lineage with bounded RAM; disk usage scales with active WAL history.
     const mutationIndex = new DiskBackedMutationIndex(authority.directory, this.io, this.files, this.indexDiskBytes);
+    // T7 authoritative cumulative receipt history for this lineage: absent for
+    // a non-rotated checkpoint, REQUIRED (and fully verified) after rotation.
+    // Receipt history is never replayed into state; it exists only for
+    // mutation identity/reconciliation, and every payload object it references
+    // is validated as a permanent reachability root (missing/corrupt = fail closed).
+    const receiptLedger = required(await openAuthoritativeReceiptLedger(authority.directory,
+      head.storeId, head.epochId, head.checkpoint.checkpointId, this.files));
+    if (receiptLedger) {
+      required(await receiptLedger.verify(async entry => {
+        for (const operation of entry.operations) {
+          required(await resolveOperation(operation, authority, objects));
+        }
+      }));
+    }
+    // Source-aware identity verification across the two logical namespaces
+    // (cumulative receipts + active WAL), bounded independently of history size.
+    const history = new MutationHistoryVerifier(authority.directory, this.io, this.files, this.indexDiskBytes);
     
     try {
     for (let pass = 0; pass < 2; pass++) {
@@ -111,6 +130,8 @@ export class StartupRecovery {
               // index; verifyExact() compares the entire WAL lineage below.
               required(await mutationIndex.record(tx.mutation.mutationId as MutationId,
                 { digest: tx.mutation.digest, txId: tx.identity.txId }));
+              required(await history.recordWal({ mutationId: tx.mutation.mutationId as MutationId,
+                intentDigest: tx.mutation.digest, txId: tx.identity.txId }));
               for (const operation of tx.operations) {
                 const semantic = required(await resolveOperation(operation, authority, objects));
                 candidate = required(reduceProduction(candidate, operation.type, semantic));
@@ -127,6 +148,7 @@ export class StartupRecovery {
           // Exact duplicate verification across the entire active WAL lineage
           // must complete before tail repair or publication.
           required(await mutationIndex.verifyExact());
+          required(await history.verify(receiptLedger));
           required(await scan.checkSource());
           if (cursor.tail === "incomplete") {
             if (pass !== 0 || !file.truncate) {
@@ -162,14 +184,15 @@ export class StartupRecovery {
             tip = cursor.tip;
           }
         }
-      } finally { 
-        if (file) await file.close(); 
-        if (!repaired) await mutationIndex.reset();
+      } finally {
+        if (file) await file.close();
+        if (!repaired) { await mutationIndex.reset(); await history.cleanup(); }
       }
       if (repaired) {
         // Pass 1 rescans the repaired WAL from its checkpoint; index records
         // from pass 0 must not carry over into the rescan.
         required(await mutationIndex.reset());
+        await history.cleanup();
         continue;
       }
       break;
@@ -190,6 +213,7 @@ export class StartupRecovery {
     } catch (error) {
       // Clean up mutation index on any error
       await mutationIndex.reset();
+      await history.cleanup();
       throw error;
     }
   }

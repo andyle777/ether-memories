@@ -13,9 +13,10 @@ import { FsWalStore, type CommitReceipt } from "./FsWalStore.js";
 import { withRecoveryAuthority, required, type RecoveryAuthority } from "./recoveryAuthority.js";
 import { nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 import { nodeWalIO, type WalFileHandle, type WalIO } from "./walIO.js";
-import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint } from "./codecs.js";
+import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint, WAL_FORMAT, WAL_VERSION } from "./codecs.js";
 import { WalFileScan } from "./walFileScan.js";
 import { validateStateRoot, type StateRoot } from "./stateRoot.js";
+import { MAX_ACTIVE_WAL_BYTES, openAuthoritativeReceiptLedger } from "./receiptLedger.js";
 import { snapshotData, hydrateSnapshot } from "./snapshotPayload.js";
 import { parseTransactionSequenceId } from "../utils/durablePersistence.js";
 
@@ -31,6 +32,38 @@ export interface MutationOutcome {
   readonly effects: readonly SemanticOperation[];
 }
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * The single transport planner for a prepared production operation set: the
+ * exact inline-vs-references decision the commit path performs. The precommit
+ * active-WAL envelope uses the same plan, so it measures the EXACT frame
+ * bytes that will be appended - never a different transport of the same
+ * mutation. Inline is chosen per transaction only when every envelope fits the
+ * frozen per-op and aggregate inline bounds.
+ */
+function planTransport(captured: readonly SemanticOperation[]): Result<{
+  readonly inline: readonly WalOperation[]; readonly references: readonly WalOperation[]; readonly inlinePossible: boolean
+}> {
+  const references: WalOperation[] = [], inline: WalOperation[] = [];
+  let inlinePossible = true, inlineBytes = 0;
+  for (const op of captured) {
+    if (op.version !== "1") return err("UNSUPPORTED_PERSISTENCE_FORMAT", "Unsupported production operation version.");
+    const valid = validateSemantic(op.type, op.payload);
+    if (!valid.ok) return valid;
+    const encoded = encodeEtherData(op.payload);
+    if (!encoded.ok) return encoded;
+    references.push({ type: op.type, version: op.version, payload: referenceFor(encoded.value) });
+    if (inlinePossible) {
+      const envelope = { encoding: ETHER_DATA_PROFILE, data: Buffer.from(encoded.value).toString("utf8") };
+      const size = canonicalJson(envelope, { bytes: WAL_LIMITS.payloadBytes, depth: WAL_LIMITS.metadataDepth, nodes: WAL_LIMITS.jsonNodes });
+      if (!size.ok || (inlineBytes += size.value.byteLength) > WAL_LIMITS.aggregatePayloadBytes) {
+        inlinePossible = false;
+        inline.length = 0;
+      } else inline.push({ type: op.type, version: op.version, payload: envelope });
+    }
+  }
+  return ok({ inline, references, inlinePossible });
+}
 export function validateSemantic(type: string, payload: unknown): Result<void> {
   if (!PRODUCTION_OPERATIONS.includes(type as ProductionOperationType)) return err("UNSUPPORTED_PERSISTENCE_FORMAT", "Unknown production operation.");
   if (!record(payload)) return err("INVALID_INPUT", "Semantic operation body must be an object.");
@@ -131,7 +164,7 @@ export class ProductionWalStore {
   private readonly objects: PayloadObjects;
   private readonly files: WalIO;
   constructor(private readonly directory: string, private readonly io: DirectoryIO = nodeDirectoryIO,
-    files: WalIO = nodeWalIO) {
+    files: WalIO = nodeWalIO, private readonly maxActiveWalBytes: number = MAX_ACTIVE_WAL_BYTES) {
     this.wal = new FsWalStore({ directory, registry: productionRegistry }, io, files);
     this.objects = new PayloadObjects(io, files);
     this.files = files;
@@ -208,6 +241,13 @@ export class ProductionWalStore {
       if (!effects.ok) return effects;
       return ok({ receipt: found.value, effects: effects.value });
     }
+    // Tranche 7: the logical mutation-history namespace is active WAL union
+    // historical cumulative receipts. An identity absent from the active WAL
+    // may still be committed in reclaimed history: reconcile there before
+    // preparing, with the same intent-digest semantics.
+    const historical = await this.lookupHistoricalMutation(mutationId, intent.value);
+    if (!historical.ok) return historical;
+    if (historical.value) return ok(historical.value);
     const prepared = precommit(prepareCoreMutation(baseSnapshot, stableCommand));
     if (!prepared.ok) return prepared;
     // RED 1 precommit complete-post-state validation: no transaction may
@@ -219,6 +259,15 @@ export class ProductionWalStore {
     // sufficient; nothing has been written at this point.
     const prospective = precommit(validateStateRoot(prepared.value.after));
     if (!prospective.ok) return prospective;
+    // Tranche 7 active-WAL envelope (derived constant; see receiptLedger.ts):
+    // rotation is explicit, so the commit path guarantees growability. A
+    // mutation whose exact appended frame would push the active segment past
+    // the envelope fails PRECOMMIT - before payload-object durability, WAL
+    // append, tip advancement or generation publication - and requires an
+    // explicit rotate(). Any accepted segment can subsequently restart AND
+    // rotate under default budgets.
+    const envelope = await this.assertActiveWalEnvelope(base, mutationId, prepared.value.operations);
+    if (!envelope.ok) return envelope;
     const committed = await this.commitOperations(base, mutationId, prepared.value.operations, intent.value);
     if (!committed.ok) {
       // RED 3 race-boundary reconciliation: the pre-preparation lookup can
@@ -243,6 +292,124 @@ export class ProductionWalStore {
       return committed;
     }
     return ok({ receipt: committed.value, after: prepared.value.after, root: prospective.value, effects: prepared.value.operations });
+  }
+
+  /**
+   * Internal active-WAL envelope observation (Tranche 10). The exact HEAD ->
+   * selected `wal-<checkpointDigest>.bin` -> stamp-size read the precommit
+   * envelope check performs, together with the CONFIGURED instance envelope
+   * (`this.maxActiveWalBytes`, never an independent constant) and the HEAD
+   * store identity the precommit exact-frame encoding also needs. Read-only,
+   * unlocked, never persisted; the observation itself grants no writer or
+   * destructive authority (races remain caught by each operation's own
+   * authority verification, exactly as in the precommit path).
+   */
+  async observeActiveWalEnvelope(): Promise<Result<{ activeWalBytes: number; envelopeBytes: number; storeId: string }>> {
+    let activeWalBytes = 0;
+    let storeId = "";
+    try {
+      const headBytes = Buffer.from(await this.io.readBounded(join(this.directory, "HEAD"), PERSISTENCE_LIMITS.headBytes));
+      const head = decodeStoreHead(headBytes);
+      if (!head.ok) return head;
+      storeId = head.value.storeId;
+      const walPath = join(this.directory, "wal", `wal-${head.value.checkpoint.digest}.bin`);
+      if (await this.io.kind(walPath) === "file") {
+        activeWalBytes = (await this.files.stamp(walPath)).size;
+      }
+    } catch {
+      return err("RECOVERY_REQUIRED", "Active WAL envelope check could not read the store.");
+    }
+    return ok({ activeWalBytes, envelopeBytes: this.maxActiveWalBytes, storeId });
+  }
+
+  /**
+   * Precommit active-WAL envelope check (Tranche 7). Reads HEAD and the WAL
+   * stamp conservatively (unlocked: any concurrent-authority race is caught
+   * by the commit's own authority verification) and computes the EXACT
+   * prospective frame bytes through the frozen encoder and the same transport
+   * plan the commit performs, encoded with the store's real identity fields.
+   * The mutation digest placeholder is byte-length-identical to the real one.
+   */
+  private async assertActiveWalEnvelope(base: CommittedTip, mutationId: MutationId,
+    operations: readonly SemanticOperation[]): Promise<Result<undefined>> {
+    // Any positive safe integer is a legal envelope: a small envelope simply
+    // rejects crossing frames precommit (rotation remains available). The
+    // default (MAX_ACTIVE_WAL_BYTES) guarantees restart/rotatability under the
+    // frozen working budget; the derivation lives in receiptLedger.ts.
+    if (!Number.isSafeInteger(this.maxActiveWalBytes) || this.maxActiveWalBytes <= 0) {
+      return err("INVALID_INPUT", "Invalid active WAL envelope.");
+    }
+    const observation = await this.observeActiveWalEnvelope();
+    if (!observation.ok) return observation;
+    const segmentBytes = observation.value.activeWalBytes;
+    const storeId = observation.value.storeId;
+    const plan = planTransport(operations);
+    if (!plan.ok) return plan;
+    const frameInput = (transport: readonly WalOperation[]) => ({
+      storeId, format: { format: WAL_FORMAT, version: WAL_VERSION },
+      expectedBase: base, identity: { epochId: base.epochId, txId: (BigInt(base.txId) + 1n).toString() as CommittedTip["txId"] },
+      mutation: { mutationId, digest: "0".repeat(64) }, operations: transport, audit: null
+    });
+    // The commit chooses inline only when the complete frozen transaction
+    // fits; otherwise it appends the references transport.
+    let exact: ReturnType<typeof encodeWalFrame> | undefined;
+    if (plan.value.inlinePossible) {
+      const inlineFrame = encodeWalFrame(frameInput(plan.value.inline), productionRegistry);
+      if (inlineFrame.ok) exact = inlineFrame;
+    }
+    if (!exact) exact = encodeWalFrame(frameInput(plan.value.references), productionRegistry);
+    if (!exact.ok) return exact;
+    if (segmentBytes + exact.value.bytes.byteLength > this.maxActiveWalBytes) {
+      return err("RECOVERY_REQUIRED", "The active WAL envelope is exhausted; an explicit rotate() is required before further commits.",
+        { reason: "resource-limit", phase: "precommit-validation", activeWalBytes: segmentBytes, envelope: this.maxActiveWalBytes });
+    }
+    return ok(undefined);
+  }
+
+  /**
+   * Tranche 7 historical receipt lookup: reconcile a mutation identity
+   * against the authoritative cumulative receipt ledger (reclaimed history).
+   * The COMPLETE lookup - HEAD observation, required-ledger derivation,
+   * receipt lookup and effect resolution - runs under writer authority
+   * (Copilot AMBER Finding 3): HEAD and the receipt ledger are observed as
+   * one coherent authoritative lineage, and a concurrent rotation necessarily
+   * serializes entirely before or entirely after this lookup. A required
+   * ledger missing while this authority is held is genuine corruption; a
+   * ledger that vanished because another runtime rotated and reclaimed it is
+   * impossible inside this window. Same intent digest -> the original
+   * committed receipt with effects resolved from the receipt's exact
+   * committed operations (OBJECT_REFERENCEs resolve through the immutable
+   * payload-object machinery). Conflicting intent -> corruption. Absent ->
+   * undefined.
+   */
+  private async lookupHistoricalMutation(mutationId: MutationId, intentDigest: string): Promise<Result<MutationOutcome | undefined>> {
+    return withRecoveryAuthority(this.directory, this.io, async authority => {
+      const head = authority.head;
+      const ledger = await openAuthoritativeReceiptLedger(authority.directory, head.storeId, head.epochId,
+        head.checkpoint.checkpointId, this.files);
+      if (!ledger.ok) return ledger;
+      const reader = ledger.value;
+      if (!reader) return ok(undefined);
+      const found = await reader.lookup(mutationId);
+      if (!found.ok) return found;
+      if (!found.value) return ok(undefined);
+      const entry = found.value;
+      if (entry.intentDigest !== intentDigest) {
+        return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
+      }
+      const effects: SemanticOperation[] = [];
+      for (const operation of entry.operations) {
+        const semantic = required(await resolveOperation(operation, authority, this.objects));
+        effects.push({ type: operation.type as ProductionOperationType, version: "1", payload: semantic });
+      }
+      const receipt: CommitReceipt = {
+        status: "already-committed",
+        identity: { epochId: authority.head.epochId, txId: entry.txId as CommittedTip["txId"], digest: entry.transactionDigest as CommittedTip["digest"] },
+        mutation: { mutationId, digest: entry.intentDigest },
+        durability: "confirmed"
+      };
+      return ok({ receipt, effects } satisfies MutationOutcome);
+    });
   }
 
   /**
@@ -303,21 +470,11 @@ export class ProductionWalStore {
     if (!input.length || input.length > WAL_LIMITS.operations) return err("INVALID_INPUT", "Invalid production operation count.");
     const capturedBase = { ...base };
     const captured = input.map(op => ({ ...op }));
-    const references: WalOperation[] = [], inline: WalOperation[] = [];
-    let inlinePossible = true, inlineBytes = 0;
-    for (const op of captured) {
-      if (op.version !== "1") return err("UNSUPPORTED_PERSISTENCE_FORMAT", "Unsupported production operation version.");
-      const valid = validateSemantic(op.type, op.payload); if (!valid.ok) return valid;
-      const encoded = encodeEtherData(op.payload); if (!encoded.ok) return encoded;
-      references.push({ type: op.type, version: op.version, payload: referenceFor(encoded.value) });
-      if (inlinePossible) {
-        const envelope = { encoding: ETHER_DATA_PROFILE, data: Buffer.from(encoded.value).toString("utf8") };
-        const size = canonicalJson(envelope, { bytes: WAL_LIMITS.payloadBytes, depth: WAL_LIMITS.metadataDepth, nodes: WAL_LIMITS.jsonNodes });
-        if (!size.ok || (inlineBytes += size.value.byteLength) > WAL_LIMITS.aggregatePayloadBytes) {
-          inlinePossible = false; inline.length = 0;
-        } else inline.push({ type: op.type, version: op.version, payload: envelope });
-      }
-    }
+    // One transport planner (shared with the precommit envelope check) picks
+    // the exact inline-vs-references decision for this transaction.
+    const plan = planTransport(captured);
+    if (!plan.ok) return plan;
+    const { inline, references, inlinePossible } = plan.value;
     // This new production operation convention binds semantic bytes, not transport choice.
     const intent = encodeEtherData(references);
     if (!intent.ok) return intent;

@@ -24,6 +24,12 @@ it("does not publish internal persistence wire or layout operations at the packa
   }
   expect(publicApi.parseTransactionSequenceId("1").ok).toBe(true);
   expect(typeof publicApi.getDurableOperations).toBe("function");
+  // The Tranche 8 destructive collector is internal-only: the runtime facade
+  // is the single supported destructive path, and the package exports map
+  // blocks deep imports of internal modules from external consumers.
+  for (const name of ["collectDurableGarbage", "GcDigestSorter", "SealedRunReader", "deriveReclaimCandidates"]) {
+    expect(Object.hasOwn(publicApi, name), name).toBe(false);
+  }
 });
 
 it("does not publish snapshot preparation or any internal persistence helper at the package root", () => {

@@ -551,7 +551,7 @@ describe("durable runtime runtime-enforced encapsulation (final RED)", { timeout
     // The facade owns exactly the approved public surface - nothing else.
     const approved = ["state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
       "getSystemState", "exportData", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
-      "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "recover", "close"].sort();
+      "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "collectGarbage", "runMaintenance", "recover", "close"].sort();
     expect(Object.getOwnPropertyNames(runtime).sort()).toEqual(approved);
     expect(Object.keys(runtime).sort()).toEqual(approved);
     expect(Reflect.ownKeys(runtime).sort()).toEqual(approved);
