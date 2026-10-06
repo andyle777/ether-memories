@@ -37,6 +37,14 @@ describe("v0.6.0 release metadata consistency", () => {
     expect(pkg.version).toBe(LIBRARY_VERSION);
   });
 
+  it.each(["version", "packages[\"\"].version"])("pins package-lock %s to source and package metadata", field => {
+    const pkg = JSON.parse(read("../package.json"));
+    const lock = JSON.parse(read("../package-lock.json"));
+    const version = field === "version" ? lock.version : lock.packages?.[""]?.version;
+    expect(version).toBe(LIBRARY_VERSION);
+    expect(version).toBe(pkg.version);
+  });
+
   it("keeps the persisted schema versions independent of the release version", () => {
     expect(STORE_SCHEMA_VERSION).toBe("ether.memory_store.v0.3");
     expect(MEMORY_CONTEXT_SCHEMA_VERSION).toBe("ether.memory_context.v1");
