@@ -154,6 +154,15 @@ await ether.collectGarbage();  // explicit reclamation of orphaned payload objec
 await ether.close();
 ```
 
+## Memory inspection
+
+`core.explainMemory(noteId, { asOf })` reports stored evidence and direct graph
+relationships. `core.inspectMemoryHealth({ asOf })` reports bounded logical-state
+findings with explicit coverage and non-authoritative suggestions. The durable
+facade exposes the same two read-only methods. `asOf` is epoch milliseconds;
+omitting it captures the clock once. See [the inspection contract](docs/memory-inspection.md)
+for fixed bounds, evidence fields, and failure semantics.
+
 ## Scope fence
 
 Ether Memories is a standalone public memory infrastructure project. Agent orchestration, distributed coordination, personality systems, autonomous self-modification, private framework integrations, and unrelated experimental architectures are intentionally outside project scope.

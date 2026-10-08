@@ -2,6 +2,7 @@ import type { MemoryNote, MemoryStatus } from "../types/index.js";
 import { createId } from "../utils/ids.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { cloneValue } from "../utils/clone.js";
+import { registerInspectionNotes } from "./inspectionSources.js";
 
 export interface AddNoteInput {
   content: string;
@@ -25,6 +26,8 @@ export interface UpdateNoteInput extends Partial<AddNoteInput> {
 export class MemoryNotes {
   private readonly notes = new Map<string, MemoryNote>();
   private mutationRevision = 0;
+
+  constructor() { registerInspectionNotes(this, this.notes); }
 
   get revision(): number { return this.mutationRevision; }
 

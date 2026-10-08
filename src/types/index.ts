@@ -329,3 +329,5 @@ export interface PortableImportReceipt {
   imported: number;
   issues: PortableImportIssue[];
 }
+export type { MemoryInspectionOptions, InspectionCoverage, MemoryRelationshipEvidence,
+  MemoryExplanation, MemoryHealthFinding, MemoryHealthSuggestion, MemoryHealthReport } from "./memoryInspection.js";

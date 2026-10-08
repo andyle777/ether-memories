@@ -9,6 +9,7 @@ import { createId } from "../utils/ids.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { cloneValue } from "../utils/clone.js";
 import { codeUnitCompare } from "./Tokenizer.js";
+import { registerInspectionGraph } from "./inspectionSources.js";
 
 export const STARTER_RELATIONS: GraphRelation[] = [
   "related_to", "mentions", "derived_from", "supports",
@@ -17,6 +18,8 @@ export const STARTER_RELATIONS: GraphRelation[] = [
 
 export class MindGraphManager {
   private readonly graph = new Graph({ multi: false, type: "directed" });
+
+  constructor() { registerInspectionGraph(this, this.graph); }
 
   addNode(node: MindGraphNode): Result<MindGraphNode> {
     if (this.graph.hasNode(node.id)) return ok(node);
