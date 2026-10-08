@@ -665,8 +665,10 @@ describe("Tranche 7 Copilot AMBER repairs", { timeout: 600_000 }, () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let armed = false;
+    let reached!: () => void;
+    const blocked = new Promise<void>(resolve => { reached = resolve; });
     const gatedFiles: WalIO = { ...nodeWalIO, open: async (path, create) => {
-      if (armed && path.includes("receipts")) await gate;
+      if (armed && path.includes("receipts")) { reached(); await gate; }
       return nodeWalIO.open(path, create);
     } };
     // Runtime A holds writer authority for its complete historical lookup and
@@ -677,14 +679,14 @@ describe("Tranche 7 Copilot AMBER repairs", { timeout: 600_000 }, () => {
     const runtimeB = value(await open(s));
     armed = true;
     const retryA = note(runtimeA, "race historical note", "race-0");
-    await new Promise(resolve => setTimeout(resolve, 150));
-    // Runtime B's rotation observes normal authority contention, never a
-    // PERSISTENCE_CORRUPTION misclassification of missing history.
-    const contended = await runtimeB.rotate();
-    expect(failure(contended).code).toBe("WRITER_BUSY");
-    expect(runtimeB.state).toBe("ready");
-    expect(failureDetails(contended).activated).toBeUndefined();
-    release!();
+    try {
+      await Promise.race([blocked, retryA.then(() => { throw new Error("retry ended before the receipt marker"); })]);
+      // Runtime B's rotation observes ordinary writer contention.
+      const contended = await runtimeB.rotate();
+      expect(failure(contended).code).toBe("WRITER_BUSY");
+      expect(runtimeB.state).toBe("ready");
+      expect(failureDetails(contended).activated).toBeUndefined();
+    } finally { release!(); await retryA; }
     const reconciled = value(await retryA);
     expect(reconciled.content).toBe("race historical note");
     // Coherent retry semantics after the successor lineage is observed.

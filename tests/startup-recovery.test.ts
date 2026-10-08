@@ -402,18 +402,22 @@ describe("authoritative startup recovery", { timeout: 30_000 }, () => {
   it("concurrent recovery sessions serialize through writer authority", async () => {
     const s = await setup();
     value(await new ProductionWalStore(s.directory, s.io).commit(s.tip, mutationId("concurrent"), [notePut()]));
-    let release = false;
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const blocked = new Promise<void>(resolve => { reached = resolve; });
     const held: StartupRecovery = new StartupRecovery(s.directory, s.snapshot.identity.userId, s.io, nodeWalIO, {
-      async at(phase) { if (phase === "transaction") { while (!release) await new Promise(r => setTimeout(r, 5)); } }
+      async at(phase) { if (phase === "transaction") { reached(); await gate; } }
     });
     const heldRecovery = held.recover();
-    await new Promise(r => setTimeout(r, 50));
     const competing = new StartupRecovery(s.directory, s.snapshot.identity.userId, s.io);
-    const rejected = await competing.recover();
-    expect(rejected.ok).toBe(false);
-    if (!rejected.ok) expect(rejected.error.code).toBe("WRITER_BUSY");
-    expect(competing.read().ok).toBe(false);
-    release = true;
+    try {
+      await Promise.race([blocked, heldRecovery.then(() => { throw new Error("recovery ended before the transaction marker"); })]);
+      const rejected = await competing.recover();
+      expect(rejected.ok).toBe(false);
+      if (!rejected.ok) expect(rejected.error.code).toBe("WRITER_BUSY");
+      expect(competing.read().ok).toBe(false);
+    } finally { release(); await heldRecovery; }
     expect(value(await heldRecovery).transactions).toBe(1);
     expect(held.read().ok).toBe(true);
     // The rejected session recovers cleanly once authority is free.
