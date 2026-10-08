@@ -35,6 +35,7 @@
 | CI packed consumer lacks declarations/durable facade/export-boundary checks | T1 | Extract a cross-platform verification script; retain four matrix jobs |
 | Three authority tests use arbitrary startup sleeps | T1 | Instrument explicit reached markers; no timeout increase |
 | DEP0137 / GC-close warnings in clean baseline | T1 | Trace origins; add regression and fix only proven resource cleanup |
+| CI v4 action Node20 deprecation and forced Node24 runtime | T1 | Update checkout/setup-node to v5's explicit Node24 runtime; rerun matrix |
 | Unmerged Windows recoverable candidate | T5 | Preserve separate PR #24; no integration |
 | v0.7 metadata/release integration | T6 | Defer; keep 0.6.0 |
 | Old probe scripts and engineering records | T1 audit | Retain: useful historical release evidence, not dead artifacts |
@@ -65,12 +66,13 @@
 
 **Files:** scripts/verify-packed-consumer.mjs, .github/workflows/ci.yml, package.json (script only).
 
-- [ ] Accept one explicit tarball path or require exactly one tarball matching package name/version in cwd; create a temporary isolated consumer and remove it in finally.
-- [ ] Install the actual tarball, verify packed file allowlist, ESM named exports, snapshot save/load and native public durable factory behavior (Windows strict fails closed).
-- [ ] Compile an installed-package TypeScript consumer; assert internal root types and deep modules are inaccessible.
-- [ ] Replace inline bash consumer in CI with the same Node script; keep npm ci, typecheck, full tests before build, build, pack and all four matrix jobs.
-- [ ] Run npm pack and the gate locally plus negative-control packages; expected positive pass and damaged packages fail.
-- [ ] Commit focused CI change.
+- [x] Accept one explicit tarball path or require exactly one tarball matching package name/version in cwd; create a temporary isolated consumer and remove it in finally.
+- [x] Install the actual tarball, verify packed file allowlist, ESM named exports, snapshot save/load and native public durable factory behavior (Windows strict fails closed).
+- [x] Compile an installed-package TypeScript consumer; assert internal root types and deep modules are inaccessible.
+- [x] Replace inline bash consumer in CI with the same Node script; keep npm ci, typecheck, full tests before build, build, pack and all four matrix jobs.
+- [x] Run npm pack and the gate locally plus negative-control packages; expected positive pass and damaged packages fail.
+- [x] Commit focused CI change.
+- [x] Classify the observed CI action-runtime deprecation as T1; use checkout/setup-node v5 with explicit Node24 action runtimes while retaining Node22/24 application tests.
 
 ### Task 4: Exact candidate verification and freeze report
 
@@ -89,3 +91,6 @@
 - Task 3: initial consumer check rejected JSON omission of undefined optional fields. Ruling: compare serialized legacy snapshots, matching the released JSON contract; no runtime or persistence change. Cost if wrong: the gate could miss an in-memory-only optional-property difference; persisted contents remain checked exactly.
 - Packed gate local positive: 104 files, 32 named exports, 51 blocked module paths, snapshot roundtrip, Windows strict fail-closed facade, declarations all passed.
 - Workflow tooling ruling: use native PowerShell/Node verification and ledger instead of skill Bash helper scripts on this Windows host; preserve the requested evidence and exact-SHA review gates.
+- Task 3: committed 10a5cab; positive packed gate and extra-file negative control passed. Independent hostile review of 10a5cab found zero material issues. Preliminary CI showed action-owned DEP0040/DEP0169 and Node20 deprecation messages outside test execution; v5 action definitions explicitly use Node24. A final CI-only update removes the stale action runtime selection, followed by new exact-SHA verification and review.
+- Identity audit: all five committed fixture blobs and their pinned SHA256 hashes are identical to released base; all 50 generated declaration files are byte-identical; only production-source exception is the legacy snapshot handle finally.
+- Native local Windows probe: opening a directory in read mode succeeds, sync rejects EPERM, and explicit finally closes it. This confirms the regression's fault condition exists on the tested host.
