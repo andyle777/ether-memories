@@ -1,6 +1,8 @@
 # AF1 Tranche 7 — Checkpoint Rotation, Durable Receipts and WAL Reclamation
 
-Status: implemented on `feat/v0.6.0-af1-tranche7` (unfrozen; Copilot AMBER repairs applied).
+Status: included in released v0.6.0; historical implementation branch
+`feat/v0.6.0-af1-tranche7` (Copilot AMBER repairs applied). See
+[release integration lineage](v0.6.0-integration.md) for frozen and released SHAs.
 Frozen parents: T6 `77fee0df`, T5 `86fd96cc`. This document describes the T7
 architecture exactly as implemented.
 
@@ -279,5 +281,5 @@ automatic rotation thresholds (rotation is explicit).
 
 No frozen format, fixture, WAL scanner semantic, T5 index behavior or T6
 facade/validation/identity behavior was changed. The only T6-surface change is
-the approved addition of the `rotate()` facade member (T7 is unfrozen and this
-was pre-approved in the T7 architecture decisions).
+the approved addition of the `rotate()` facade member (pre-approved in the
+historical T7 architecture decisions before its freeze).
