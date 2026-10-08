@@ -32,6 +32,8 @@ jobs:
       - run: npm run build
       - name: Round 11 native filesystem probe
         run: node scripts/round11-windows-native-probe.mjs
+      - name: Round 11 synchronized process-crash probe
+        run: node scripts/round11-windows-crash-probe.mjs
       - name: Upload Round 11 report
         if: always()
         uses: actions/upload-artifact@v4
