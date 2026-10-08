@@ -53,17 +53,19 @@ describe("T2 factual memory inspection", () => {
   it("selects sorted direct edges only and never returns adjacent content", () => {
     const c = core(), n = value(c.addMemory({ content: "root" }));
     const root = `memory:${n.id}`;
-    for (const id of ["z", "a", "A", "depth2"]) value(c.graph.addNode({ id, type: "concept", label: "adjacent secret", data: { secret: "metadata secret" } }));
+    const b = value(c.addMemory({ content: "adjacent secret", metadata: { secret: "metadata secret" } }));
+    const deeper = value(c.addMemory({ content: "deeper secret" }));
+    for (const id of ["z", "A"]) value(c.graph.addNode({ id, type: "concept", label: "adjacent secret", data: { secret: "metadata secret" } }));
     value(c.graph.addEdgeWithId("z-edge", root, "z", "supports"));
     value(c.graph.addEdgeWithId("A-edge", "A", root, "mentions"));
-    value(c.graph.addEdgeWithId("a-edge", root, "a", "about"));
-    value(c.graph.addEdgeWithId("indirect", "a", "depth2"));
+    value(c.graph.addEdgeWithId("a-edge", root, `memory:${b.id}`, "about"));
+    value(c.graph.addEdgeWithId("indirect", `memory:${b.id}`, `memory:${deeper.id}`));
     value(c.graph.addEdgeWithId("self", root, root));
     const r = value(c.explainMemory(n.id, { asOf: 100 }));
     expect(r.relationships.entries.map(e => e.id)).toEqual(["A-edge", "a-edge", "self", "z-edge"]);
     expect(r.relationships.entries.map(e => e.direction)).toEqual(["in", "out", "self", "out"]);
     expect(r.relationships.knownCount).toBe(4);
-    for (const secret of ["depth2", "adjacent secret", "metadata secret", "indirect"]) expect(JSON.stringify(r)).not.toContain(secret);
+    for (const secret of [deeper.id, "deeper secret", "adjacent secret", "metadata secret", "indirect"]) expect(JSON.stringify(r)).not.toContain(secret);
   });
 
   it("uses bounded projections rather than existing whole-store clone APIs", () => {
@@ -113,9 +115,12 @@ describe("T2 factual memory inspection", () => {
   });
 
   it("detaches snapshots and reports in both directions and uses no nonplain values", () => {
-    const c = core(), n = value(c.addMemory({ content: "old", tags: ["old"], provenance: { kind: "imported", importBatchId: "old" } }));
+    const expiry = new Date(150);
+    const c = core(), n = value(c.addMemory({ content: "old", tags: ["old"], expiresAt: expiry, provenance: { kind: "imported", importBatchId: "old" } }));
     const e = explanationSnapshot(c.notes, c.graph, n.id, 100)!;
     const h = healthSnapshot(c.notes, c.graph, 100);
+    const previousReport = value(c.explainMemory(n.id, { asOf: 100 }));
+    const previousBytes = JSON.stringify(previousReport);
     const assertPlain = (v: unknown): void => {
       if (v && typeof v === "object") {
         expect(Array.isArray(v) || Object.getPrototypeOf(v) === Object.prototype).toBe(true);
@@ -124,15 +129,22 @@ describe("T2 factual memory inspection", () => {
     };
     assertPlain(e); assertPlain(h);
     const eBefore = JSON.stringify(e), hBefore = JSON.stringify(h);
+    expiry.setTime(0); n.createdAt.setTime(0); n.updatedAt.setTime(0); n.expiresAt!.setTime(0);
+    // Even mutating the owned Date after projection cannot alter an earlier report.
+    inspectionNotes(c.notes).get(n.id)!.expiresAt!.setTime(200);
     value(c.updateMemory(n.id, { tags: ["new"], confidence: 0.9 }));
     expect(JSON.stringify(e)).toBe(eBefore); expect(JSON.stringify(h)).toBe(hBefore);
+    expect(JSON.stringify(previousReport)).toBe(previousBytes);
     const r = value(c.explainMemory(n.id, { asOf: 100 }));
     r.note.tags.push("caller"); r.note.provenance!.importBatchId = "caller";
+    r.note.createdAt = 0; r.note.expiresAt = 999;
     r.relationships.entries.push({ id: "caller", relationship: "about", direction: "out", adjacentId: "caller" });
     const hr = value(c.inspectMemoryHealth({ asOf: 100 }));
     hr.coverage.reasons.push("caller"); hr.counts.active = 0;
     expect(value(c.explainMemory(n.id, { asOf: 100 })).note.tags).toEqual(["new"]);
     expect(value(c.explainMemory(n.id, { asOf: 100 })).note.provenance!.importBatchId).toBe("old");
+    expect(value(c.notes.get(n.id)).createdAt.getTime()).not.toBe(0);
+    expect(value(c.notes.get(n.id)).expiresAt!.getTime()).toBe(200);
     expect(value(c.inspectMemoryHealth({ asOf: 100 })).counts.active).toBe(1);
     const clock = vi.spyOn(Date, "now").mockImplementation(() => { throw Error("pure clock"); });
     expect(analyzeExplanation(e).asOf).toBe(100); expect(analyzeHealth(h).asOf).toBe(100);
