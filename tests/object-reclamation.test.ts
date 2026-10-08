@@ -32,6 +32,16 @@ const failure = (result: { ok: boolean; error?: unknown }) => {
   return result.error as { code: string; message: string; details?: Record<string, unknown> };
 };
 
+// Fault injections deliberately reject close without closing the real handle.
+// Test teardown owns these handles; production failure assertions run first.
+const rejectedCloseHandles = new Set<WalFileHandle>();
+const closeRejectedHandles = async () => {
+  for (const handle of rejectedCloseHandles) {
+    await handle.close();
+    rejectedCloseHandles.delete(handle);
+  }
+};
+
 /** Distinct 64-hex digests; order under compareDigests is stable. */
 const digest = (index: number) => index.toString(16).padStart(64, "0");
 const sortedDigests = (count: number) => Array.from({ length: count }, (_, i) => digest(i)).sort();
@@ -402,7 +412,10 @@ describe("sealed-reader handle lifetimes", () => {
     directory = join(parent, "store");
     await fs.mkdir(join(directory, ".private"), { recursive: true });
   });
-  afterEach(async () => { await fs.rm(parent, { recursive: true, force: true }); });
+  afterEach(async () => {
+    await closeRejectedHandles();
+    await fs.rm(parent, { recursive: true, force: true });
+  });
 
   it.each(["size", "hash", "canonical", "read"] as const)
   ("closes the handle on %s failure during open, without accumulation", async mode => {
@@ -482,7 +495,7 @@ describe("sealed-reader handle lifetimes", () => {
         // closes its own reader handle outside this accounting.
         return { ...handle, close: async () => {
           closeAttempts++;
-          if (failClose) throw new Error("injected close rejection");
+          if (failClose) { rejectedCloseHandles.add(handle); throw new Error("injected close rejection"); }
           await originalClose();
         } } as WalFileHandle;
       }
@@ -520,7 +533,7 @@ describe("sealed-reader handle lifetimes", () => {
       open: async (path, create) => {
         const handle = await nodeWalIO.open(path, create);
         return { ...handle, sync: async () => { throw new Error("injected sync failure"); },
-          close: async () => { throw new Error("injected close failure"); } } as WalFileHandle;
+          close: async () => { rejectedCloseHandles.add(handle); throw new Error("injected close failure"); } } as WalFileHandle;
       }
     };
     const writer = new RunWriter(join(directory, ".private", "gc-mark-a-000000.run"), failing, session,
@@ -1074,22 +1087,18 @@ describe("G0-G7 reclamation protocol", { timeout: 300_000 }, () => {
     value(await runtime.addMemory({ content: "inline before", status: "active" }, "gc-race-0"));
     let releaseGc: () => void = () => undefined;
     const gate = new Promise<void>(resolve => { releaseGc = resolve; });
+    let reached!: () => void;
+    const blocked = new Promise<void>(resolve => { reached = resolve; });
     const gcInstrumentation: GcInstrumentation = {
-      at: async phase => { if (phase === "G3-inventory") { await gate; } }
+      at: async phase => { if (phase === "G3-inventory") { reached(); await gate; } }
     };
     const collector = value(await open({ gcInstrumentation }));
-    const started = new Promise<void>(resolve => {
-      void (async () => {
-        await collector.collectGarbage();
-        resolve();
-      })();
-    });
-    // Wait until the collector is gated inside G3 holding writer authority.
-    await new Promise(resolve => setTimeout(resolve, 300));
-    const concurrent = await runtime.addMemory({ content: "concurrent", status: "active" }, "gc-race-1");
-    expect(failure(concurrent).code).toBe("WRITER_BUSY");
-    releaseGc();
-    await started;
+    const started = collector.collectGarbage();
+    try {
+      await Promise.race([blocked, started.then(() => { throw new Error("GC ended before the inventory marker"); })]);
+      const concurrent = await runtime.addMemory({ content: "concurrent", status: "active" }, "gc-race-1");
+      expect(failure(concurrent).code).toBe("WRITER_BUSY");
+    } finally { releaseGc(); value(await started); }
     value(await runtime.close());
     value(await collector.close());
   });
@@ -1502,7 +1511,10 @@ describe("exact-content scratch-integrity attacks across every proof stage", { t
     parent = await fs.mkdtemp(join(tmpdir(), "ether-gc-seal-"));
     directory = join(parent, "store");
   });
-  afterEach(async () => { await fs.rm(parent, { recursive: true, force: true }); });
+  afterEach(async () => {
+    await closeRejectedHandles();
+    await fs.rm(parent, { recursive: true, force: true });
+  });
 
   const open = (deps: { files?: WalIO } = {}) => openDurableEtherMemoriesInternal({ userId: "gc-seal-user",
     directory, openMode: "auto" }, { io, files: deps.files ?? files });
@@ -1597,7 +1609,7 @@ describe("exact-content scratch-integrity attacks across every proof stage", { t
       open: async (path, create) => {
         const handle = await nodeWalIO.open(path, create);
         if (!create || !path.includes("gc-mark") || !failClose) return handle;
-        return { ...handle, close: async () => { throw new Error("injected scratch close rejection"); } } as WalFileHandle;
+        return { ...handle, close: async () => { rejectedCloseHandles.add(handle); throw new Error("injected scratch close rejection"); } } as WalFileHandle;
       }
     };
     const collector = value(await open({ files: closeFailing }));

@@ -56,7 +56,10 @@ AF1 Tranche 10 is frozen by owner decision at code-lineage SHA
 `6f298aea2cd0278078bf49344f75807355a4e09b`. Subsequent naming and status documentation
 commits do not replace that frozen SHA. Merge commits record integration into the
 stacked bases and `main`; see [integration lineage](docs/v0.6.0-integration.md).
-Tagging and publication remain separate actions.
+The released v0.6.0 integration SHA and tag are
+`493c7b69813e71af749e34bbf950803eb8ee589b`. The
+[GitHub Release](https://github.com/andyle777/ether-memories/releases/tag/v0.6.0)
+is published; npm publication remains a separate action.
 
 v0.6.0 verification (AF1 Tranches 1–10) runs:
 
@@ -164,11 +167,21 @@ It does not provide authentication, authorization, multi-tenant security, distri
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm test
 npm run build
+npm pack
+npm run verify:packed
 ```
+
+The packed-consumer gate installs the generated tarball in an isolated temporary
+project, checks snapshot persistence and the public durable facade, compiles its
+declarations, and verifies that package exports block internal module imports.
+On Windows it verifies the existing strict factory's `DURABILITY_UNAVAILABLE`
+result; Linux exercises native strict durable writes and reopen. CI runs these
+checks on Linux and Windows with Node 22 and 24. Tests run before build so a
+clean checkout does not require a pre-existing `dist/`.
 
 ## Contributors and acknowledgements
 

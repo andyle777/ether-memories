@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "verify:packed": "node scripts/verify-packed-consumer.mjs"
   },
   "keywords": [
     "memory",

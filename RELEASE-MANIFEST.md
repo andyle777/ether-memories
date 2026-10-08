@@ -3,15 +3,17 @@
 Version: 0.6.0
 Tag: v0.6.0
 Lineage: v0.5.0 → v0.6.0
-Status: AF1 Tranche 10 frozen; v0.6.0 integration lineage recorded; publication pending
+Status: v0.6.0 tag and GitHub Release published; npm publication is separate
+Release integration SHA: `493c7b69813e71af749e34bbf950803eb8ee589b`
 Frozen T10 code-lineage SHA: `6f298aea2cd0278078bf49344f75807355a4e09b`
 Frozen T9 code-lineage parent: `5db87810b60b6693f0953402cdc06f980f5691af`
 
 The canonical project name is **Ether Memories** (`ether-memories`). Post-freeze
 naming/status documentation commits do not replace the frozen T10 code-lineage
 SHA. The owner separately authorized PR integration; merge receipts are recorded
-in [integration lineage](docs/v0.6.0-integration.md). Tagging, publishing, and
-releasing remain separate actions.
+in [integration lineage](docs/v0.6.0-integration.md). The
+[GitHub Release](https://github.com/andyle777/ether-memories/releases/tag/v0.6.0)
+was published on 6 October 2026; this does not assert npm publication.
 
 This manifest describes the v0.6.0 release surface.
 
@@ -65,8 +67,9 @@ This manifest describes the v0.6.0 release surface.
 ## Release gates
 
 The frozen T10 suite contains 29 files / 687 tests, including 21 maintenance
-orchestration tests. The owner freeze records code lineage; publication remains
-a separate release action.
+orchestration tests. The released integration SHA adds two package-lock metadata
+regressions, for 29 files / 689 tests at that SHA. These are historical counts,
+not a claim about subsequent development candidates.
 
 Run:
 ```bash
@@ -74,6 +77,8 @@ npm ci
 npm run typecheck
 npm test
 npm run build
+npm pack
+npm run verify:packed
 ```
 plus the compiled recovery, runtime, rotation, garbage-collection, and default
 10,000-mutation maintenance probes

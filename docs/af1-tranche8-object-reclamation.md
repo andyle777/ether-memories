@@ -1,7 +1,8 @@
 # AF1 Tranche 8 — Payload-Object Orphan Garbage Collection
 
-Status: implemented on `feat/v0.6.0-af1-tranche8` (unfrozen; awaiting independent
-hostile review). Frozen parents: T7 `baccfad72`, T6 `77fee0d f`, T5 `86fd96cc`.
+Status: included in released v0.6.0; historical implementation branch
+`feat/v0.6.0-af1-tranche8`. See [release integration lineage](v0.6.0-integration.md)
+for frozen and released SHAs. Frozen parents: T7 `baccfad72`, T6 `77fee0df`, T5 `86fd96cc`.
 This document describes the T8 architecture exactly as implemented.
 
 ## Scope decision (source-proven)

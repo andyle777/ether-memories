@@ -25,7 +25,10 @@ export class FsJsonStorage implements StoragePort {
         catch (e) { last = e; if (!(e instanceof Error && ["EPERM", "EBUSY"].includes((e as NodeJS.ErrnoException).code ?? ""))) throw e; await new Promise(r => setTimeout(r, 10 * (attempt + 1))); }
       }
       if (last) throw last;
-      try { const dh = await fs.open(dir, "r"); await dh.sync(); await dh.close(); } catch { /* directory fsync unsupported */ }
+      try {
+        const dh = await fs.open(dir, "r");
+        try { await dh.sync(); } finally { await dh.close(); }
+      } catch { /* directory fsync unsupported */ }
     } finally {
       await fs.rm(temp, { force: true });
     }
