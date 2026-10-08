@@ -1,0 +1,35 @@
+name: Round 11 Windows T5 Spike
+
+on:
+  push:
+    branches:
+      - spike/v0.7.0-t5-windows-round11
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  round11-native-windows:
+    name: windows-${{ matrix.node }}-round11
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Runtime versions
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+          [System.Environment]::OSVersion.VersionString
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Round 11 native Windows preflight (RED expected before T5 implementation)
+        run: node scripts/round11-windows-preflight.mjs
