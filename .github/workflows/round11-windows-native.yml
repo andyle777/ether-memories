@@ -1,0 +1,42 @@
+name: Round 11 Windows Native Spike
+
+on:
+  push:
+    branches:
+      - spike/v0.7.0-t5-windows-round11
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  native-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Versions
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+          Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Round 11 native filesystem probe
+        run: node scripts/round11-windows-native-probe.mjs
+      - name: Upload Round 11 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: round11-node-${{ matrix.node }}
+          path: round11-report-*.json
+          if-no-files-found: warn
