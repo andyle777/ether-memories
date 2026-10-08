@@ -29,10 +29,10 @@ jobs:
           Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
       - run: npm run build
       - name: Round 11 native filesystem probe
         run: node scripts/round11-windows-native-probe.mjs
+      - run: npm test
       - name: Upload Round 11 report
         if: always()
         uses: actions/upload-artifact@v4
