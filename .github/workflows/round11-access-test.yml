@@ -1,0 +1,10 @@
+name: Round 11 Access Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  access-test:
+    runs-on: windows-latest
+    steps:
+      - run: Write-Output "GitHub workflow write access confirmed"
