@@ -4,7 +4,7 @@ import { err, ok, type Result } from "../utils/result.js";
 import type { CommittedTip, MutationId } from "../types/persistence.js";
 import type { WalOperation } from "../types/persistence.js";
 import { encodeCheckpoint, encodeStoreHead, verifyCheckpoint, decodeStoreHead, PERSISTENCE_LIMITS, HEAD_FORMAT, HEAD_VERSION, DIGEST_ALGORITHM, type PersistedStoreHead } from "./codecs.js";
-import { nodeDirectoryIO, DirectoryIoError, type DirectoryIO } from "./directoryIO.js";
+import { activationMatches, nodeDirectoryIO, DirectoryIoError, type DirectoryIO } from "./directoryIO.js";
 import { nodeWalIO, type WalFileHandle, type WalIO } from "./walIO.js";
 import { withRecoveryAuthority, type RecoveryAuthority } from "./recoveryAuthority.js";
 import { WalFileScan } from "./walFileScan.js";
@@ -475,7 +475,7 @@ export async function rotateDurableStore(input: RotationInput): Promise<Result<R
         return err("RECOVERY_REQUIRED", "HEAD candidate verification failed.", { activationState: "pre-activation" });
       }
       const activated = await io.activateFile(headCandidate, join(directory, "HEAD"));
-      if (activated !== "atomic") {
+      if (!activationMatches(io, activated)) {
         return err("DURABILITY_UNAVAILABLE", "Backend did not confirm atomic HEAD activation.", { activationState: "pre-activation" });
       }
       headRenamed = true;

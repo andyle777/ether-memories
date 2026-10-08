@@ -12,6 +12,8 @@ export class DirectoryIoError extends Error {
 
 /** Internal trusted backend boundary. Tests may replace operations, not capability booleans. */
 export interface DirectoryIO {
+  /** Internal capability; absent preserves the v0.6 strict test boundary. */
+  readonly guarantee?: "strict" | "recoverable";
   kind(path: string): Promise<"missing" | "file" | "directory">;
   readBounded(path: string, maxBytes: number): Promise<Uint8Array>;
   /**
@@ -24,7 +26,7 @@ export interface DirectoryIO {
   mkdirExclusive(path: string): Promise<void>;
   writeExclusive(path: string, bytes: Uint8Array): Promise<void>;
   syncDirectory(path: string): Promise<void>;
-  activateFile(candidate: string, destination: string): Promise<"atomic">;
+  activateFile(candidate: string, destination: string): Promise<"atomic" | "process-recoverable">;
   removeOwnedFile(path: string): Promise<void>;
 }
 
@@ -115,3 +117,85 @@ export const nodeDirectoryIO: DirectoryIO = {
   },
   async removeOwnedFile(path) { await fs.unlink(path); }
 };
+
+/** Weak acknowledgment deliberately has no strict durability field. Never persisted. */
+export type InternalAcknowledgment = { readonly durability: "confirmed" }
+  | { readonly acknowledgment: "process-recoverable" };
+export const acknowledgmentFor = (io: DirectoryIO): InternalAcknowledgment =>
+  io.guarantee === "recoverable" ? { acknowledgment: "process-recoverable" } : { durability: "confirmed" };
+export const activationMatches = (io: DirectoryIO, activation: string): boolean =>
+  activation === (io.guarantee === "recoverable" ? "process-recoverable" : "atomic");
+
+/** Capture capability and operations once, before any runtime IO. */
+export const captureDirectoryIO = (io: DirectoryIO): DirectoryIO => Object.freeze({
+  guarantee: io.guarantee ?? "strict",
+  kind: io.kind.bind(io), readBounded: io.readBounded.bind(io), readNames: io.readNames.bind(io),
+  mkdirExclusive: io.mkdirExclusive.bind(io), writeExclusive: io.writeExclusive.bind(io),
+  syncDirectory: io.syncDirectory.bind(io), activateFile: io.activateFile.bind(io), removeOwnedFile: io.removeOwnedFile.bind(io)
+});
+
+export function assertWindowsRecoverablePath(path: string): void {
+  // Guard before native IO: Node 22/libuv can abort on U+10FFFF. Reject namespace,
+  // ADS, DOS device and trailing-dot/space aliases rather than certifying them.
+  if (path.includes(String.fromCodePoint(0x10ffff)) || path.startsWith("\\\\")
+    || path.startsWith("//") || /^[\\/]\?\?/.test(path)) {
+    throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "Unsupported Windows recoverable path.");
+  }
+  const local = path.replace(/^[a-zA-Z]:/, "");
+  for (const part of local.split(/[\\/]/)) {
+    if (part === "." || part === ".." || part === "") continue;
+    if (/[<>:"|?*\x00-\x1f]/.test(part) || /[. ]$/.test(part)
+      || /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part)) {
+      throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "Unsupported Windows recoverable path component.");
+    }
+  }
+}
+
+/** Local Windows process-failure contract only; regular-file sync is retained. */
+export const windowsRecoverableDirectoryIO: DirectoryIO = Object.freeze({
+  guarantee: "recoverable",
+  async kind(path: string) { assertWindowsRecoverablePath(path); return nodeDirectoryIO.kind(path); },
+  async readBounded(path: string, maxBytes: number) {
+    assertWindowsRecoverablePath(path);
+    // Windows file identifiers can exceed Number precision: compare exact bigint stamps.
+    const before = await fs.lstat(path, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > BigInt(maxBytes)) {
+      throw new DirectoryIoError("RECOVERY_REQUIRED", "Unsafe or oversized persistence file.");
+    }
+    const handle = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      const stat = await handle.stat({ bigint: true });
+      if (!stat.isFile() || stat.nlink !== 1n || stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) {
+        throw new DirectoryIoError("RECOVERY_REQUIRED", "Persistence file changed during open.");
+      }
+      const bytes = Buffer.alloc(Number(stat.size) + 1);
+      let read = 0;
+      while (read < bytes.length) {
+        const part = await handle.read(bytes, read, bytes.length - read, read);
+        if (!part.bytesRead) break;
+        read += part.bytesRead;
+      }
+      const after = await handle.stat({ bigint: true });
+      if (BigInt(read) !== stat.size || after.size !== stat.size || after.mtimeNs !== stat.mtimeNs || after.ctimeNs !== stat.ctimeNs) {
+        throw new DirectoryIoError("RECOVERY_REQUIRED", "Persistence file changed during read.");
+      }
+      return bytes.subarray(0, read);
+    } finally { await handle.close(); }
+  },
+  async readNames(path: string, visit: (name: string) => Promise<void> | void) {
+    assertWindowsRecoverablePath(path); return nodeDirectoryIO.readNames(path, visit);
+  },
+  async mkdirExclusive(path: string) { assertWindowsRecoverablePath(path); return nodeDirectoryIO.mkdirExclusive(path); },
+  async writeExclusive(path: string, bytes: Uint8Array) { assertWindowsRecoverablePath(path); return nodeDirectoryIO.writeExclusive(path, bytes); },
+  async syncDirectory(path: string) {
+    assertWindowsRecoverablePath(path);
+    if (await nodeDirectoryIO.kind(path) !== "directory") throw new DirectoryIoError("RECOVERY_REQUIRED", "Persistence directory is unavailable.");
+    // Existence/entry validation only. No directory flush or power-loss claim.
+  },
+  async activateFile(candidate: string, destination: string) {
+    assertWindowsRecoverablePath(candidate); assertWindowsRecoverablePath(destination);
+    await fs.rename(candidate, destination);
+    return "process-recoverable" as const;
+  },
+  async removeOwnedFile(path: string) { assertWindowsRecoverablePath(path); return nodeDirectoryIO.removeOwnedFile(path); }
+});

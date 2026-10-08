@@ -4,7 +4,7 @@ import type { CommittedTip, MutationId, MutationIdentity, WalOperation, WriterAu
 import { parseTransactionSequenceId, sameCommittedTip } from "../utils/durablePersistence.js";
 import { err, ok, type Result } from "../utils/result.js";
 import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint, WAL_FORMAT, WAL_VERSION, type PersistedStoreHead } from "./codecs.js";
-import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
+import { acknowledgmentFor, DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 import { encodeWalFrame, WAL_LIMITS, type WalTransaction } from "./wal.js";
 import { WalFileScan } from "./walFileScan.js";
 import { nodeWalIO, sameWalStamp, type WalFileHandle, type WalFileStamp, type WalIO } from "./walIO.js";
@@ -24,6 +24,10 @@ export interface CommitReceipt {
   readonly mutation: MutationIdentity;
   readonly durability: "confirmed";
 }
+export interface RecoverableCommitResult extends Omit<CommitReceipt, "durability"> {
+  readonly acknowledgment: "process-recoverable";
+}
+export type InternalCommitResult = CommitReceipt | RecoverableCommitResult;
 interface MutationRecord { readonly identity: CommittedTip; readonly mutation: MutationIdentity; readonly operationsDigest: string }
 interface History {
   readonly stamp?: WalFileStamp;
@@ -38,6 +42,7 @@ interface Attempt {
   outcome: "not-committed" | "reconciliation-required";
   visibility: "none" | "possible" | "complete";
   durability: "unconfirmed" | "confirmed";
+  acknowledgment?: "process-recoverable";
 }
 const jsonBounds = { bytes: WAL_LIMITS.frameBytes, depth: WAL_LIMITS.metadataDepth + 2, nodes: WAL_LIMITS.jsonNodes };
 const operationsDigest = (operations: readonly WalOperation[]): string => {
@@ -87,11 +92,11 @@ export class FsWalStore {
     return checked.ok ? ok(freezeJson(input as unknown as JsonObject) as unknown as CommitRequest) : checked;
   }
 
-  async commit(request: CommitRequest): Promise<Result<CommitReceipt>> {
+  async commit(request: CommitRequest): Promise<Result<InternalCommitResult>> {
     const prepared = this.prepare(request);
     if (!prepared.ok) return err(prepared.error.code, prepared.error.message,
       { phase: "prepare", outcome: "not-committed", visibility: "none", durability: "unconfirmed" });
-    return this.run(prepared.value) as unknown as Promise<Result<CommitReceipt>>;
+    return this.run(prepared.value) as unknown as Promise<Result<InternalCommitResult>>;
   }
 
   /** Acquires authority and crosses barriers; not a read-only observation or Core recovery. */
@@ -108,11 +113,11 @@ export class FsWalStore {
    * RAM stays bounded regardless of WAL length: only the matching record and
    * the bounded history cache are retained.
    */
-  async readCommittedMutation(mutationId: MutationId): Promise<Result<CommitReceipt | undefined>> {
+  async readCommittedMutation(mutationId: MutationId): Promise<Result<InternalCommitResult | undefined>> {
     if (typeof mutationId !== "string" || !mutationId.length || mutationId.length > WAL_LIMITS.mutationIdBytes) {
       return err("INVALID_INPUT", "Invalid mutation identity for reconciliation.");
     }
-    return this.run(undefined, mutationId) as unknown as Promise<Result<CommitReceipt | undefined>>;
+    return this.run(undefined, mutationId) as unknown as Promise<Result<InternalCommitResult | undefined>>;
   }
 
   private async layout(): Promise<void> {
@@ -164,13 +169,13 @@ export class FsWalStore {
     return { tip: cursor.tip, entries, completeIndex, found, stamp: scanner.stamp };
   }
 
-  private async run(request?: CommitRequest, lookup?: MutationId): Promise<Result<CommitReceipt | CommittedTip | undefined>> {
+  private async run(request?: CommitRequest, lookup?: MutationId): Promise<Result<InternalCommitResult | CommittedTip | undefined>> {
     const state: Attempt = { phase: "preflight", outcome: "not-committed", visibility: "none", durability: "unconfirmed" };
     const lock = join(this.directory, "writer.lock");
     let lockBytes: Buffer | undefined;
     let ownsLock = false;
     let file: WalFileHandle | undefined;
-    let result: Result<CommitReceipt | CommittedTip | undefined>;
+    let result: Result<InternalCommitResult | CommittedTip | undefined>;
     try {
       await this.layout();
       // Refuse unsupported barriers before creating even an authority artifact.
@@ -208,7 +213,7 @@ export class FsWalStore {
         : { tip: head.checkpoint.tip, entries: new Map(), completeIndex: true, found: undefined };
       const before = history.stamp;
       let validatedStamp = before;
-      let receipt: CommitReceipt | undefined;
+      let receipt: InternalCommitResult | undefined;
       let appended: WalTransaction | undefined;
       if (request) {
         const previous = history.found;
@@ -218,7 +223,7 @@ export class FsWalStore {
           if (previous.mutation.digest !== request.mutation.digest || previous.operationsDigest !== operationsDigest(request.operations)) {
             throw new DirectoryIoError("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
           }
-          receipt = { status: "already-committed", identity: previous.identity, mutation: previous.mutation, durability: "confirmed" };
+          receipt = { status: "already-committed", identity: previous.identity, mutation: previous.mutation, ...acknowledgmentFor(this.directoryIO) };
         } else {
           state.phase = "exact-base";
           if (!sameCommittedTip(request.expectedBase, history.tip)) throw new DirectoryIoError("STALE_TRANSACTION_BASE", "Expected base differs; automatic rebase is forbidden.");
@@ -247,7 +252,7 @@ export class FsWalStore {
           validatedStamp = await file.stat();
           if (validatedStamp.size !== offset + prepared.bytes.byteLength) throw new Error("Unexpected WAL length after append.");
           appended = prepared.transaction;
-          receipt = { status: "committed", identity: appended.identity, mutation: appended.mutation, durability: "confirmed" };
+          receipt = { status: "committed", identity: appended.identity, mutation: appended.mutation, ...acknowledgmentFor(this.directoryIO) };
         }
       }
       // Visible complete bytes (including a lost-ack retry) must cross fresh barriers.
@@ -255,7 +260,8 @@ export class FsWalStore {
       if (file) await file.sync();
       state.phase = "wal-directory-sync";
       await this.directoryIO.syncDirectory(join(this.directory, "wal"));
-      state.durability = "confirmed";
+      if (this.directoryIO.guarantee === "recoverable") state.acknowledgment = "process-recoverable";
+      else state.durability = "confirmed";
       await verifyAuthority();
       const after = file ? await file.stat() : undefined;
       if (file && !sameWalStamp(after!, await this.walIO.stamp(path))) throw new Error("WAL path changed after sync.");
@@ -273,7 +279,7 @@ export class FsWalStore {
         // re-running any preparation.
         const found = history.found;
         result = ok(found ? Object.freeze({ status: "already-committed", identity: found.identity,
-          mutation: found.mutation, durability: "confirmed" as const }) : undefined);
+          mutation: found.mutation, ...acknowledgmentFor(this.directoryIO) }) : undefined);
       } else {
         result = ok(receipt ? Object.freeze(receipt) : history.tip);
       }

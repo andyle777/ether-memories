@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { err, ok, type Result } from "../utils/result.js";
 import { ETHER_DATA_PROFILE, MAX_ETHER_DATA_BYTES, decodeEtherData } from "./etherData.js";
-import { DirectoryIoError, type DirectoryIO } from "./directoryIO.js";
+import { activationMatches, DirectoryIoError, type DirectoryIO } from "./directoryIO.js";
 import type { WalIO } from "./walIO.js";
 import type { RecoveryAuthority } from "./recoveryAuthority.js";
 import { required } from "./recoveryAuthority.js";
@@ -69,7 +69,7 @@ export class PayloadObjects {
       await authority.verify();
       // All conforming installers hold writer authority. Never overwrite an existing digest path.
       if (await this.io.kind(destination) !== "missing") throw new DirectoryIoError("RECOVERY_REQUIRED", "Object destination appeared during install.");
-      if (await this.io.activateFile(temporary, destination) !== "atomic") throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "Object install was not atomic.");
+      if (!activationMatches(this.io, await this.io.activateFile(temporary, destination))) throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "Object install did not establish the selected activation capability.");
       await this.io.syncDirectory(join(authority.directory, ".private"));
     } else {
       await this.read(authority, ref);

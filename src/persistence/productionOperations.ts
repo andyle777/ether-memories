@@ -9,9 +9,9 @@ import { referenceFor, validateReference, digestBytes, PayloadObjects, OBJECT_RE
 import { createReplayRegistry } from "./walOperations.js";
 import { canonicalJson, type JsonObject } from "./walJson.js";
 import { WAL_LIMITS, encodeWalFrame } from "./wal.js";
-import { FsWalStore, type CommitReceipt } from "./FsWalStore.js";
+import { FsWalStore, type InternalCommitResult } from "./FsWalStore.js";
 import { withRecoveryAuthority, required, type RecoveryAuthority } from "./recoveryAuthority.js";
-import { nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
+import { acknowledgmentFor, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 import { nodeWalIO, type WalFileHandle, type WalIO } from "./walIO.js";
 import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint, WAL_FORMAT, WAL_VERSION } from "./codecs.js";
 import { WalFileScan } from "./walFileScan.js";
@@ -26,7 +26,7 @@ export type ProductionOperationType = typeof PRODUCTION_OPERATIONS[number];
 export interface SemanticOperation { readonly type: ProductionOperationType; readonly version: "1"; readonly payload: unknown }
 /** Tranche 6 live-runtime commit outcome: frozen receipt plus the prevalidated candidate generation and the exact committed effect set. */
 export interface MutationOutcome {
-  readonly receipt: CommitReceipt;
+  readonly receipt: InternalCommitResult;
   readonly after?: EtherSnapshot;
   readonly root?: StateRoot;
   readonly effects: readonly SemanticOperation[];
@@ -169,7 +169,7 @@ export class ProductionWalStore {
     this.objects = new PayloadObjects(io, files);
     this.files = files;
   }
-  async commit(base: CommittedTip, mutationId: MutationId, input: readonly SemanticOperation[]): Promise<Result<CommitReceipt>> {
+  async commit(base: CommittedTip, mutationId: MutationId, input: readonly SemanticOperation[]): Promise<Result<InternalCommitResult>> {
     return this.commitOperations(base, mutationId, input);
   }
 
@@ -185,7 +185,7 @@ export class ProductionWalStore {
    *      intent digest.
    */
   async commitMutation(base: CommittedTip, baseSnapshot: EtherSnapshot, mutationId: MutationId,
-    command: ProductionMutationCommand): Promise<Result<CommitReceipt>> {
+    command: ProductionMutationCommand): Promise<Result<InternalCommitResult>> {
     // Accessor-safe validation and canonical copy FIRST; every later step
     // (digest, receipt lookup, preparation) consumes this copy, never the
     // caller's original object.
@@ -402,11 +402,13 @@ export class ProductionWalStore {
         const semantic = required(await resolveOperation(operation, authority, this.objects));
         effects.push({ type: operation.type as ProductionOperationType, version: "1", payload: semantic });
       }
-      const receipt: CommitReceipt = {
+      const receipt: InternalCommitResult = {
         status: "already-committed",
         identity: { epochId: authority.head.epochId, txId: entry.txId as CommittedTip["txId"], digest: entry.transactionDigest as CommittedTip["digest"] },
         mutation: { mutationId, digest: entry.intentDigest },
-        durability: "confirmed"
+        // Ledger v1 records identity/effects only. This invocation cannot infer
+        // the original writer's durability capability from historical bytes.
+        ...acknowledgmentFor(this.io)
       };
       return ok({ receipt, effects } satisfies MutationOutcome);
     });
@@ -465,7 +467,7 @@ export class ProductionWalStore {
   }
 
   private async commitOperations(base: CommittedTip, mutationId: MutationId, input: readonly SemanticOperation[],
-    mutationDigest?: string): Promise<Result<CommitReceipt>> {
+    mutationDigest?: string): Promise<Result<InternalCommitResult>> {
     if (!base || !parseTransactionSequenceId(base.txId).ok) return err("INVALID_INPUT", "Invalid exact transaction base.");
     if (!input.length || input.length > WAL_LIMITS.operations) return err("INVALID_INPUT", "Invalid production operation count.");
     const capturedBase = { ...base };
