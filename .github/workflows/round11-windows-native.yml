@@ -30,6 +30,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - name: Production recoverable capability and strict refusal tests
+        run: npm test -- tests/windows-recoverable.test.ts
       - name: Round 11 native filesystem probe
         run: node scripts/round11-windows-native-probe.mjs
       - name: Round 11 synchronized process-crash probe

@@ -82,6 +82,8 @@ try {
   finally { await held.close(); }
   const heldPost = await capture(() => fs.readFile(destination, "utf8"));
   note("heldDestinationRename", { rename: heldRename, destination: heldPost });
+  check("held destination rename has a coherent success or refusal state", heldPost.ok
+    && heldPost.value === (heldRename.ok ? "held-new" : "held-old"), report.observations.heldDestinationRename);
 
   // NTFS file identity must remain exact; Ether uses bigint stats for this purpose.
   const identityPath = join(root, "identity.bin");

@@ -4,27 +4,17 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { openDurableEtherMemoriesInternal } from "../dist/core/DurableEtherMemories.js";
-import { nodeDirectoryIO } from "../dist/persistence/directoryIO.js";
+import { openDurableEtherMemoriesInternal, openDurableEtherMemories } from "../dist/core/DurableEtherMemories.js";
+import { windowsRecoverableDirectoryIO } from "../dist/persistence/directoryIO.js";
 import { nodeWalIO } from "../dist/persistence/walIO.js";
 
 const value = r => { assert.equal(r.ok, true, JSON.stringify(r)); return r.value; };
 const userId = "round11-crash";
 
-// Test-only recoverable Windows backend: exact v0.6 disk layout and file fsyncs;
-// only the unavailable directory-fsync contract is omitted. Returning "atomic"
-// here is intentionally limited to this protocol experiment and is NOT a claim
-// about the frozen strict production meaning of activation:"atomic".
-const recoverableIo = {
-  ...nodeDirectoryIO,
-  syncDirectory: async () => {},
-  activateFile: async (candidate, destination) => {
-    await fs.rename(candidate, destination);
-    return "atomic";
-  }
-};
+const options = directory => ({ userId, directory, durabilityGuarantee: "recoverable", openMode: "existing" });
 
 const signalAndBlock = phase => {
+  setInterval(() => {}, 1000); // Keep the child alive until the parent terminates it.
   process.stdout.write(`ROUND11_REACHED:${phase}\n`);
   return new Promise(() => {});
 };
@@ -35,16 +25,24 @@ const makeCrashFiles = phase => {
     ...nodeWalIO,
     open: async (path, create) => {
       const h = await nodeWalIO.open(path, create);
+      const isWal = /[\\/]wal[\\/]wal-[a-f0-9]{64}\.bin$/.test(path);
+      let wrote = false;
       return {
         ...h,
         write: async (bytes, position) => {
+          if (armed && isWal && phase === "partial-wal-write") {
+            await h.write(bytes.subarray(0, Math.max(1, Math.floor(bytes.length / 2))), position);
+            await signalAndBlock(phase);
+          }
           const n = await h.write(bytes, position);
-          if (armed && phase === "after-wal-write") await signalAndBlock(phase);
+          wrote = true;
+          if (armed && isWal && phase === "after-wal-write" && n === bytes.length) await signalAndBlock(phase);
           return n;
         },
         sync: async () => {
           await h.sync();
-          if (armed && phase === "after-wal-sync") await signalAndBlock(phase);
+          // Lookup also syncs the old WAL before append; stop only after this write.
+          if (armed && isWal && wrote && phase === "after-wal-sync") await signalAndBlock(phase);
         }
       };
     }
@@ -57,10 +55,20 @@ async function childMode() {
   const phase = process.env.ROUND11_PHASE;
   assert.ok(directory && phase);
   const crash = makeCrashFiles(phase);
+  const io = { ...windowsRecoverableDirectoryIO,
+    activateFile: async (candidate, destination) => {
+      if (phase === "before-head-rename" && destination.endsWith("HEAD")) await signalAndBlock(phase);
+      const result = await windowsRecoverableDirectoryIO.activateFile(candidate, destination);
+      if (phase === "after-head-rename" && destination.endsWith("HEAD")) await signalAndBlock(phase);
+      return result;
+    }
+  };
   const runtime = value(await openDurableEtherMemoriesInternal(
-    { userId, directory, openMode: "existing" }, { io: recoverableIo, files: crash.files }));
+    options(directory), { io, files: crash.files }));
   crash.arm();
   const result = await runtime.addMemory({ content: `crash-${phase}` }, `round11-${phase}`);
+  if (phase.endsWith("head-rename")) value(await runtime.rotate());
+  if (phase === "after-ack") { value(result); await signalAndBlock(phase); }
   process.stdout.write(`ROUND11_COMPLETED:${JSON.stringify(result)}\n`);
   process.exit(result.ok ? 0 : 2);
 }
@@ -100,8 +108,7 @@ async function removeStaleAuthority(directory) {
   await fs.unlink(lock);
 }
 
-const openExisting = directory => openDurableEtherMemoriesInternal(
-  { userId, directory, openMode: "existing" }, { io: recoverableIo, files: nodeWalIO });
+const openExisting = directory => openDurableEtherMemories(options(directory));
 
 async function verifyCrashScenario(directory, phase) {
   const before = value(await openExisting(directory));
@@ -111,16 +118,19 @@ async function verifyCrashScenario(directory, phase) {
   const killed = await waitForMarkerAndKill(directory, phase);
   assert.ok(killed.signal || killed.exitCode !== 0, `child must be terminated at ${phase}`);
 
-  const blocked = await openExisting(directory);
-  assert.equal(blocked.ok, false, JSON.stringify(blocked));
-  assert.equal(blocked.error.code, "WRITER_BUSY", JSON.stringify(blocked));
-
-  await removeStaleAuthority(directory);
+  if (phase !== "after-ack") {
+    const blocked = await openExisting(directory);
+    assert.equal(blocked.ok, false, JSON.stringify(blocked));
+    assert.equal(blocked.error.code, "WRITER_BUSY", JSON.stringify(blocked));
+    // Test harness only, after the known child has exited. Production never breaks locks.
+    await removeStaleAuthority(directory);
+  }
 
   const recovered = value(await openExisting(directory));
   const afterRecovery = value(recovered.exportData());
   const matching = afterRecovery.memoryNotes.filter(n => n.content === `crash-${phase}`);
   assert.ok(matching.length <= 1, "recovery must never duplicate the logical mutation");
+  assert.equal(matching.length, phase === "partial-wal-write" ? 0 : 1, `${phase}: complete writes survive process termination; partial tails are repaired`);
 
   const retry = value(await recovered.addMemory({ content: `crash-${phase}` }, `round11-${phase}`));
   assert.equal(retry.content, `crash-${phase}`);
@@ -132,7 +142,7 @@ async function verifyCrashScenario(directory, phase) {
   return {
     phase,
     crashExit: { code: killed.exitCode, signal: killed.signal },
-    staleLockRefused: true,
+    staleLockRefused: phase !== "after-ack",
     presentImmediatelyAfterRecovery: matching.length === 1,
     stableRetryConvergedExactlyOnce: true
   };
@@ -144,7 +154,7 @@ async function parentMode() {
   const directory = join(parent, "store");
   const report = { platform: process.platform, node: process.version, uv: process.versions.uv, scenarios: [] };
   try {
-    const runtime = value(await openDurableEtherMemoriesInternal({ userId, directory }, { io: recoverableIo, files: nodeWalIO }));
+    const runtime = value(await openDurableEtherMemories({ userId, directory, durabilityGuarantee: "recoverable" }));
     value(await runtime.addMemory({ content: "baseline" }, "round11-baseline"));
     value(await runtime.close());
 
@@ -156,12 +166,14 @@ async function parentMode() {
     value(await normalReopen.close());
     report.normalControl = true;
 
-    report.scenarios.push(await verifyCrashScenario(directory, "after-wal-write"));
-    report.scenarios.push(await verifyCrashScenario(directory, "after-wal-sync"));
+    for (const phase of ["partial-wal-write", "after-wal-write", "after-wal-sync", "after-ack", "before-head-rename", "after-head-rename"]) {
+      report.scenarios.push(await verifyCrashScenario(directory, phase));
+    }
     report.ok = true;
     console.log(JSON.stringify(report, null, 2));
     console.log("ROUND11 WINDOWS CRASH PROBE: PASS");
   } finally {
+    await fs.writeFile(`round11-report-crash-${process.version.replaceAll('.', '_')}.json`, JSON.stringify(report, null, 2));
     await fs.rm(parent, { recursive: true, force: true }).catch(() => {});
   }
 }
