@@ -17,6 +17,17 @@ describe("T2 factual memory inspection", () => {
     expect(c.explainMemory(diary.id, { asOf: 100 })).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
   });
 
+  it("rejects oversized IDs before whitespace validation can scan them", () => {
+    const c = core(), id = " ".repeat(1000000);
+    const trim = vi.spyOn(String.prototype, "trim");
+    trim.mockClear();
+    const result = c.explainMemory(id, { asOf: 100 });
+    const calls = trim.mock.calls.length;
+    trim.mockRestore();
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_INPUT" } });
+    expect(calls).toBe(0);
+  });
+
   it("reports canonical evidence and effective expiry without changing canonical state", () => {
     const c = core();
     const n = value(c.addMemory({ content: "private body", status: "candidate", tags: ["z", "A", "a"],

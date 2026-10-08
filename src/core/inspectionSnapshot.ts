@@ -24,8 +24,9 @@ const time = (d: Date): number | null => d instanceof Date && Number.isFinite(d.
 const degree = (graph: ReturnType<typeof inspectionGraph>, id: string): number => graph.degree(id) - (graph.hasDirectedEdge(id, id) ? 1 : 0);
 
 export function explanationSnapshot(notesOwner: object, graphOwner: object, id: string, asOf: number): MemoryExplanation | undefined {
-  if (typeof id !== "string" || !id.trim()) throw new Error("A nonempty Memory Note ID is required.");
+  if (typeof id !== "string") throw new Error("A nonempty Memory Note ID is required.");
   scalar(id);
+  if (!id.trim()) throw new Error("A nonempty Memory Note ID is required.");
   const n = inspectionNotes(notesOwner).get(id);
   if (!n) return undefined;
   const unavailableEvidence: string[] = [];
