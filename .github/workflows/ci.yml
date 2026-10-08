@@ -31,10 +31,4 @@ jobs:
       - run: npm run build
       - run: npm pack
       - name: Verify packed consumer
-        shell: bash
-        run: |
-          mkdir consumer
-          cd consumer
-          npm init -y
-          npm install ../ether-memories-*.tgz
-          node --input-type=module -e "import { mkdtemp, rm } from 'node:fs/promises'; import { tmpdir } from 'node:os'; import { join } from 'node:path'; import { EtherMemoriesCore } from 'ether-memories'; const dir = await mkdtemp(join(tmpdir(), 'ether-consumer-')); const path = join(dir, 'snapshot.json'); try { const e = new EtherMemoriesCore({userId:'ci', storagePath:path}); if (!e.addMemory({content:'package consumer'}).ok || !(await e.save()).ok) process.exit(1); const loaded = new EtherMemoriesCore({userId:'ci', storagePath:path}); if (!(await loaded.load()).ok || loaded.notes.getAll()[0]?.content !== 'package consumer') process.exit(1); } finally { await rm(dir, {recursive:true, force:true}); }"
+        run: npm run verify:packed
