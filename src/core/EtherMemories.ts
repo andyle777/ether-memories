@@ -17,6 +17,8 @@ import { cloneValue } from "../utils/clone.js";
 import { preparePortableImport, type PortableImportInput, type PortableImportLimits } from "../adapters/portableImport.js";
 import type { PortableImportReceipt } from "../types/index.js";
 import { prepareSnapshot, commitSnapshot } from "./snapshotPreparation.js";
+import type { MemoryExplanation, MemoryHealthReport, MemoryInspectionOptions } from "../types/index.js";
+import { explainMemory, inspectMemoryHealth } from "./memoryInspection.js";
 
 type EtherMemoriesBaseOptions = {
   userId: string;
@@ -64,6 +66,14 @@ export class EtherMemoriesCore {
   }
 
   touch(): void { this.identity.lastActive = new Date(); }
+
+  explainMemory(id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation> {
+    return explainMemory(this.notes, this.graph, id, options);
+  }
+
+  inspectMemoryHealth(options?: MemoryInspectionOptions): Result<MemoryHealthReport> {
+    return inspectMemoryHealth(this.notes, this.graph, options);
+  }
 
   addMemory(input: AddNoteInput): Result<MemoryNote> {
     const result = this.notes.add(input);
