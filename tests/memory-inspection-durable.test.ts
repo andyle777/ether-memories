@@ -36,7 +36,7 @@ describe("T2 durable logical reads", { timeout: 120000 }, () => {
     const spies = [];
     for (const owner of [io, files]) {
       for (const key of Object.keys(owner)) if (typeof (owner as Record<string, unknown>)[key] === "function") {
-        spies.push(vi.spyOn(owner as never, key as never).mockImplementation(() => { throw Error(`unexpected I/O: ${key}`); }));
+        spies.push(vi.spyOn(owner as unknown as Record<string, (...args: unknown[]) => unknown>, key).mockImplementation(() => { throw Error(`unexpected I/O: ${key}`); }));
       }
     }
     const clock = vi.spyOn(Date, "now").mockReturnValue(1893456000000);
