@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EtherMemoriesCore, type MemoryNote, type DreamSelector, type DreamCyclePreviewOptions } from "../src/index.js";
 import { value } from "./helpers/persistence.js";
-import { inspectionNotes } from "../src/core/inspectionSources.js";
+import { inspectionNotes, inspectionGraph } from "../src/core/inspectionSources.js";
 
 const AS_OF = 100;
 // Calls the real public method while allowing hostile untyped caller arguments.
@@ -125,5 +125,151 @@ describe("T3 bounded Dream selection", () => {
     fail(preview(fixture([{ id: "A", content: "x".repeat(65537) }]), { kind: "ids", ids: ["A"] }));
     fail(preview(fixture([{ id: "A", content: "é".repeat(32769) }]), { kind: "ids", ids: ["A"] }));
     expect(preview(fixture([{ id: "A", content: "x".repeat(65536) }]), { kind: "ids", ids: ["A"] }).ok).toBe(true);
+  });
+});
+
+describe("T3 dependency closure and information boundary", () => {
+  const ids = { kind: "ids", ids: ["A", "B"] };
+  const edge = (c: EtherMemoriesCore, id: string, from: string, to: string, relation = "related_to") =>
+    value(c.graph.addEdgeWithId(id, `memory:${from}`, `memory:${to}`, relation, { secret: "unused-edge-body" }));
+  it("binds selected-selected relationships and changes digest with their semantics", () => {
+    const c = fixture(); const a = value(preview(c, ids)) as any;
+    edge(c, "AB", "A", "B", "supports"); const b = value(preview(c, ids)) as any;
+    expect(b.graph).toEqual({ relationshipCount: 1 }); expect(b.dependencyDigest).not.toBe(a.dependencyDigest);
+    inspectionGraph(c.graph).setEdgeAttribute("AB", "relationship", "mentions");
+    expect(value(preview(c, ids))).not.toMatchObject({ dependencyDigest: b.dependencyDigest });
+  });
+  it("excludes secret neighbors, second degree, foreign edges and Diary from selection and identity", () => {
+    const c = fixture([{ id: "A" }, { id: "B" }, { id: "SECRET-C", content: "neighbor-secret-body" }, { id: "SECRET-D" }]);
+    const before = preview(c, ids);
+    edge(c, "SECRET-AC", "A", "SECRET-C"); edge(c, "SECRET-CD", "SECRET-C", "SECRET-D");
+    value(c.addDiaryEntry({ content: "diary-secret-body", tags: ["shared"] }));
+    expect(preview(c, ids)).toEqual(before); const text = JSON.stringify(before);
+    for (const sentinel of ["SECRET-C", "SECRET-D", "SECRET-AC", "neighbor-secret-body", "diary-secret-body"]) expect(text).not.toContain(sentinel);
+    expect(value(preview(c, { kind: "query", query: "diary secret body" }))).toMatchObject({ selectedSourceIds: [] });
+  });
+  it("never traverses neighbors or reads graph node labels/data", () => {
+    const c = fixture(); edge(c, "AB", "A", "B");
+    const graph = inspectionGraph(c.graph);
+    const neighbors = vi.spyOn(graph, "neighbors").mockImplementation(() => { throw Error("traversal forbidden"); });
+    const data = vi.spyOn(graph, "getNodeAttributes").mockImplementation(() => { throw Error("node content forbidden"); });
+    expect(value(preview(c, ids))).toMatchObject({ graph: { relationshipCount: 1 } });
+    expect(neighbors).not.toHaveBeenCalled(); expect(data).not.toHaveBeenCalled();
+  });
+  it("does not bind or expose arbitrary selected edge data", () => {
+    const c = fixture(); edge(c, "AB", "A", "B"); const before = preview(c, ids);
+    inspectionGraph(c.graph).setEdgeAttribute("AB", "data", { private: "huge-and-irrelevant", nested: Array(1000).fill("x") });
+    expect(preview(c, ids)).toEqual(before); expect(JSON.stringify(before)).not.toContain("unused-edge-body");
+  });
+  it("makes graph and note insertion permutations produce the same complete plan", () => {
+    const a = fixture([{ id: "A" }, { id: "B" }]), b = fixture([{ id: "B" }, { id: "A" }]);
+    edge(a, "AB", "A", "B"); edge(a, "BA", "B", "A", "mentions");
+    edge(b, "BA", "B", "A", "mentions"); edge(b, "AB", "A", "B");
+    expect(preview(a, ids)).toEqual(preview(b, { kind: "ids", ids: ["B", "A", "B"] }));
+  });
+  it("retains the independent empty-plan golden digest and distinct plan ID", () => {
+    const p = value(preview(fixture(), { kind: "tags", tags: ["missing"] })) as any;
+    expect(p.dependencyDigest).toBe("3b7d9df6e31ade3ca3ff96fd8154cf52fb481bd68d6ceeec4db590e08ba4f857");
+    expect(p.planId).toBe("8e1cdcc6cdac876342e0b265fe4f26c7ba00a9bcbbcbb716d19ece32afe0f295");
+    expect(p.planId).not.toBe(p.dependencyDigest);
+  });
+  it.each(["content", "tags", "expiresAt", "createdAt"])("binds consumed selected %s changes", key => {
+    const c = fixture(), source = inspectionNotes(c.notes) as Map<string, MemoryNote>;
+    const before = value(preview(c, ids)) as any, n = source.get("A")!;
+    if (key === "content") n.content = "new content";
+    if (key === "tags") n.tags = ["changed"];
+    if (key === "expiresAt") n.expiresAt = new Date(200);
+    if (key === "createdAt") n.createdAt = new Date(11);
+    expect(value(preview(c, ids))).not.toMatchObject({ dependencyDigest: before.dependencyDigest });
+  });
+  it("does not bind unused metadata, updatedAt or arbitrary application fields", () => {
+    const c = fixture(), before = preview(c, ids);
+    value(c.updateMemory("A", { metadata: { secret: "unused" }, summary: "unused summary", category: "unused category", importance: 0.1, confidence: 0.1, pinned: true }));
+    expect(preview(c, ids)).toEqual(before);
+  });
+  it("does not even read cyclic/accessor metadata or clone unselected sources", () => {
+    const c = fixture([{ id: "A" }, { id: "B" }, { id: "Z", content: "x".repeat(1000000) }]);
+    const source = inspectionNotes(c.notes) as Map<string, MemoryNote>, n = source.get("A")!;
+    Object.defineProperty(n, "metadata", { get() { throw Error("metadata forbidden"); } });
+    expect(preview(c, ids).ok).toBe(true);
+    const getter = vi.spyOn(c.notes, "valuesUnsafe").mockImplementation(() => { throw Error("full clone forbidden"); });
+    expect(preview(c, ids).ok).toBe(true); expect(getter).not.toHaveBeenCalled();
+  });
+  it("keeps ID plans stable after unrelated note changes and creation", () => {
+    const c = fixture([{ id: "A" }, { id: "B" }, { id: "Z" }]), before = preview(c, ids);
+    value(c.updateMemory("Z", { content: "unrelated new content", tags: ["different"] }));
+    value(c.addMemory({ content: "unrelated later note" })); expect(preview(c, ids)).toEqual(before);
+  });
+  it.each(["all_active", "query"])("binds relevant %s bounded-set and coverage changes", kind => {
+    const c = fixture([{ id: "B" }, { id: "C" }]), selector = kind === "query" ? { kind, query: "alpha" } : { kind };
+    const options = { asOf: 100, budgets: { maxSources: 1 } };
+    const before = value(preview(c, selector, options)) as any;
+    const source = inspectionNotes(c.notes) as Map<string, MemoryNote>, n = source.get("B")!;
+    source.set("A", { ...n, id: "A" }); const changed = value(preview(c, selector, options)) as any;
+    expect(changed.selectedSourceIds).toEqual(["A"]); expect(changed.dependencyDigest).not.toBe(before.dependencyDigest);
+    source.set("Z", { ...n, id: "Z" }); const coverage = value(preview(c, selector, options)) as any;
+    expect(coverage.selectedSourceIds).toEqual(["A"]); expect(coverage.knownCount).toBe(4); expect(coverage.planId).not.toBe(changed.planId);
+  });
+  it("does not bind a query-nonmatching note body's changes", () => {
+    const c = fixture([{ id: "A" }, { id: "Z", content: "unrelated" }]), selector = { kind: "query", query: "alpha" };
+    const before = preview(c, selector); value(c.updateMemory("Z", { content: "still unrelated" })); expect(preview(c, selector)).toEqual(before);
+  });
+  it("binds selector, budget and asOf changes to identity", () => {
+    const c = fixture(), a = value(preview(c, ids)) as any;
+    for (const next of [preview(c, { kind: "all_active" }), preview(c, ids, { asOf: 100, budgets: { maxSources: 2 } }), preview(c, ids, { asOf: 101 })]) {
+      expect(value(next)).not.toMatchObject({ planId: a.planId });
+    }
+  });
+  it("is locale-independent and uses no random plan identifiers", () => {
+    const c = fixture([{ id: "a" }, { id: "Z" }, { id: "A" }]);
+    vi.spyOn(String.prototype, "localeCompare").mockImplementation(() => { throw Error("locale forbidden"); });
+    vi.spyOn(Math, "random").mockImplementation(() => { throw Error("random forbidden"); });
+    expect(value(preview(c, { kind: "all_active" }))).toMatchObject({ selectedSourceIds: ["A", "Z", "a"] });
+  });
+  it("rejects relationship overflow rather than silently binding partial evidence", () => {
+    const c = fixture(); edge(c, "AB", "A", "B"); edge(c, "BA", "B", "A");
+    fail(preview(c, ids, { asOf: 100, budgets: { maxRelationships: 1 } }));
+    expect(value(preview(c, ids, { asOf: 100, budgets: { maxRelationships: 2 } }))).toMatchObject({ graph: { relationshipCount: 2 } });
+  });
+  it("handles selected self-relationships exactly once", () => {
+    const c = fixture(); edge(c, "AA", "A", "A"); expect(value(preview(c, ids))).toMatchObject({ graph: { relationshipCount: 1 } });
+  });
+  it.each(["maxDependencyBytes", "maxNoteDependencyBytes", "maxPlanBytes", "maxSelectionBytes"])("fails boundedly under tiny %s ceilings", key => {
+    fail(preview(fixture(), ids, { asOf: 100, budgets: { [key]: 1 } }));
+  });
+  it("rejects excess canonical tags before element access", () => {
+    const c = fixture(), n = (inspectionNotes(c.notes) as Map<string, MemoryNote>).get("A")!;
+    n.tags = Array(65).fill("x"); Object.defineProperty(n.tags, 0, { get() { throw Error("must not read"); } });
+    fail(preview(c, ids));
+  });
+  it("fails aggregate dependency bytes while each source is individually legal", () => {
+    const c = fixture(Array.from({ length: 17 }, (_, i) => ({ id: `n${i}`, content: "x".repeat(65536) })));
+    fail(preview(c, { kind: "all_active" }));
+  });
+  it("stops dependency projection before touching later bodies when the aggregate is exhausted", () => {
+    const c = fixture([{ id: "A", content: "x".repeat(1024) }, { id: "B" }]);
+    const n = (inspectionNotes(c.notes) as Map<string, MemoryNote>).get("B")!; let reads = 0;
+    Object.defineProperty(n, "content", { get() { reads++; return "late-body"; } });
+    fail(preview(c, ids, { asOf: 100, budgets: { maxDependencyBytes: 256 } })); expect(reads).toBe(0);
+  });
+  it("rejects query scan work before processing an excessive aggregate of unselected text", () => {
+    const c = fixture([{ id: "A", content: "unrelated" }, { id: "B", content: "unrelated" }]);
+    fail(preview(c, { kind: "query", query: "missing" }, { asOf: 100, budgets: { maxSelectionBytes: 5 } }));
+  });
+  it("keeps output small and completely detached in both directions", () => {
+    const c = fixture(); const p = value(preview(c, ids)) as any, old = structuredClone(p);
+    p.selectedSourceIds.push("foreign"); p.selector.ids.push("foreign"); p.budgets.maxSources = 1; p.graph.relationshipCount = 9;
+    expect(preview(c, ids)).toEqual({ ok: true, value: old });
+    value(c.updateMemory("A", { content: "later change" })); expect(old.selectedSourceIds).toEqual(["A", "B"]);
+    expect(JSON.stringify(p).length).toBeLessThan(2048); expect(p.asOf).toBeTypeOf("number");
+  });
+  it("never invokes condensation or creates candidates during preview", () => {
+    const c = fixture(); const before = c.exportData(), revision = c.notes.revision;
+    const condensation = vi.spyOn(c.condensation, "analyze").mockImplementation(() => { throw Error("analysis forbidden"); });
+    const commit = vi.spyOn(c.condensation, "commitAnalysis").mockImplementation(() => { throw Error("candidate creation forbidden"); });
+    const condense = vi.spyOn(c.condensation, "condense").mockImplementation(() => { throw Error("condensation forbidden"); });
+    expect(preview(c, ids).ok).toBe(true); expect(c.exportData()).toEqual(before); expect(c.notes.revision).toBe(revision);
+    expect(condensation).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled(); expect(condense).not.toHaveBeenCalled();
   });
 });

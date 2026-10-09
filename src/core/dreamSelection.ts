@@ -7,7 +7,7 @@ import { DreamInputError, dreamEpoch, dreamScalar, type DreamRequest } from "./d
 export interface DreamNoteDependency {
   id: string; content: string; tags: string[]; status: "active"; createdAt: number; expiresAt: number | null;
 }
-export interface DreamSelection { notes: DreamNoteDependency[]; knownCount: number; selectionTruncated: boolean }
+export interface DreamSelection { notes: DreamNoteDependency[]; knownCount: number; selectionTruncated: boolean; dependencyBytes: number }
 export const dreamBytes = (value: unknown, limit: number): Uint8Array => {
   const result = canonicalJson(value, { bytes: limit, depth: 16, nodes: 65536 });
   if (!result.ok) throw new DreamInputError("Dream dependency encoding exceeds its bounds or is invalid.");
@@ -60,13 +60,15 @@ export function selectDreamNotes(owner: object, request: DreamRequest): DreamSel
     if (selector.kind === "ids") charge(id);
     matched.push(id);
   }
+  let dependencyBytes = 0;
   const notes = matched.slice(0, budgets.maxSources).map(id => {
     const note = source.get(id)!;
     if (note.id !== id) throw new DreamInputError("Canonical Dream note identity does not match its key.");
     const dependency: DreamNoteDependency = { id: dreamScalar(id), content: content(note, request), tags: tags(note, request),
       status: "active", createdAt: epoch(note.createdAt), expiresAt: note.expiresAt === undefined ? null : epoch(note.expiresAt) };
-    dreamBytes(dependency, budgets.maxNoteDependencyBytes);
+    dependencyBytes += dreamBytes(dependency, budgets.maxNoteDependencyBytes).byteLength;
+    if (dependencyBytes > budgets.maxDependencyBytes) throw new DreamInputError("Dream aggregate source dependency byte ceiling exceeded.");
     return dependency;
   });
-  return { notes, knownCount: matched.length, selectionTruncated: matched.length > notes.length };
+  return { notes, knownCount: matched.length, selectionTruncated: matched.length > notes.length, dependencyBytes };
 }
