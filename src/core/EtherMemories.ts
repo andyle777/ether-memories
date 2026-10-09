@@ -19,6 +19,8 @@ import type { PortableImportReceipt } from "../types/index.js";
 import { prepareSnapshot, commitSnapshot } from "./snapshotPreparation.js";
 import type { MemoryExplanation, MemoryHealthReport, MemoryInspectionOptions } from "../types/index.js";
 import { explainMemory, inspectMemoryHealth } from "./memoryInspection.js";
+import type { DreamSelector, DreamCyclePreviewOptions, DreamPlan } from "../types/dreamPlan.js";
+import { previewDreamCycle } from "./dreamPlan.js";
 
 type EtherMemoriesBaseOptions = {
   userId: string;
@@ -73,6 +75,10 @@ export class EtherMemoriesCore {
 
   inspectMemoryHealth(options?: MemoryInspectionOptions): Result<MemoryHealthReport> {
     return inspectMemoryHealth(this.notes, this.graph, options);
+  }
+
+  previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> {
+    return previewDreamCycle(this.notes, this.graph, selector, options);
   }
 
   addMemory(input: AddNoteInput): Result<MemoryNote> {

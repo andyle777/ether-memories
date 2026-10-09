@@ -1,6 +1,7 @@
 import type { MEMORY_CONTEXT_SCHEMA_VERSION, PORTABLE_RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION } from "../version.js";
 import type { DurableStorageOperations, PersistenceErrorCode } from "./persistence.js";
 export * from "./persistence.js";
+export type { DreamSelector, DreamBudgets, DreamCyclePreviewOptions, DreamPlan } from "./dreamPlan.js";
 
 export type MemorySource =
   | "user"
