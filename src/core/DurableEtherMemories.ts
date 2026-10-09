@@ -30,6 +30,8 @@
 
 import type { MemoryExplanation, MemoryHealthReport, MemoryInspectionOptions } from "../types/index.js";
 import { explainMemory, inspectMemoryHealth } from "./memoryInspection.js";
+import type { DreamSelector, DreamCyclePreviewOptions, DreamPlan } from "../types/dreamPlan.js";
+import { previewDreamCycle } from "./dreamPlan.js";
 import type {
   BuildMemoryContextInput, DiaryEntry, EtherSnapshot, MemoryContext, MemoryNote, MindGraphEdge, RetrievalMatch, UserIdentity
 } from "../types/index.js";
@@ -166,6 +168,7 @@ export interface DurableEtherMemories {
   exportData(): Result<EtherSnapshot>;
   explainMemory(id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation>;
   inspectMemoryHealth(options?: MemoryInspectionOptions): Result<MemoryHealthReport>;
+  previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan>;
   addMemory(input: AddNoteInput, mutationId: string): Promise<Result<MemoryNote>>;
   updateMemory(id: string, patch: UpdateNoteInput, mutationId: string): Promise<Result<MemoryNote>>;
   promoteCandidate(id: string, mutationId: string): Promise<Result<MemoryNote>>;
@@ -784,6 +787,13 @@ class DurableRuntime implements DurableEtherMemories {
     return inspectMemoryHealth(generation.value.notes, generation.value.graph, options);
   }
 
+  previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> {
+    const generation = this.#readable();
+    if (!generation.ok) return generation;
+    if (this.#lifecycle === "recovery-required") return err("RECOVERY_REQUIRED", "Recover before planning logical memory.");
+    return previewDreamCycle(generation.value.notes, generation.value.graph, selector, options);
+  }
+
   queryMemoriesDetailed(text: string, options?: QueryOptions): Result<RetrievalMatch[]> {
     const generation = this.#readable();
     if (!generation.ok) return generation;
@@ -1176,6 +1186,7 @@ const createFacade = (implementation: DurableRuntime): DurableEtherMemories => O
   exportData: (): Result<EtherSnapshot> => implementation.exportData(),
   explainMemory: (id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation> => implementation.explainMemory(id, options),
   inspectMemoryHealth: (options?: MemoryInspectionOptions): Result<MemoryHealthReport> => implementation.inspectMemoryHealth(options),
+  previewDreamCycle: (selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> => implementation.previewDreamCycle(selector, options),
   addMemory: (input: AddNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.addMemory(input, mutationId),
   updateMemory: (id: string, patch: UpdateNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.updateMemory(id, patch, mutationId),
   promoteCandidate: (id: string, mutationId: string): Promise<Result<MemoryNote>> => implementation.promoteCandidate(id, mutationId),

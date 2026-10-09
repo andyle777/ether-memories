@@ -12,6 +12,19 @@ Ether Memories has three foundations:
 
 Condensation is a **processing layer**, not a fourth foundation.
 
+## Dream Plan preview
+
+`previewDreamCycle(selector, options?)` selects and binds a bounded, ephemeral
+plan on Core and the durable facade. Provide explicit IDs, exact tags, a local
+content-token query, a creation date window, or explicit `all_active`. A single
+`asOf` grounds active/promoted eligibility and expiry; callers may lower the
+production budgets. Only relationships between selected Memory Notes count.
+Graph neighbors and Diary never expand sources. Plans and IDs are deterministic,
+detached, and contain no source bodies. Preview performs no analysis,
+condensation, proposal generation, mutation or persistence. `runDreamCycle()`
+is future T4 work and is unavailable. See [the exact Dream v1 selector, dependency
+and limit contract](docs/dream-plan.md).
+
 ## v0.6.0 — Durable Persistence
 
 v0.6.0 adds an opt-in durable transactional store for the same three foundations: an append-only write-ahead log, exclusive writer authority, and crash-consistent startup recovery. The in-memory core and all v0.5.0 deterministic-retrieval behavior are unchanged.
