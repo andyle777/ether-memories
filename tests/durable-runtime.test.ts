@@ -549,9 +549,9 @@ describe("durable runtime runtime-enforced encapsulation (final RED)", { timeout
       expect((runtime as unknown as Record<string, unknown>)[name], name).toBeUndefined();
     }
     // The facade owns exactly the approved public surface - nothing else.
-    // T2 adds precisely the two approved observation APIs; retain every existing gate.
+    // T3 adds only previewDreamCycle to the approved T2 surface; retain every gate.
     const approved = ["explainMemory", "inspectMemoryHealth", "state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
-      "getSystemState", "exportData", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
+      "getSystemState", "exportData", "previewDreamCycle", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
       "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "collectGarbage", "runMaintenance", "recover", "close"].sort();
     expect(Object.getOwnPropertyNames(runtime).sort()).toEqual(approved);
     expect(Object.keys(runtime).sort()).toEqual(approved);
