@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepack": "npm run build",
-    "verify:packed": "node scripts/verify-packed-consumer.mjs"
+    "verify:packed": "node scripts/verify-packed-consumer.mjs",
+    "verify:toolchain": "node scripts/verify-toolchain-security.mjs",
+    "verify:workers": "node scripts/verify-test-worker-exit.mjs"
   },
   "keywords": [
     "memory",
@@ -31,7 +33,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
   },
   "files": [
     "dist",

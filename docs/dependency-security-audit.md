@@ -1,84 +1,106 @@
-# Dependency security correction before v0.7.0 T3
+# T2 security remediation and re-freeze gates
 
-Investigation date: 9 October 2026. Frozen T2 parent:
-`38876a0571582f79e4ddbc2b95be70f12ede95fc`. This is a bounded tooling
-correction, not a tranche. Ether Memories remains version **0.6.0**.
+The owner reopened T2 on 9 October 2026 to repair the supported development/CI
+baseline. The earlier dev-only/T6 deferral is superseded. This remains T2
+stabilization; no T3, T5 integration, T7 or version bump is included.
 
-## Reproduction and production gate
+## Historical lineage and current gate
 
-Clean `npm ci` followed by `npm audit --json`, `npm audit --omit=dev --json`
-and `npm audit --omit=dev` reproduced the same advisory set with:
+- Release v0.6.0: 493c7b69813e71af749e34bbf950803eb8ee589b.
+- T1: 438a038f1aafbd636777f0dd7fb2c8eec3597e45.
+- Original T2: 38876a0571582f79e4ddbc2b95be70f12ede95fc — original functional
+  freeze candidate, superseded by security remediation; history is retained.
+- Security intermediate: 3eccdb6ca60dbfd49eba4a2bad8ac19b7c4a02c7, PR #27.
 
-| Environment | Full audit before | Full audit after | Production audit |
-| --- | --- | --- | --- |
-| Node 22.23.3 / npm 10.9.9 | 4 packages: 1 moderate, 1 high, 2 critical | 3 packages: 1 moderate, 2 critical | 0 findings; exit 0 |
-| Node 24.21.0 / npm 11.19.0 | 4 packages: 1 moderate, 1 high, 2 critical | 3 packages: 1 moderate, 2 critical | 0 findings; exit 0 |
+Only a candidate-specific re-freeze report proving every gate below can designate
+the new authoritative T2 SHA. Production-clean alone is insufficient.
 
-Full audits exit 1 because development findings remain. The original four
-vulnerable-package findings represent four unique advisories and five
-package/advisory pairs: the Vitest advisory affects both Vitest and its mocker.
-Vitest's critical aggregate severity comes from Tinypool; its own advisory is
-moderate. The findings are dependency-tree-specific, with no observed difference
-between these Node/npm pairs; this comparison does not isolate Node and npm as
-independent experimental variables.
+## Selected supported owner migration
 
-The npm advisories observed during development installation are confined to
-development/build/test dependencies and are not present in Ether Memories'
-production dependency set. This does not establish zero risk in development or CI.
+Vitest is pinned to **4.1.11**, the smallest fixed stable line identified by
+[GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9).
+All seven @vitest packages move from 3.2.7 to 4.1.11, including mocker.
+Tinypool1.1.1 and vite-node3.2.4 are removed by the owner's normal dependency
+resolution. The two critical Tinypool advisories,
+[GHSA-5gmw-xhrv-c9v3](https://github.com/advisories/GHSA-5gmw-xhrv-c9v3) and
+[GHSA-85c8-ppgw-ccpr](https://github.com/advisories/GHSA-85c8-ppgw-ccpr), are
+resolved by eliminating that dependency path, not by forcing a single partial
+patch. No Tinypool copy remains in the selected lockfile.
 
-## Each original advisory
+The prior source-map-js1.2.2 patch for
+[GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) is retained.
+Vite7.3.6 becomes an explicit exact dev dependency to preserve the existing
+compatible Vite baseline. Vitest4.1.11 accepts Vite6/7/8 in both its dependency
+and peer range. The initial default installation selected Vite8/Rolldown and
+much broader changes; that disposable experiment was not selected. Normal npm
+resolution from the intermediate with exact Vitest4.1.11/Vite7.3.6 preserves
+Vite7, esbuild, Rollup, PostCSS, TypeScript5.9.3 and @types/node22.20.1.
 
-| Advisory | Affected installed packages and severity | Vulnerable range; fixed release | Exposure and disposition |
-| --- | --- | --- | --- |
-| [GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9), CVE-2026-84373 | `vitest@3.2.7` (direct dev) and `@vitest/mocker@3.2.7` (transitive dev); moderate | `>=2.1.0 <4.1.11`; fixed in 4.1.11 | Arbitrary file reads through mock redirect targets and exposed unauthenticated plugin HMR. The repository uses CLI test runs, with no browser/UI/custom mocker plugin configuration found. No production path identified. Upstream does not plan a Vitest 3 backport; defer incompatible major migration to T6. |
-| [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q), CVE-2026-93749 | `source-map-js@1.2.1` (transitive dev); high | `>=1.0.0 <1.2.2`; fixed in 1.2.2 | Indexed source-map offsets can block the event loop. Used through PostCSS/Vite tooling, with no production import/input path identified. Safely patched to 1.2.2 within the existing parent range. |
-| [GHSA-5gmw-xhrv-c9v3](https://github.com/advisories/GHSA-5gmw-xhrv-c9v3), CVE-2026-104848 | `tinypool@1.1.1` (transitive dev); critical | `<=2.1.0`; fixed in 2.1.1 | Inherited `execArgv`/`env` worker options after prototype pollution can enable code execution. Test-worker execution is relevant to development/CI, conditional on pollution and attacker-controlled payloads; no production path identified. 2.1.1 alone does not fix the other Tinypool advisory. Defer to T6. |
-| [GHSA-85c8-ppgw-ccpr](https://github.com/advisories/GHSA-85c8-ppgw-ccpr), CVE-2026-104849 | `tinypool@1.1.1` (transitive dev); critical | `<2.1.2`; fixed in 2.1.2 | Inherited task `filename` after prototype pollution can load attacker-controlled workers. Relevant conditional development/CI exposure, with no production path identified. 2.1.2 fixes both Tinypool advisories but exceeds the owning Vitest range. Defer to T6. |
+Command used: npm install --save-dev --save-exact --prefer-dedupe
+vitest@4.1.11 vite@7.3.6. All changed lock entries are owning Vitest packages,
+their legitimately changed dependencies, or removed dependencies no longer used
+by the owner. No override, force, downgrade from the canonical baseline,
+ignored advisory or arbitrary graph edit was used. The production dependency
+tree and package/library version0.6.0 are unchanged.
 
-None of these packages is in the published runtime dependency tree. The two
-direct runtime dependencies remain `graphology@0.26.0` and
-`graphology-types@^0.24.8`, with their original locked production dependencies.
+## Compatibility review
 
-## Dependency paths and compatibility decision
+The [Vitest4 migration guide](https://v4.vitest.dev/guide/migration) documents
+the pool rewrite removing Tinypool and changes to mock restoration. Ether uses
+manual vi.spyOn/vi.fn with per-test cleanup; no automocked modules, constructor
+mocks, fake timers, custom pools, globals, snapshot serializers, test concurrency
+or deprecated pool configuration are present. Existing hooks, ESM imports,
+numeric/suite timeouts and TypeScript assertions are retained.
 
-```text
-ether-memories@0.6.0
-└─ vitest@3.2.7 [direct dev; root ^3.0.0]
-   ├─ @vitest/mocker@3.2.7 [exact 3.2.7]
-   ├─ tinypool@1.1.1 [^1.1.1 excludes fixed 2.1.2]
-   ├─ vite-node@3.2.4 → vite@7.3.6 [deduplicated]
-   └─ vite@7.3.6
-      └─ postcss@8.5.26
-         └─ source-map-js@1.2.1 → 1.2.2 [^1.2.1 accepts patch]
-```
+Spies are created inside tests and restored before the next test, so tests do not
+depend on restoreAllMocks clearing retained call history. Assertions check the
+current test's local spies before restoration. One existing test-only never cast
+is changed to a callable-record cast for the new spyOn overload; its TypeScript-
+erased JavaScript and all assertions are unchanged. No runtime or timeout edit
+is required. Full suites on both Node pairs, a seeded
+shuffle run and four OS/Node CI jobs provide independent ordering/scheduling
+coverage. Results and exact versions belong in the candidate-specific report.
 
-The direct owner is already at the latest compatible Vitest 3 release, 3.2.7;
-an owner update dry run offered no changed package. npm's audit proposal selects
-Vitest 5.0.3 and explicitly marks it as a semver-major change. No compatible
-direct-tool update repairs the remaining advisories. No major upgrade, downgrade,
-override or `npm audit fix --force` was implemented.
+## Deterministic security and worker gates
 
-The selected repair was normal npm resolution:
-`npm update source-map-js --package-lock-only --ignore-scripts`.
-Only the source-map-js lock entry's version, resolved URL and integrity changed.
-Unrelated libc metadata removed by npm 10 was restored from the frozen lockfile.
-No package entries were added or removed; `package.json` is identical.
+npm run verify:toolchain is offline. It scans every lock entry, including nested
+copies and named aliases, and rejects stable versions below Vitest/mocker4.1.11,
+Tinypool2.1.2 and source-map-js1.2.2. Targeted malformed/prerelease versions fail
+closed, and required Vitest/mocker entries must exist. This checks the known
+advisory baseline; it cannot discover future advisories. Fresh full and
+production npm audits on both Node pairs remain mandatory release/freeze gates.
+No unstable advisory-network dependency is added to CI.
 
-## Frozen scope and required closure evidence
+npm run verify:workers runs after npm test in an isolated checkout and detects
+remaining checkout-scoped Node processes on Windows or Linux. It observes
+processes and fails on leaks; it neither kills workers nor suppresses warnings.
+Windows matches normalized process command paths; Linux checks Node process
+working directories. Process-exit checks complement clean test exits and raw
+warning/hang/timeout inspection. Use a dedicated checkout without simultaneous
+Node commands in that same checkout for this gate.
 
-All source, tests, scripts, CI, runtime dependencies, exports and persistence
-formats remain byte-identical to T2 in Git. This preserves
-`ether.memory_store.v0.3`, WAL v1, receipt ledger v1, HEAD v1, checkpoint v1,
-MemoryContext v1 and Portable Record v1, including all five frozen fixtures.
+Both new gates are added to every existing CI job. Checkout, setup, install,
+typecheck, all743 inherited tests, build, pack and packed consumer remain intact.
+Negative controls prove rejection of the real vulnerable intermediate, nested
+vulnerable copies, incomplete Tinypool patches, and invalid versions; positive
+controls cover fixed boundaries and Tinypool's legitimate absence. A live Node
+child control proves the worker check fails while it runs and passes after exit.
 
-Closure requires clean audits on the exact final commit under both environments,
-all 32 files / 743 inherited tests without deletion or skips, typecheck, build,
-pack and packed-consumer verification, and all four existing Ubuntu/Windows ×
-Node 22/24 CI jobs. The accompanying candidate-specific evidence report records
-the exact SHA, PR, CI run/job IDs and raw audit results.
+## Required re-freeze evidence
 
-The intended permitted outcome is **GREEN — classified, no production exposure**,
-not fully repaired. T6 must review a compatible migration strategy for the Vitest
-and Tinypool advisories and rerun security and consumer verification. Remaining
-critical development advisories are acknowledged, not waived or declared harmless.
-No T3 implementation, T7, persistence changes or v0.7.0 release bump is included.
+The exact final SHA must pass clean Node22 and Node24 full/prod audits at zero,
+all32files/743 inherited tests without deletion/skips/todos, typecheck, build,
+pack and packed consumer; default and shuffled scheduling must remain clean.
+All four Ubuntu/Windows × Node22/24 CI jobs must pass, with no FileHandle cleanup
+warning, worker leak, hang or timeout regression. A fresh hostile review must
+have no unresolved material finding.
+
+All runtime sources/tests, T2 functional contracts, exports, schemas, writer
+authority and durable behavior remain unchanged. Store v0.3, WAL/receipt/HEAD/
+checkpoint v1, MemoryContext v1, Portable Record v1 and all five fixture hashes
+must match the historical gates. Compiled runtime/declaration bytes must match
+original T2. package.json's dev pins and verification scripts are the expected
+published metadata changes; runtime dependencies and exports must not change.
+
+Do not merge automatically. After successful re-freeze, only the new reported
+T2 SHA is a valid parent for T3; do not start T3 as part of this task.
