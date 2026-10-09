@@ -51,6 +51,11 @@ one Date.now observation is captured at planner entry and reused everywhere.
 The durable facade first enforces existing CLOSED/RECOVERY_REQUIRED precedence;
 those failures do not read a clock or validate the selector.
 
+Request/option/budget objects and selector arrays must be ordinary data
+containers. Accessor fields fail without getter invocation. Proxy containers
+are rejected using Node's built-in proxy detection before prototype, property
+or array checks can invoke caller traps. No new dependency is required.
+
 ## Plan fields and forward validation
 
 The four public types are `DreamSelector`, `DreamBudgets`,

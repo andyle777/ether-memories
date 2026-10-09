@@ -1,4 +1,5 @@
 import type { DreamBudgets, DreamSelector } from "../types/dreamPlan.js";
+import { types } from "node:util";
 import { codeUnitCompare, tokenize } from "./Tokenizer.js";
 
 export const DREAM_BUDGETS: Readonly<DreamBudgets> = Object.freeze({
@@ -22,6 +23,7 @@ export function dreamScalar(value: unknown, limit: number = DREAM_INPUT_LIMITS.s
 }
 // Read only own data properties: caller accessors are never invoked.
 const record = (value: unknown, fields: readonly string[]): Record<string, unknown> => {
+  if (types.isProxy(value)) throw new DreamInputError("Proxy Dream request containers are not supported.");
   if (typeof value !== "object" || value === null || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new DreamInputError("Expected plain Dream request data.");
   const result: Record<string, unknown> = {};
   for (const key in value) {
@@ -36,6 +38,7 @@ const record = (value: unknown, fields: readonly string[]): Record<string, unkno
   return result;
 };
 const selectorList = (value: unknown): string[] => {
+  if (types.isProxy(value)) throw new DreamInputError("Proxy Dream selector arrays are not supported.");
   if (!Array.isArray(value) || value.length === 0 || value.length > DREAM_INPUT_LIMITS.selectorCount) throw new DreamInputError("Dream selector needs 1..256 raw IDs or tags.");
   const list: string[] = [];
   for (let i = 0; i < value.length; i++) {

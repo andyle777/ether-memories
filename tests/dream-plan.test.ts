@@ -103,6 +103,22 @@ describe("T3 bounded Dream selection", () => {
     const options = { get asOf() { reads++; return 100; } };
     fail(preview(c, selector)); fail(preview(c, { kind: "all_active" }, options)); expect(reads).toBe(0);
   });
+  it.each(["selector", "options", "budgets", "ids", "tags"])("rejects proxy %s containers before invoking any caller trap", location => {
+    const c = fixture(); let traps = 0;
+    const wrap = (target: object) => new Proxy(target, {
+      getPrototypeOf(value) { traps++; return Reflect.getPrototypeOf(value); },
+      ownKeys(value) { traps++; return Reflect.ownKeys(value); },
+      get(value, key, receiver) { traps++; return Reflect.get(value, key, receiver); },
+      getOwnPropertyDescriptor(value, key) { traps++; return Reflect.getOwnPropertyDescriptor(value, key); }
+    });
+    let selector: unknown = { kind: "ids", ids: ["A"] }, options: unknown = { asOf: 100 };
+    if (location === "selector") selector = wrap({ kind: "all_active" });
+    if (location === "options") options = wrap({ asOf: 100 });
+    if (location === "budgets") options = { asOf: 100, budgets: wrap({ maxSources: 1 }) };
+    if (location === "ids") selector = { kind: "ids", ids: wrap(["A"]) };
+    if (location === "tags") selector = { kind: "tags", tags: wrap(["shared"]) };
+    const result = preview(c, selector, options); expect(traps).toBe(0); fail(result);
+  });
   it("selects deterministically at the source ceiling and reports exact truncated coverage", () => {
     const c = fixture(Array.from({ length: 129 }, (_, i) => ({ id: `n${String(128 - i).padStart(3, "0")}` })));
     const p = value(preview(c, { kind: "all_active" })) as any;
