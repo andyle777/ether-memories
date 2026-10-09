@@ -103,6 +103,19 @@ describe("T3 bounded Dream selection", () => {
     const options = { get asOf() { reads++; return 100; } };
     fail(preview(c, selector)); fail(preview(c, { kind: "all_active" }, options)); expect(reads).toBe(0);
   });
+  it.each([
+    [4097, "\u0130a".repeat(1365) + " a"],
+    [6144, "\u0130a".repeat(2048)]
+  ] as const)("rejects bounded raw queries that expand to %i normalized units", (_normalizedUnits, query) => {
+    expect(query.length).toBeLessThanOrEqual(4096);
+    fail(preview(fixture(), { kind: "query", query }));
+  });
+  it("replays the returned normalized query exactly at the canonical query ceiling", () => {
+    const c = fixture([{ id: "A", content: "i ai aa" }]);
+    const plan = value(preview(c, { kind: "query", query: "\u0130a".repeat(1365) + "a" })) as any;
+    expect(plan.selector.query.length).toBe(4096); expect(plan.selectedSourceIds).toEqual(["A"]);
+    expect(preview(c, plan.selector, { asOf: plan.asOf, budgets: plan.budgets })).toEqual({ ok: true, value: plan });
+  });
   it.each(["selector", "options", "budgets", "ids", "tags"])("rejects proxy %s containers before invoking any caller trap", location => {
     const c = fixture(); let traps = 0;
     const wrap = (target: object) => new Proxy(target, {

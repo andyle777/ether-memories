@@ -70,6 +70,7 @@ export function normalizeDreamRequest(selectorInput: unknown, optionsInput: unkn
     case "tags": only("kind", "tags"); selector = { kind: "tags", tags: selectorList(raw.tags) }; break;
     case "query": {
       only("kind", "query"); const query = tokenize(dreamScalar(raw.query, DREAM_INPUT_LIMITS.query)).join(" ");
+      if (query.length > DREAM_INPUT_LIMITS.query) throw new DreamInputError("Normalized Dream query exceeds its scalar bound.");
       if (!query) throw new DreamInputError("Dream query needs lexical tokens.");
       selector = { kind: "query", query }; break;
     }

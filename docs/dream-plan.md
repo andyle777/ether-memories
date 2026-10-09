@@ -121,7 +121,7 @@ irrelevant. No global store revision invalidates a plan.
 | --- | --- |
 | Raw selector IDs/tags | 256 |
 | ID/tag/edge-ID/relationship scalar | 256 UTF16 code units |
-| Raw query | 4096 UTF16 code units |
+| Raw and normalized query | 4096 UTF16 code units each |
 | Non-ID population | 4096 notes |
 | Selected sources | 128 |
 | Canonical raw tags per examined note | 64 |
