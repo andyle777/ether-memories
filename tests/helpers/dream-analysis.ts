@@ -17,8 +17,8 @@ export function seedDreamCore(
   for (const source of sources) requireValue(core.graph.addNode({ id: `memory:${source.id}`, type: "memory", data: {} }));
   for (const edge of relationships) requireValue(core.graph.addEdgeWithId(edge.id, `memory:${edge.source}`, `memory:${edge.target}`, edge.relationship));
   const snapshot = core.exportData();
-  snapshot.identity.createdAt = new Date(1).toISOString();
-  snapshot.identity.lastActive = new Date(2).toISOString();
+  snapshot.identity.createdAt = new Date(1);
+  snapshot.identity.lastActive = new Date(2);
   requireValue(core.importData(snapshot));
   return core;
 }
