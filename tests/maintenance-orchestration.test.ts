@@ -55,15 +55,15 @@ const committedWalBytes = async (store: Awaited<ReturnType<typeof bootstrap>>, c
 };
 
 describe("Tranche 10 maintenance orchestration", { timeout: 300_000 }, () => {
-  it("exposes exactly the 23-member facade after T3: runMaintenance present, maintenanceStatus absent", async () => {
+  it("exposes exactly the 24-member facade after T4: runMaintenance present, maintenanceStatus absent", async () => {
     const s = await setup();
     const runtime = await openRuntime(s);
-    // Preserve every inherited member; T3 adds only the read-only Dream preview.
+    // Preserve every inherited member; T4 adds only read-only Dream execution.
     const approved = ["explainMemory", "inspectMemoryHealth", "state", "tip", "queryMemories", "queryMemoriesDetailed", "buildMemoryContext",
-      "getSystemState", "exportData", "previewDreamCycle", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
+      "getSystemState", "exportData", "previewDreamCycle", "runDreamCycle", "addMemory", "updateMemory", "promoteCandidate", "deleteMemory",
       "addDiaryEntry", "updateDiary", "deleteDiary", "addGraphEdge", "rotate", "collectGarbage",
       "runMaintenance", "recover", "close"].sort();
-    expect(approved.length).toBe(23);
+    expect(approved.length).toBe(24);
     expect(Object.getOwnPropertyNames(runtime).sort()).toEqual(approved);
     expect("maintenanceStatus" in runtime).toBe(false);
     expect((publicApi as Record<string, unknown>).maintenanceStatus).toBeUndefined();

@@ -32,6 +32,8 @@ import type { MemoryExplanation, MemoryHealthReport, MemoryInspectionOptions } f
 import { explainMemory, inspectMemoryHealth } from "./memoryInspection.js";
 import type { DreamSelector, DreamCyclePreviewOptions, DreamPlan } from "../types/dreamPlan.js";
 import { previewDreamCycle } from "./dreamPlan.js";
+import type { DreamCycleResult } from "../types/dreamAnalysis.js";
+import { runDreamCycle } from "./dreamExecution.js";
 import type {
   BuildMemoryContextInput, DiaryEntry, EtherSnapshot, MemoryContext, MemoryNote, MindGraphEdge, RetrievalMatch, UserIdentity
 } from "../types/index.js";
@@ -169,6 +171,7 @@ export interface DurableEtherMemories {
   explainMemory(id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation>;
   inspectMemoryHealth(options?: MemoryInspectionOptions): Result<MemoryHealthReport>;
   previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan>;
+  runDreamCycle(plan: DreamPlan): Result<DreamCycleResult>;
   addMemory(input: AddNoteInput, mutationId: string): Promise<Result<MemoryNote>>;
   updateMemory(id: string, patch: UpdateNoteInput, mutationId: string): Promise<Result<MemoryNote>>;
   promoteCandidate(id: string, mutationId: string): Promise<Result<MemoryNote>>;
@@ -794,6 +797,13 @@ class DurableRuntime implements DurableEtherMemories {
     return previewDreamCycle(generation.value.notes, generation.value.graph, selector, options);
   }
 
+  runDreamCycle(plan: DreamPlan): Result<DreamCycleResult> {
+    const generation = this.#readable();
+    if (!generation.ok) return generation;
+    if (this.#lifecycle === "recovery-required") return err("RECOVERY_REQUIRED", "Recover before analyzing logical memory.");
+    return runDreamCycle(generation.value.notes, generation.value.graph, plan);
+  }
+
   queryMemoriesDetailed(text: string, options?: QueryOptions): Result<RetrievalMatch[]> {
     const generation = this.#readable();
     if (!generation.ok) return generation;
@@ -1187,6 +1197,7 @@ const createFacade = (implementation: DurableRuntime): DurableEtherMemories => O
   explainMemory: (id: string, options?: MemoryInspectionOptions): Result<MemoryExplanation> => implementation.explainMemory(id, options),
   inspectMemoryHealth: (options?: MemoryInspectionOptions): Result<MemoryHealthReport> => implementation.inspectMemoryHealth(options),
   previewDreamCycle: (selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> => implementation.previewDreamCycle(selector, options),
+  runDreamCycle: (plan: DreamPlan): Result<DreamCycleResult> => implementation.runDreamCycle(plan),
   addMemory: (input: AddNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.addMemory(input, mutationId),
   updateMemory: (id: string, patch: UpdateNoteInput, mutationId: string): Promise<Result<MemoryNote>> => implementation.updateMemory(id, patch, mutationId),
   promoteCandidate: (id: string, mutationId: string): Promise<Result<MemoryNote>> => implementation.promoteCandidate(id, mutationId),
