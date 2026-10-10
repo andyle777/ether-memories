@@ -21,6 +21,8 @@ import type { MemoryExplanation, MemoryHealthReport, MemoryInspectionOptions } f
 import { explainMemory, inspectMemoryHealth } from "./memoryInspection.js";
 import type { DreamSelector, DreamCyclePreviewOptions, DreamPlan } from "../types/dreamPlan.js";
 import { previewDreamCycle } from "./dreamPlan.js";
+import type { DreamCycleResult } from "../types/dreamAnalysis.js";
+import { runDreamCycle } from "./dreamExecution.js";
 
 type EtherMemoriesBaseOptions = {
   userId: string;
@@ -79,6 +81,10 @@ export class EtherMemoriesCore {
 
   previewDreamCycle(selector: DreamSelector, options?: DreamCyclePreviewOptions): Result<DreamPlan> {
     return previewDreamCycle(this.notes, this.graph, selector, options);
+  }
+
+  runDreamCycle(plan: DreamPlan): Result<DreamCycleResult> {
+    return runDreamCycle(this.notes, this.graph, plan);
   }
 
   addMemory(input: AddNoteInput): Result<MemoryNote> {
