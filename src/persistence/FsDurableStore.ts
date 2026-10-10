@@ -4,7 +4,7 @@ import { err, ok, type Result } from "../utils/result.js";
 import { STORE_SCHEMA_VERSION } from "../version.js";
 import { decodeStoreHead, encodeStoreHead, persistenceLimits, verifyCheckpoint,
   type PersistedStoreHead, type PersistenceLimitOptions, type PersistenceLimits } from "./codecs.js";
-import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
+import { activationMatches, DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -25,6 +25,12 @@ export interface HeadActivationReceipt {
   readonly activation: "atomic";
   readonly durability: "confirmed";
 }
+export interface RecoverableHeadActivationResult {
+  readonly head: PersistedStoreHead;
+  readonly activation: "process-recoverable";
+  readonly acknowledgment: "process-recoverable";
+}
+export type InternalHeadActivationResult = HeadActivationReceipt | RecoverableHeadActivationResult;
 
 /** Metadata foundation only. Not a StoragePort, recovered store, or durable memory mutator. */
 export class FsDurableStore {
@@ -113,7 +119,7 @@ export class FsDurableStore {
   }
 
   /** Bootstrap an absent directory from a prepared checkpoint. No overwrite, migration or recovery. */
-  async initialize(input: { readonly head: PersistedStoreHead; readonly checkpointBytes: Uint8Array }): Promise<Result<HeadActivationReceipt>> {
+  async initialize(input: { readonly head: PersistedStoreHead; readonly checkpointBytes: Uint8Array }): Promise<Result<InternalHeadActivationResult>> {
     if (!this.limits.ok) return this.limits;
     const limits = this.limits.value;
     const encoded = encodeStoreHead(input.head, limits);
@@ -133,7 +139,7 @@ export class FsDurableStore {
     let ownsLock = false;
     let phase = "preflight";
     let activation = "not-attempted";
-    let result: Result<HeadActivationReceipt>;
+    let result: Result<InternalHeadActivationResult>;
     try {
       await this.pathChain();
       const existing = await this.inspect();
@@ -167,8 +173,8 @@ export class FsDurableStore {
       phase = "activation";
       activation = "unconfirmed";
       const activated = await this.io.activateFile(candidate, join(this.directory, "HEAD"));
-      if (activated !== "atomic") throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "Backend did not confirm atomic activation.");
-      activation = "atomic-visible";
+      if (!activationMatches(this.io, activated)) throw new DirectoryIoError("DURABILITY_UNAVAILABLE", "Backend did not establish the selected activation capability.");
+      activation = activated === "atomic" ? "atomic-visible" : "process-visible";
       phase = "activation-barrier";
       await this.io.syncDirectory(join(this.directory, ".private"));
       await this.io.syncDirectory(this.directory);
@@ -176,7 +182,9 @@ export class FsDurableStore {
       await this.io.removeOwnedFile(lock);
       ownsLock = false;
       await this.io.syncDirectory(this.directory);
-      result = ok({ head: head.value, activation: "atomic", durability: "confirmed" });
+      result = ok(this.io.guarantee === "recoverable"
+        ? { head: head.value, activation: "process-recoverable", acknowledgment: "process-recoverable" }
+        : { head: head.value, activation: "atomic", durability: "confirmed" });
     } catch (error) { result = this.failure(error, phase, activation); }
     if (ownsLock) {
       try { await this.io.removeOwnedFile(lock); }

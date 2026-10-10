@@ -67,7 +67,7 @@ import { required, withRecoveryAuthority } from "../persistence/recoveryAuthorit
 import { WalFileScan } from "../persistence/walFileScan.js";
 import { openAuthoritativeReceiptLedger } from "../persistence/receiptLedger.js";
 import { sameCommittedTip } from "../utils/durablePersistence.js";
-import { DirectoryIoError, nodeDirectoryIO, type DirectoryIO } from "../persistence/directoryIO.js";
+import { assertWindowsRecoverablePath, captureDirectoryIO, DirectoryIoError, nodeDirectoryIO, windowsRecoverableDirectoryIO, type DirectoryIO } from "../persistence/directoryIO.js";
 import { nodeWalIO, type WalIO } from "../persistence/walIO.js";
 import { DIGEST_ALGORITHM, HEAD_FORMAT, HEAD_VERSION, encodeCheckpoint, type PersistedStoreHead } from "../persistence/codecs.js";
 import { parseTransactionSequenceId } from "../utils/durablePersistence.js";
@@ -86,6 +86,9 @@ export interface DurableEtherMemoriesOptions {
    * - "existing": require an active store, otherwise fail closed.
    */
   readonly openMode?: "auto" | "create" | "existing";
+  /** Explicit weaker process-failure contract on Windows local filesystems.
+   * Strict remains the default. No power-loss durability or persisted history is claimed. */
+  readonly durabilityGuarantee?: "strict" | "recoverable";
 }
 
 /** Public observable lifecycle. "Opening" is factory-internal: no object escapes during it. */
@@ -1220,12 +1223,31 @@ const withFacade = (opened: Promise<Result<DurableRuntime>>): Promise<Result<Dur
   opened.then(result => result.ok ? ok(createFacade(result.value)) : result);
 
 /** Public durable factory: only supported user configuration; no injection points. */
-export const openDurableEtherMemories = (options: DurableEtherMemoriesOptions): Promise<Result<DurableEtherMemories>> =>
-  withFacade(DurableRuntime.open(options));
+export const openDurableEtherMemories = (options: DurableEtherMemoriesOptions): Promise<Result<DurableEtherMemories>> => {
+  const selected = selectDirectoryIO(options);
+  if (!selected.ok) return Promise.resolve(selected);
+  return withFacade(DurableRuntime.open(options, selected.value));
+};
 
 /** Internal test factory with protocol-testing dependency injection; never exported from the package root. */
 export const openDurableEtherMemoriesInternal = (options: DurableEtherMemoriesOptions,
-  dependencies: DurableDependencies = {}): Promise<Result<DurableEtherMemories>> =>
-  withFacade(DurableRuntime.open(options, dependencies.io ?? nodeDirectoryIO, dependencies.files ?? nodeWalIO,
+  dependencies: DurableDependencies = {}): Promise<Result<DurableEtherMemories>> => {
+  const selected = selectDirectoryIO(options, dependencies.io);
+  if (!selected.ok) return Promise.resolve(selected);
+  return withFacade(DurableRuntime.open(options, selected.value, dependencies.files ?? nodeWalIO,
     dependencies.indexDiskBytes ?? DEFAULT_MAX_INDEX_BYTES, dependencies.maxActiveWalBytes ?? MAX_ACTIVE_WAL_BYTES,
     dependencies.gcInstrumentation ?? { at: async () => undefined }));
+};
+
+function selectDirectoryIO(options: DurableEtherMemoriesOptions, injected?: DirectoryIO): Result<DirectoryIO> {
+  if (!record(options)) return err("INVALID_INPUT", "Durable runtime options are required.");
+  const requested = options.durabilityGuarantee ?? "strict";
+  if (requested !== "strict" && requested !== "recoverable") return err("INVALID_INPUT", "Invalid durability guarantee.");
+  if (requested === "recoverable" && process.platform === "win32" && typeof options.directory === "string") {
+    try { assertWindowsRecoverablePath(options.directory); }
+    catch (error) { return err("DURABILITY_UNAVAILABLE", (error as Error).message); }
+  }
+  // On supported POSIX platforms the strict backend exceeds a recoverable request.
+  return ok(captureDirectoryIO(injected ?? (requested === "recoverable" && process.platform === "win32"
+    ? windowsRecoverableDirectoryIO : nodeDirectoryIO)));
+}
