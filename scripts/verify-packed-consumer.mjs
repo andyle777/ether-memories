@@ -58,6 +58,14 @@ try {
     const health = core.inspectMemoryHealth({ asOf: 1893456000000 });
     assert.ok(health.ok);
     assert.equal(health.value.coverage.inspectedCount, 1);
+    const dream = core.previewDreamCycle({ kind: "ids", ids: [note.value.id] }, { asOf: 1893456000000 });
+    assert.ok(dream.ok, JSON.stringify(dream));
+    assert.equal(dream.value.algorithm, "ether.dream.v1");
+    assert.deepEqual(dream.value.selectedSourceIds, [note.value.id]);
+    assert.equal(JSON.stringify(dream.value).includes("package consumer"), false);
+    assert.equal(core.runDreamCycle, undefined);
+    assert.equal(api.previewDreamCycle, undefined, "Pure planning implementation must stay internal.");
+    assert.equal(api.canonicalJson, undefined, "Hash encoding internals must stay internal.");
     assert.ok((await core.save()).ok);
     const loaded = new EtherMemoriesCore({ userId: "packed-consumer", storagePath: snapshotPath });
     assert.ok((await loaded.load()).ok);
@@ -83,6 +91,7 @@ try {
         const logical = new EtherMemoriesCore({ userId: "packed-consumer" });
         assert.ok(logical.importData(exported.value).ok);
         assert.deepEqual(reopened.value.inspectMemoryHealth({ asOf: 1893456000000 }), logical.inspectMemoryHealth({ asOf: 1893456000000 }));
+        assert.deepEqual(reopened.value.previewDreamCycle({ kind: "all_active" }, { asOf: 1893456000000 }), logical.previewDreamCycle({ kind: "all_active" }, { asOf: 1893456000000 }));
         for (const note of exported.value.memoryNotes) {
           assert.deepEqual(reopened.value.explainMemory(note.id, { asOf: 1893456000000 }), logical.explainMemory(note.id, { asOf: 1893456000000 }));
         }
@@ -101,6 +110,7 @@ try {
   await fs.writeFile(join(work, "consumer.mts"), `
     import { EtherMemoriesCore, openDurableEtherMemories, createMutationId, type DurableEtherMemories,
       type MemoryExplanation, type MemoryHealthReport, type MemoryInspectionOptions,
+      type DreamSelector, type DreamBudgets, type DreamCyclePreviewOptions, type DreamPlan,
       type InspectionCoverage, type MemoryRelationshipEvidence, type MemoryHealthFinding,
       type MemoryHealthSuggestion, type Result } from "ether-memories";
     const core = new EtherMemoriesCore({ userId: "types" });
@@ -108,6 +118,12 @@ try {
     const inspect: MemoryInspectionOptions = { asOf: 1893456000000 };
     const explanation: Result<MemoryExplanation> = core.explainMemory("note", inspect);
     const health: Result<MemoryHealthReport> = core.inspectMemoryHealth(inspect);
+    const selector: DreamSelector = { kind: "all_active" };
+    const dreamOptions: DreamCyclePreviewOptions = { asOf: 1893456000000, budgets: { maxSources: 1 } };
+    const dream: Result<DreamPlan> = core.previewDreamCycle(selector, dreamOptions);
+    if (dream.ok) { const budgets: DreamBudgets = dream.value.budgets; const ids: string[] = dream.value.selectedSourceIds; }
+    // @ts-expect-error T4 execution is not available.
+    core.runDreamCycle();
     if (explanation.ok) { const edges: MemoryRelationshipEvidence[] = explanation.value.relationships.entries; }
     if (health.ok) {
       const coverage: InspectionCoverage = health.value.coverage;
@@ -120,6 +136,7 @@ try {
       await runtime.addMemory({ content: "typed durable consumer" }, createMutationId());
       const e: Result<MemoryExplanation> = runtime.explainMemory("note", inspect);
       const h: Result<MemoryHealthReport> = runtime.inspectMemoryHealth(inspect);
+      const p: Result<DreamPlan> = runtime.previewDreamCycle(selector, dreamOptions);
       await runtime.rotate(); await runtime.collectGarbage(); await runtime.runMaintenance(); await runtime.close();
     }
     // @ts-expect-error Internal backend is not a public root type.
@@ -140,6 +157,10 @@ try {
     import { explanationSnapshot, healthSnapshot } from "ether-memories";
     // @ts-expect-error Trusted-state registration is internal.
     import { registerInspectionNotes, registerInspectionGraph } from "ether-memories";
+    // @ts-expect-error Pure planning and hashing are not public root functions.
+    import { previewDreamCycle, normalizeDreamRequest, canonicalJson } from "ether-memories";
+    // @ts-expect-error Captured dependency snapshots are not public types.
+    import type { DreamNoteDependency, DreamRequest } from "ether-memories";
     // @ts-expect-error Pure analysis implementation is internal.
     import { analyzeHealth, analyzeExplanation } from "ether-memories";
     // @ts-expect-error Package exports block internal declarations too.
