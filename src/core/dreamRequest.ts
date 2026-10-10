@@ -21,14 +21,12 @@ export function dreamScalar(value: unknown, limit: number = DREAM_INPUT_LIMITS.s
   if (!value.trim()) throw new DreamInputError("Dream scalar must be nonempty.");
   return value;
 }
-// Read only own data properties: caller accessors are never invoked.
+// Project the fixed schema without enumerating caller keys. Unknown properties
+// are ignored; recognized properties must be own enumerable data properties.
 const record = (value: unknown, fields: readonly string[]): Record<string, unknown> => {
   if (types.isProxy(value)) throw new DreamInputError("Proxy Dream request containers are not supported.");
   if (typeof value !== "object" || value === null || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new DreamInputError("Expected plain Dream request data.");
   const result: Record<string, unknown> = {};
-  for (const key in value) {
-    if (!Object.hasOwn(value, key) || !fields.includes(key)) throw new DreamInputError("Unexpected Dream request field.");
-  }
   for (const key of fields) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (!descriptor) continue;

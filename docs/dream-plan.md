@@ -52,7 +52,14 @@ The durable facade first enforces existing CLOSED/RECOVERY_REQUIRED precedence;
 those failures do not read a clock or validate the selector.
 
 Request/option/budget objects and selector arrays must be ordinary data
-containers. Accessor fields fail without getter invocation. Proxy containers
+containers. Recognized object fields must be own enumerable data properties;
+recognized accessors or hidden fields fail without getter invocation. Object
+validation reads only the fixed schema's descriptors, never enumerating caller
+keys. Unknown properties, including unknown budget names, symbols, hidden
+properties and accessors, are ignored without reading or returning them. They
+do not change the normalized request, effective budgets or either identity.
+Known fields from incompatible selector modes still fail. Callers should use
+the public types to catch misspelled field names. Proxy containers
 are rejected using Node's built-in proxy detection before prototype, property
 or array checks can invoke caller traps. No new dependency is required.
 

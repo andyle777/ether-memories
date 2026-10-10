@@ -78,7 +78,7 @@ describe("T3 bounded Dream selection", () => {
   });
   it.each([undefined, null, [], {}, { kind: "bad" }, { kind: "all_active", ids: ["A"] }, { kind: "ids", ids: [] },
     { kind: "tags", tags: [] }, { kind: "query", query: "!!!" }, { kind: "date-window", from: 20, to: 10 }])("fails malformed selector %j", selector => fail(preview(fixture(), selector)));
-  it.each([null, [], 1, { asOf: NaN }, { asOf: Infinity }, { asOf: 8640000000000001 }, { asOf: 1.5 }, { asOf: 100, extra: true },
+  it.each([null, [], 1, { asOf: NaN }, { asOf: Infinity }, { asOf: 8640000000000001 }, { asOf: 1.5 }, { asOf: 100, budgets: { maxSources: 1.5 } },
     { asOf: 100, budgets: null }, { asOf: 100, budgets: { maxSources: 129 } }, { asOf: 100, budgets: { maxSources: 0 } }])("fails malformed options %j", options => fail(preview(fixture(), { kind: "all_active" }, options)));
   it("reports unknown explicit IDs rather than silently dropping intent", () => fail(preview(fixture(), { kind: "ids", ids: ["unknown"] }), "NOT_FOUND"));
   it.each(["candidate", "archived", "rejected"] as const)("fails explicitly requested ineligible %s memory", status => fail(preview(fixture([{ id: "A", status }]), { kind: "ids", ids: ["A"] })));
@@ -102,6 +102,37 @@ describe("T3 bounded Dream selection", () => {
     const selector = { get kind() { reads++; return "all_active"; } };
     const options = { get asOf() { reads++; return 100; } };
     fail(preview(c, selector)); fail(preview(c, { kind: "all_active" }, options)); expect(reads).toBe(0);
+  });
+  it.each(["selector", "options", "budgets"])("reads only fixed schema descriptors on wide %s containers", location => {
+    const c = fixture();
+    const baseline = preview(c, { kind: "all_active" }, { asOf: 100, budgets: { maxSources: 1 } });
+    for (const width of [0, 100000]) {
+      const selector: Record<string, unknown> = { kind: "all_active" };
+      const budgets: Record<string, unknown> = { maxSources: 1 };
+      const options: Record<string, unknown> = { asOf: 100, budgets };
+      const target = location === "selector" ? selector : location === "options" ? options : budgets;
+      for (let i = 0; i < width; i++) target[`unrelated_${i}`] = i;
+      const descriptors = vi.spyOn(Object, "getOwnPropertyDescriptor");
+      const result = preview(c, selector, options);
+      const keys = descriptors.mock.calls.filter(([object]) => object === target).map(([, key]) => key);
+      descriptors.mockRestore();
+      expect(result).toEqual(baseline);
+      expect(keys).toEqual(location === "selector" ? ["kind", "ids", "tags", "query", "from", "to"] :
+        location === "options" ? ["asOf", "budgets"] : Object.keys(baseline.value.budgets));
+    }
+  });
+  it.each(["selector", "options", "budgets"])("ignores unrelated %s data, symbols and accessors without reading or returning them", location => {
+    const c = fixture();
+    const selector: Record<string, unknown> = { kind: "all_active" };
+    const budgets: Record<string, unknown> = { maxSources: 1 };
+    const options: Record<string, unknown> = { asOf: 100, budgets };
+    const baseline = preview(c, selector, options);
+    const target = location === "selector" ? selector : location === "options" ? options : budgets;
+    let reads = 0;
+    Object.defineProperty(target, "unrelated", { enumerable: true, get() { reads++; throw Error("must not read"); } });
+    Object.defineProperty(target, "hiddenUnrelated", { value: "SECRET", enumerable: false });
+    Object.defineProperty(target, Symbol("unrelated"), { enumerable: true, get() { reads++; throw Error("must not read"); } });
+    expect(preview(c, selector, options)).toEqual(baseline); expect(reads).toBe(0);
   });
   it.each([
     [4097, "\u0130a".repeat(1365) + " a"],
