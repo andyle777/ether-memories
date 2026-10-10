@@ -2,8 +2,9 @@
 
 `previewDreamCycle(selector, options?)` returns `Result<DreamPlan>` on Core and
 the durable facade. It selects and binds inputs for future analysis. It does
-not analyze, condense, propose, mutate or persist. `runDreamCycle()` is future
-T4 work and is unavailable. There are no embeddings, external services, RAG,
+not analyze, condense, propose, mutate or persist. Pass a successful plan to
+[`runDreamCycle(plan)`](dream-analysis.md) for separate read-only analysis.
+There are no embeddings, external services, RAG,
 background jobs, signing keys or plan migrations.
 
 ```ts
@@ -15,7 +16,7 @@ if (result.ok) console.log(result.value.planId, result.value.selectedSourceIds);
 ```
 
 The algorithm identity is `ether.dream.v1`, independent of library0.6.0.
-Dreams propose. Memory remains authoritative. Plans select. Analysis waits.
+Dreams propose. Memory remains authoritative. Plans select and bind analysis.
 
 ## Selection and eligibility
 

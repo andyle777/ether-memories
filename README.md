@@ -21,9 +21,16 @@ content-token query, a creation date window, or explicit `all_active`. A single
 production budgets. Only relationships between selected Memory Notes count.
 Graph neighbors and Diary never expand sources. Plans and IDs are deterministic,
 detached, and contain no source bodies. Preview performs no analysis,
-condensation, proposal generation, mutation or persistence. `runDreamCycle()`
-is future T4 work and is unavailable. See [the exact Dream v1 selector, dependency
+condensation, proposal generation, mutation or persistence. See [the exact Dream v1 selector, dependency
 and limit contract](docs/dream-plan.md).
+
+`runDreamCycle(plan)` validates and independently recaptures that plan, then
+returns bounded deterministic proposals from the same selected snapshot.
+It calls local Condensation analysis only, changes no memory or durable state,
+and never applies or persists proposals. Re-preview on `CONFLICT` before trying
+again. Core and the durable facade expose this synchronous method; see
+[Dream Analysis](docs/dream-analysis.md) for the preview → run example,
+evidence, exact duplicate rules and fixed output limits.
 
 ## v0.6.0 — Durable Persistence
 

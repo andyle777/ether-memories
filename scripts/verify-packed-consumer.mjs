@@ -63,7 +63,19 @@ try {
     assert.equal(dream.value.algorithm, "ether.dream.v1");
     assert.deepEqual(dream.value.selectedSourceIds, [note.value.id]);
     assert.equal(JSON.stringify(dream.value).includes("package consumer"), false);
-    assert.equal(core.runDreamCycle, undefined);
+    const logicalBeforeDream = core.exportData();
+    const analysis = core.runDreamCycle(dream.value);
+    assert.ok(analysis.ok, JSON.stringify(analysis));
+    assert.equal(analysis.value.sourceCount, 1);
+    assert.equal(analysis.value.proposalCount, 0, "Exact source output is suppressed.");
+    assert.deepEqual(core.runDreamCycle(dream.value), analysis);
+    const emptyPlan = core.previewDreamCycle({ kind: "tags", tags: ["missing"] }, { asOf: 1893456000000 });
+    assert.ok(emptyPlan.ok);
+    const emptyDream = core.runDreamCycle(emptyPlan.value);
+    assert.ok(emptyDream.ok); assert.deepEqual(emptyDream.value.proposals, []);
+    assert.deepEqual(core.exportData(), logicalBeforeDream);
+    for (const name of ["runDreamCycle", "validateDreamPlan", "captureDreamDependencies", "buildDreamPlan", "analyzeDreamContent", "analyzeDreamSnapshot", "buildDreamResult", "admitDreamProposals",
+      "DreamCycleResult", "DreamProposal", "DreamProposalEvidence", "DreamAnalysisSnapshot", "DreamCapturedDependencies", "DreamAnalysisBinding"]) assert.equal(api[name], undefined, name);
     assert.equal(api.previewDreamCycle, undefined, "Pure planning implementation must stay internal.");
     assert.equal(api.canonicalJson, undefined, "Hash encoding internals must stay internal.");
     assert.ok((await core.save()).ok);
@@ -92,6 +104,14 @@ try {
         assert.ok(logical.importData(exported.value).ok);
         assert.deepEqual(reopened.value.inspectMemoryHealth({ asOf: 1893456000000 }), logical.inspectMemoryHealth({ asOf: 1893456000000 }));
         assert.deepEqual(reopened.value.previewDreamCycle({ kind: "all_active" }, { asOf: 1893456000000 }), logical.previewDreamCycle({ kind: "all_active" }, { asOf: 1893456000000 }));
+        const durableDreamPlan = reopened.value.previewDreamCycle({ kind: "all_active" }, { asOf: 1893456000000 });
+        assert.ok(durableDreamPlan.ok);
+        assert.deepEqual(reopened.value.runDreamCycle(durableDreamPlan.value), logical.runDreamCycle(durableDreamPlan.value));
+        assert.deepEqual(reopened.value.runDreamCycle(durableDreamPlan.value), reopened.value.runDreamCycle(durableDreamPlan.value));
+        const durableEmptyPlan = reopened.value.previewDreamCycle({ kind: "tags", tags: ["missing"] }, { asOf: 1893456000000 });
+        assert.ok(durableEmptyPlan.ok);
+        assert.deepEqual(reopened.value.runDreamCycle(durableEmptyPlan.value), logical.runDreamCycle(durableEmptyPlan.value));
+        assert.deepEqual(reopened.value.exportData(), exported);
         for (const note of exported.value.memoryNotes) {
           assert.deepEqual(reopened.value.explainMemory(note.id, { asOf: 1893456000000 }), logical.explainMemory(note.id, { asOf: 1893456000000 }));
         }
@@ -107,10 +127,17 @@ try {
   const runtime = JSON.parse(run(["consumer.mjs"]).trim());
   const reference = await import(pathToFileURL(join(root, "dist", "index.js")).href);
   assert.deepEqual(runtime.exports, Object.keys(reference).sort(), "Installed named exports differ from the compiled package root.");
+  assert.deepEqual(runtime.exports, ["CONDENSATION_RULE_VERSION", "CondensationEngine", "DEFAULT_BUDGET", "DEFAULT_PORTABLE_IMPORT_LIMITS",
+    "DiarySystem", "EtherMemoriesCore", "FoundationLinker", "FsJsonStorage", "LIBRARY_VERSION", "MEMORY_CONTEXT_SCHEMA_VERSION",
+    "MemoryContextBuilder", "MemoryNotes", "MemoryRetriever", "MindGraphManager", "PORTABLE_RECORD_SCHEMA_VERSION", "RETRIEVAL_CLASS_WEIGHTS",
+    "STARTER_RELATIONS", "STORE_SCHEMA_VERSION", "createMutationId", "err", "getDurableOperations", "hydrateDate", "ok",
+    "openDurableEtherMemories", "parseTransactionSequenceId", "preflightPortableRecords", "preparePortableImport", "sameCommittedTip",
+    "toAgentToolResult", "toPlainJson", "toPortableRecords", "toRlmEnv"], "T4 must preserve the frozen 32 runtime exports.");
   await fs.writeFile(join(work, "consumer.mts"), `
     import { EtherMemoriesCore, openDurableEtherMemories, createMutationId, type DurableEtherMemories,
       type MemoryExplanation, type MemoryHealthReport, type MemoryInspectionOptions,
       type DreamSelector, type DreamBudgets, type DreamCyclePreviewOptions, type DreamPlan,
+      type DreamCycleResult, type DreamProposal, type DreamProposalEvidence,
       type InspectionCoverage, type MemoryRelationshipEvidence, type MemoryHealthFinding,
       type MemoryHealthSuggestion, type Result } from "ether-memories";
     const core = new EtherMemoriesCore({ userId: "types" });
@@ -122,7 +149,11 @@ try {
     const dreamOptions: DreamCyclePreviewOptions = { asOf: 1893456000000, budgets: { maxSources: 1 } };
     const dream: Result<DreamPlan> = core.previewDreamCycle(selector, dreamOptions);
     if (dream.ok) { const budgets: DreamBudgets = dream.value.budgets; const ids: string[] = dream.value.selectedSourceIds; }
-    // @ts-expect-error T4 execution is not available.
+    if (dream.ok) {
+      const analyzed: Result<DreamCycleResult> = core.runDreamCycle(dream.value);
+      if (analyzed.ok) { const proposals: DreamProposal[] = analyzed.value.proposals; const evidence: DreamProposalEvidence | undefined = proposals[0]?.evidence; }
+    }
+    // @ts-expect-error Execution requires a complete DreamPlan.
     core.runDreamCycle();
     if (explanation.ok) { const edges: MemoryRelationshipEvidence[] = explanation.value.relationships.entries; }
     if (health.ok) {
@@ -137,6 +168,7 @@ try {
       const e: Result<MemoryExplanation> = runtime.explainMemory("note", inspect);
       const h: Result<MemoryHealthReport> = runtime.inspectMemoryHealth(inspect);
       const p: Result<DreamPlan> = runtime.previewDreamCycle(selector, dreamOptions);
+      if (p.ok) { const analyzed: Result<DreamCycleResult> = runtime.runDreamCycle(p.value); }
       await runtime.rotate(); await runtime.collectGarbage(); await runtime.runMaintenance(); await runtime.close();
     }
     // @ts-expect-error Internal backend is not a public root type.
@@ -161,6 +193,10 @@ try {
     import { previewDreamCycle, normalizeDreamRequest, canonicalJson } from "ether-memories";
     // @ts-expect-error Captured dependency snapshots are not public types.
     import type { DreamNoteDependency, DreamRequest } from "ether-memories";
+    // @ts-expect-error New capture and analysis snapshot types are internal.
+    import type { DreamAnalysisSnapshot, DreamCapturedDependencies, DreamAnalysisBinding } from "ether-memories";
+    // @ts-expect-error Execution, validation, capture and proposal helpers are internal.
+    import { runDreamCycle, validateDreamPlan, captureDreamDependencies, buildDreamPlan, analyzeDreamContent, analyzeDreamSnapshot, buildDreamResult, admitDreamProposals } from "ether-memories";
     // @ts-expect-error Pure analysis implementation is internal.
     import { analyzeHealth, analyzeExplanation } from "ether-memories";
     // @ts-expect-error Package exports block internal declarations too.
