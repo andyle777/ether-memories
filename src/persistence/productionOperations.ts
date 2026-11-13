@@ -9,7 +9,7 @@ import { referenceFor, validateReference, digestBytes, PayloadObjects, OBJECT_RE
 import { createReplayRegistry } from "./walOperations.js";
 import { canonicalJson, type JsonObject } from "./walJson.js";
 import { WAL_LIMITS, encodeWalFrame } from "./wal.js";
-import { FsWalStore, type InternalCommitResult } from "./FsWalStore.js";
+import { FsWalStore, commitUnderRecoveryAuthority, type InternalCommitResult } from "./FsWalStore.js";
 import { withRecoveryAuthority, required, type RecoveryAuthority } from "./recoveryAuthority.js";
 import { acknowledgmentFor, nodeDirectoryIO, type DirectoryIO } from "./directoryIO.js";
 import { nodeWalIO, type WalFileHandle, type WalIO } from "./walIO.js";
@@ -17,8 +17,12 @@ import { decodeStoreHead, PERSISTENCE_LIMITS, verifyCheckpoint, WAL_FORMAT, WAL_
 import { WalFileScan } from "./walFileScan.js";
 import { validateStateRoot, type StateRoot } from "./stateRoot.js";
 import { MAX_ACTIVE_WAL_BYTES, openAuthoritativeReceiptLedger } from "./receiptLedger.js";
-import { snapshotData, hydrateSnapshot } from "./snapshotPayload.js";
+import { snapshotData, hydrateSnapshot, decodeCheckpointSnapshotPayload } from "./snapshotPayload.js";
 import { parseTransactionSequenceId } from "../utils/durablePersistence.js";
+import { sameCommittedTip } from "../utils/durablePersistence.js";
+import { MutationHistoryVerifier } from "./mutationHistoryVerification.js";
+import type { ReceiptEntry } from "./receiptLedger.js";
+import type { WalTransaction } from "./wal.js";
 
 export const PRODUCTION_OPERATIONS = ["ether.note.put", "ether.note.remove", "ether.diary.put", "ether.diary.remove",
   "ether.graph-node.put", "ether.graph-node.remove", "ether.graph-edge.put", "ether.graph-edge.remove", "ether.identity.put"] as const;
@@ -30,6 +34,160 @@ export interface MutationOutcome {
   readonly after?: EtherSnapshot;
   readonly root?: StateRoot;
   readonly effects: readonly SemanticOperation[];
+}
+/** Dormant package-internal T3 admission seam. No public entry point delegates here. */
+export async function runPrivateT3Admission(input: { directory: string; io: DirectoryIO; base: CommittedTip;
+  snapshot: EtherSnapshot; mutationId: MutationId; command: ProductionMutationCommand }): Promise<Result<MutationOutcome>> {
+  return runAuthorityHeldAdmission(input, nodeWalIO, MAX_ACTIVE_WAL_BYTES);
+}
+
+async function runAuthorityHeldAdmission(input: { directory: string; io: DirectoryIO; base: CommittedTip;
+  snapshot: EtherSnapshot; mutationId: MutationId; command: ProductionMutationCommand },
+  files: WalIO, maxActiveWalBytes: number, publicPrecommit = false): Promise<Result<MutationOutcome>> {
+  const precommit = <T>(result: Result<T>): Result<T> => {
+    if (result.ok || !publicPrecommit) return result;
+    const details = record(result.error.details) ? result.error.details : {};
+    return err(result.error.code, result.error.message, { ...details, phase: "precommit-validation" });
+  };
+  const command = precommit(validatedCommand(input.command));
+  if (!command.ok) return command;
+  const intent = precommit(intentDigest(command.value));
+  if (!intent.ok) return intent;
+  const snapshotDataValue = snapshotData(input.snapshot);
+  if (!snapshotDataValue.ok) return snapshotDataValue;
+  const snapshot = hydrateSnapshot(snapshotDataValue.value, input.snapshot.identity.userId);
+  if (!snapshot.ok) return snapshot;
+  const base = { ...input.base }, mutationId = input.mutationId, directory = input.directory, io = input.io;
+  if (!parseTransactionSequenceId(base.txId).ok) return err("INVALID_INPUT", "Invalid exact transaction base.");
+  const objects = new PayloadObjects(io, files);
+  return withRecoveryAuthority<MutationOutcome>(directory, io, async authority => {
+    const { head } = authority;
+    const checkpoint = await io.readBounded(join(authority.directory, "checkpoints", `checkpoint-${head.checkpoint.checkpointId}.bin`),
+      PERSISTENCE_LIMITS.checkpointHeaderBytes + 1 + PERSISTENCE_LIMITS.checkpointPayloadBytes);
+    required(verifyCheckpoint(checkpoint, head));
+    const separator = Buffer.from(checkpoint).indexOf(10);
+    if (separator < 0) return err("PERSISTENCE_CORRUPTION", "Checkpoint header is truncated.");
+    const selectedSnapshot = required(decodeCheckpointSnapshotPayload(checkpoint.subarray(separator + 1), snapshot.value.identity.userId));
+    let selectedState = required(snapshotData(selectedSnapshot)) as JsonObject;
+    const ledger = required(await openAuthoritativeReceiptLedger(authority.directory, head.storeId, head.epochId, head.checkpoint.checkpointId, files));
+    let historical: ReceiptEntry | undefined;
+    if (ledger) required(await ledger.verify(async entry => {
+      for (const operation of entry.operations) required(await resolveOperation(operation, authority, objects));
+      if (entry.mutationId === mutationId) historical = entry;
+    }));
+    await authority.verify();
+    const walPath = join(authority.directory, "wal", `wal-${head.checkpoint.digest}.bin`);
+    const kind = await io.kind(walPath);
+    if (kind === "directory") return err("RECOVERY_REQUIRED", "Unsafe WAL path.");
+    const verifier = new MutationHistoryVerifier(authority.directory, io, files);
+    let active: WalTransaction | undefined;
+    let tip = head.checkpoint.tip;
+    try {
+      if (kind === "file") {
+        const file = await files.open(walPath, false);
+        try {
+          const scan = required(await WalFileScan.open(walPath, file, head, productionRegistry, files,
+            {mode:"authority-held",verifyAuthority:authority.verify}));
+          let cursor = scan.cursor();
+          do {
+            const batch = required(await scan.next(cursor)); cursor = batch.continuation;
+            for (const tx of batch.transactions) {
+              required(await verifier.recordWal({mutationId:tx.mutation.mutationId,intentDigest:tx.mutation.digest,txId:tx.identity.txId}));
+              for (const operation of tx.operations) {
+                const semantic = required(await resolveOperation(operation, authority, objects));
+                selectedState = required(reduceProduction(selectedState, operation.type, semantic));
+                required(encodeEtherData(selectedState));
+              }
+              selectedState = required(snapshotData(required(validateCandidate(selectedState, snapshot.value.identity.userId)))) as JsonObject;
+              if (tx.mutation.mutationId === mutationId) active = tx;
+            }
+          } while (!cursor.ended);
+          if (cursor.tail !== "none") return err("RECOVERY_REQUIRED", "Incomplete active WAL history.");
+          required(await scan.checkSource()); tip = cursor.tip;
+        } finally { await file.close(); }
+      }
+      required(await verifier.verify(ledger));
+    } finally {
+      // Scratch cleanup must not issue further writes after loss of authority.
+      await authority.verify();
+      required(await verifier.cleanup());
+    }
+    await authority.verify();
+    // A caller's later observed base is evidence that the selected history is
+    // incomplete or inconsistent; a matching older receipt cannot repair it.
+    if (base.epochId !== tip.epochId ||
+        BigInt(base.txId) > BigInt(tip.txId) || (base.txId === tip.txId && base.digest !== tip.digest)) {
+      return err("RECOVERY_REQUIRED", "Previously observed committed history is not present.");
+    }
+    const committed = historical ?? active;
+    if (committed) {
+      const digest = historical ? historical.intentDigest : active!.mutation.digest;
+      if (!matchesCommittedIntent(command.value, digest)) return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
+      const operations = historical ? historical.operations : active!.operations;
+      const effects: SemanticOperation[] = [];
+      for (const operation of operations) effects.push({type:operation.type as ProductionOperationType,version:"1",payload:required(await resolveOperation(operation,authority,objects))});
+      const identity = historical ? {epochId:head.epochId,txId:historical.txId as CommittedTip["txId"],digest:historical.transactionDigest} : active!.identity;
+      if (historical && io.guarantee !== "recoverable") {
+        // Receipt v1 does not record the original writer's durability. Establish
+        // current strict barriers for the selected artifacts before acknowledging.
+        const syncFile = async (filePath: string) => {
+          await authority.verify();
+          const file = await files.open(filePath, false);
+          try { await file.sync(); } finally { await file.close(); }
+          await authority.verify();
+        };
+        await syncFile(join(authority.directory,"checkpoints",`checkpoint-${head.checkpoint.checkpointId}.bin`));
+        await syncFile(ledger!.path);
+        let referenced = false;
+        for (const operation of operations) {
+          if (operation.payload.encoding !== OBJECT_REFERENCE) continue;
+          const ref = required(validateReference(operation.payload));
+          await syncFile(join(authority.directory,"objects",`${ref.digest}.bin`)); referenced = true;
+        }
+        await authority.verify(); await io.syncDirectory(join(authority.directory,"checkpoints"));
+        await authority.verify(); await io.syncDirectory(join(authority.directory,"receipts"));
+        if (referenced) { await authority.verify(); await io.syncDirectory(join(authority.directory,"objects")); }
+        await authority.verify(); await io.syncDirectory(authority.directory);
+      }
+      // A visible active-WAL frame may be a lost acknowledgment. Reuse the
+      // existing WAL path to re-sync the file and directory before reporting it.
+      const receipt: InternalCommitResult = active
+        ? required(await commitUnderRecoveryAuthority(new FsWalStore({directory,registry:productionRegistry},io,files), authority,
+            {expectedBase:active.expectedBase,mutation:active.mutation,operations:active.operations}, active.identity))
+        : {status:"already-committed",identity,mutation:{mutationId,digest},...acknowledgmentFor(io)};
+      await authority.verify();
+      return ok({receipt,effects});
+    }
+    if (!sameCommittedTip(base, tip)) return err("STALE_TRANSACTION_BASE", "Expected base differs; automatic rebase is forbidden.");
+    const selectedBytes = required(encodeEtherData(selectedState));
+    const suppliedBytes = required(encodeEtherData(snapshotDataValue.value));
+    if (!Buffer.from(selectedBytes).equals(Buffer.from(suppliedBytes))) return err("STALE_TRANSACTION_BASE", "Snapshot differs from the selected committed state.");
+    const prepared = required(precommit(prepareCoreMutation(snapshot.value, command.value)));
+    const root = required(precommit(validateStateRoot(prepared.after)));
+    const transport = required(planTransport(prepared.operations));
+    const next = (BigInt(base.txId) + 1n).toString() as CommittedTip["txId"];
+    const frame = (operations: readonly WalOperation[]) => encodeWalFrame({storeId:head.storeId,format:head.walFormat,
+      expectedBase:base,identity:{epochId:base.epochId,txId:next},mutation:{mutationId,digest:intent.value},operations,audit:null},productionRegistry);
+    const inline = transport.inlinePossible ? frame(transport.inline) : undefined;
+    const operations = inline?.ok ? transport.inline : transport.references;
+    const encoded = required(frame(operations));
+    const currentSize = kind === "file" ? (await files.stamp(walPath)).size : 0;
+    if (!Number.isSafeInteger(maxActiveWalBytes) || maxActiveWalBytes <= 0) return err("INVALID_INPUT", "Invalid active WAL envelope.");
+    if (currentSize + encoded.bytes.byteLength > maxActiveWalBytes) return err("RECOVERY_REQUIRED", "Active WAL envelope exhausted.",
+      { reason: "resource-limit", phase: "precommit-validation", activeWalBytes: currentSize, envelope: maxActiveWalBytes });
+    if (operations === transport.references) {
+      for (let i = 0; i < prepared.operations.length; i++) {
+        await authority.verify();
+        const bytes = required(encodeEtherData(prepared.operations[i]!.payload));
+        if (digestBytes(bytes) !== transport.references[i]!.payload.digest) return err("INVALID_INPUT", "Semantic input changed during preparation.");
+        await objects.install(authority, bytes);
+      }
+    }
+    await authority.verify();
+    const receipt = required(await commitUnderRecoveryAuthority(new FsWalStore({directory,registry:productionRegistry},io,files),authority,
+      {expectedBase:base,mutation:{mutationId,digest:intent.value},operations}));
+    return ok({receipt,after:prepared.after,root,effects:prepared.operations});
+  });
 }
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -217,81 +375,8 @@ export class ProductionWalStore {
    */
   async commitMutationDetailed(base: CommittedTip, baseSnapshot: EtherSnapshot, mutationId: MutationId,
     command: ProductionMutationCommand): Promise<Result<MutationOutcome>> {
-    // Command validation, intent digesting, detached preparation and complete
-    // post-state validation are all pure precommit phases: nothing durable has
-    // happened, so any failure there (including deterministic resource-bound
-    // hits) is an unambiguous precommit rejection, never an ambiguous outcome.
-    const precommit = <T>(result: Result<T>): Result<T> => {
-      if (result.ok) return result;
-      const details = record(result.error.details) ? result.error.details : {};
-      return err(result.error.code, result.error.message, { ...details, phase: "precommit-validation" });
-    };
-    const validated = precommit(validatedCommand(command));
-    if (!validated.ok) return validated;
-    const stableCommand = validated.value;
-    const intent = precommit(intentDigest(stableCommand));
-    if (!intent.ok) return intent;
-    const found = await this.wal.readCommittedMutation(mutationId);
-    if (!found.ok) return found;
-    if (found.value) {
-      if (!matchesCommittedIntent(stableCommand, found.value.mutation.digest)) {
-        return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
-      }
-      const effects = await this.resolveCommittedEffects(mutationId);
-      if (!effects.ok) return effects;
-      return ok({ receipt: found.value, effects: effects.value });
-    }
-    // Tranche 7: the logical mutation-history namespace is active WAL union
-    // historical cumulative receipts. An identity absent from the active WAL
-    // may still be committed in reclaimed history: reconcile there before
-    // preparing, with the same intent-digest semantics.
-    const historical = await this.lookupHistoricalMutation(mutationId, stableCommand);
-    if (!historical.ok) return historical;
-    if (historical.value) return ok(historical.value);
-    const prepared = precommit(prepareCoreMutation(baseSnapshot, stableCommand));
-    if (!prepared.ok) return prepared;
-    // RED 1 precommit complete-post-state validation: no transaction may
-    // become durable if its complete deterministic post-state cannot be
-    // reconstructed and published by startup recovery. The same single
-    // construction path used by recovery and live publication validates the
-    // prospective post-state BEFORE payload-object durability or WAL
-    // authority can advance. Individual WAL-operation validity is not
-    // sufficient; nothing has been written at this point.
-    const prospective = precommit(validateStateRoot(prepared.value.after));
-    if (!prospective.ok) return prospective;
-    // Tranche 7 active-WAL envelope (derived constant; see receiptLedger.ts):
-    // rotation is explicit, so the commit path guarantees growability. A
-    // mutation whose exact appended frame would push the active segment past
-    // the envelope fails PRECOMMIT - before payload-object durability, WAL
-    // append, tip advancement or generation publication - and requires an
-    // explicit rotate(). Any accepted segment can subsequently restart AND
-    // rotate under default budgets.
-    const envelope = await this.assertActiveWalEnvelope(base, mutationId, prepared.value.operations);
-    if (!envelope.ok) return envelope;
-    const committed = await this.commitOperations(base, mutationId, prepared.value.operations, intent.value);
-    if (!committed.ok) {
-      // RED 3 race-boundary reconciliation: the pre-preparation lookup can
-      // race with another writer committing the same mutation identity. When
-      // the final commit observes changed durable history, reconcile the
-      // mutation identity again before classifying corruption: the same
-      // stable intent under this identity is the existing committed logical
-      // mutation, not corruption; a conflicting intent is; a still-absent
-      // identity is a genuine stale-base/contention result.
-      if (committed.error.code === "PERSISTENCE_CORRUPTION") {
-        const relooked = await this.wal.readCommittedMutation(mutationId);
-        if (!relooked.ok) return relooked;
-        if (relooked.value) {
-          if (!matchesCommittedIntent(stableCommand, relooked.value.mutation.digest)) {
-            return err("PERSISTENCE_CORRUPTION", "Incompatible mutation identity reuse.");
-          }
-          const effects = await this.resolveCommittedEffects(mutationId);
-          if (!effects.ok) return effects;
-          return ok({ receipt: relooked.value, effects: effects.value });
-        }
-      }
-      return committed;
-    }
-    return ok({ receipt: committed.value, after: prepared.value.after, root: prospective.value, effects: prepared.value.operations });
+    return runAuthorityHeldAdmission({ directory: this.directory, io: this.io, base,
+      snapshot: baseSnapshot, mutationId, command }, this.files, this.maxActiveWalBytes, true);
   }
 
   /**

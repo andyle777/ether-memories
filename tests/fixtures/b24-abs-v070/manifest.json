@@ -1,0 +1,36 @@
+{
+  "sourceIndexSha256": "d4c17a810fa8c33f6780742f4d7d03c0c3a5a817692fc5fbf3411e92dd44c2bd",
+  "producerArchiveSha256": "aa9d978e97d0fdbe68d7f79d9d430d91009ba5a98f09be753e32e1107f3a89e4",
+  "files": [
+    {
+      "path": "checkpoints/checkpoint-43eaa7da8a449025f1f9fc55d6caa159f7348f8bfb7a7eca6525215a9e6e6736.bin",
+      "size": 801075,
+      "sha256": "7db4d9169de69e3201394cf8fdc0a67738ccf899f2e3577fcf0eb07ccf58942b"
+    },
+    {
+      "path": "HEAD",
+      "size": 609,
+      "sha256": "1950fcd800d65a0169a7e53158bf88231b1848e5b87f5a12af8a469d49aae696"
+    },
+    {
+      "path": "objects/36ec29bc47c312d3a028661e159da4244f7fffc6c878c5e90fd7fc266dd163f1.bin",
+      "size": 400330,
+      "sha256": "36ec29bc47c312d3a028661e159da4244f7fffc6c878c5e90fd7fc266dd163f1"
+    },
+    {
+      "path": "objects/622699efbe2d3f0d4026e1fc755f2793941b153f3cead0ab12332df8527555e5.bin",
+      "size": 125,
+      "sha256": "622699efbe2d3f0d4026e1fc755f2793941b153f3cead0ab12332df8527555e5"
+    },
+    {
+      "path": "objects/9edb560f6e60273194a1b2d736cea320cded4a42b44b223826370ca37013173e.bin",
+      "size": 400120,
+      "sha256": "9edb560f6e60273194a1b2d736cea320cded4a42b44b223826370ca37013173e"
+    },
+    {
+      "path": "receipts/receipts-43eaa7da8a449025f1f9fc55d6caa159f7348f8bfb7a7eca6525215a9e6e6736.bin",
+      "size": 1266,
+      "sha256": "43eaa7da8a449025f1f9fc55d6caa159f7348f8bfb7a7eca6525215a9e6e6736"
+    }
+  ]
+}

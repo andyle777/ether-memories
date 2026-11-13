@@ -37,25 +37,17 @@ const waitFor = async (predicate: () => Promise<boolean> | boolean) => {
 };
 
 /**
- * RED 3 reproducer injection: pause the holder's commit at its own pre-lock
- * directory barrier. Every authority run opens with syncDirectory(store) and
- * repeats it right after acquiring the writer lock; a mutation performs two
- * authority runs (receipt lookup, commit), so the lookup consumes barriers
- * 1-2 and the commit's PRE-LOCK barrier is the third. Blocking there pauses
- * the holder after its lookup observed the identity absent but before it
- * holds any authority, so another runtime can commit the same identity in
- * the race window.
+ * RED 3 reproducer injection: pause immediately before acquiring the writer
+ * lock. Another runtime can commit first; final admission must recheck the
+ * authoritative history after it acquires the lock.
  */
 const pauseBeforeCommitIO = (base: DirectoryIO, state: { armed: boolean; blocked: boolean; barriers: number }, storeDirectory: string,
-  gate: Promise<void>) => ({ ...base, syncDirectory: async (path: string) => {
-  if (state.armed && !state.blocked && path === storeDirectory) {
-    state.barriers++;
-    if (state.barriers === 3) {
-      state.blocked = true;
-      await gate;
-    }
+  gate: Promise<void>) => ({ ...base, writeExclusive: async (path: string, bytes: Uint8Array) => {
+  if (state.armed && !state.blocked && path === join(storeDirectory, "writer.lock")) {
+    state.blocked = true;
+    await gate;
   }
-  await base.syncDirectory(path);
+  await base.writeExclusive(path, bytes);
 } }) as DirectoryIO;
 
 describe("durable runtime concurrency", { timeout: 120_000 }, () => {
@@ -177,8 +169,7 @@ describe("durable runtime cross-runtime same-identity race (RED 3)", { timeout: 
     const first = await openRuntime(s, pauseBeforeCommitIO(s.io, state, s.directory, gate));
     const second = await openRuntime(s, s.io);
     state.armed = true;
-    // First runtime: lookup observes "race-1" ABSENT, then pauses before its
-    // commit acquires authority.
+    // First runtime pauses before its admission acquires authority.
     const raced = first.addMemory({ content: "race content" }, "race-1");
     await waitFor(() => state.blocked);
     // Second runtime commits the same identity with the same intent inside

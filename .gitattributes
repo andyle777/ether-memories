@@ -1,0 +1,14 @@
+# Preserve reviewed persistence and fixture bytes on every checkout.
+src/persistence/FsWalStore.ts -text
+src/persistence/checkpointRotation.ts -text
+src/persistence/productionOperations.ts -text
+src/persistence/recoveryAuthority.ts -text
+tests/durable-runtime-concurrency.test.ts -text
+.t3-phase2-harness/* -text
+tests/fixtures/b24-abs-v070/** -text
+tests/fixtures/b24-t3-v070/** -text
+scripts/b24-producer.d.mts -text
+scripts/b24-producer.mjs -text
+scripts/prepare-b24-fixtures.mjs -text
+tests/b24-*.test.ts -text
+vitest.config.ts -text

@@ -1,0 +1,60 @@
+{
+  "producer": "ether-memories@0.7.0",
+  "archiveSha256": "aa9d978e97d0fdbe68d7f79d9d430d91009ba5a98f09be753e32e1107f3a89e4",
+  "sourceFixture": "campaign v0.7 rotated-reclaimed",
+  "userId": "b24-fixture-user",
+  "durability": "recoverable",
+  "node": "v24.19.0",
+  "platform": "win32",
+  "operations": [
+    {
+      "mutationId": "b24-fixture-rotated-reclaimed",
+      "content": "b24-large- plus 400000 x",
+      "rotate": true
+    },
+    {
+      "mutationId": "z-b24-second",
+      "content": "second receipt",
+      "noteId": "mem_279dad14-fd16-4225-aaec-ca2541322efd",
+      "rotate": {
+        "newCheckpointId": "18e8d11b8940dd2b99598b6bb7127de79690a90374888af8f8cf218dce0b2bb0",
+        "newCheckpointDigest": "1f49e8ab9a1c9adc2c8d32774ebf02c9eef2b29a4305deb0c76b6b03510708ea",
+        "ledgerDigest": "18e8d11b8940dd2b99598b6bb7127de79690a90374888af8f8cf218dce0b2bb0",
+        "retiredWalBytes": 1491,
+        "receiptCount": 2
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "checkpoints/checkpoint-18e8d11b8940dd2b99598b6bb7127de79690a90374888af8f8cf218dce0b2bb0.bin",
+      "size": 801431,
+      "sha256": "1f49e8ab9a1c9adc2c8d32774ebf02c9eef2b29a4305deb0c76b6b03510708ea"
+    },
+    {
+      "path": "HEAD",
+      "size": 609,
+      "sha256": "6c6ab77e5a16164f31bad6ddca5dbb4ffa8425c390a3c368cd355fc575681052"
+    },
+    {
+      "path": "objects/36ec29bc47c312d3a028661e159da4244f7fffc6c878c5e90fd7fc266dd163f1.bin",
+      "size": 400330,
+      "sha256": "36ec29bc47c312d3a028661e159da4244f7fffc6c878c5e90fd7fc266dd163f1"
+    },
+    {
+      "path": "objects/622699efbe2d3f0d4026e1fc755f2793941b153f3cead0ab12332df8527555e5.bin",
+      "size": 125,
+      "sha256": "622699efbe2d3f0d4026e1fc755f2793941b153f3cead0ab12332df8527555e5"
+    },
+    {
+      "path": "objects/9edb560f6e60273194a1b2d736cea320cded4a42b44b223826370ca37013173e.bin",
+      "size": 400120,
+      "sha256": "9edb560f6e60273194a1b2d736cea320cded4a42b44b223826370ca37013173e"
+    },
+    {
+      "path": "receipts/receipts-18e8d11b8940dd2b99598b6bb7127de79690a90374888af8f8cf218dce0b2bb0.bin",
+      "size": 2446,
+      "sha256": "18e8d11b8940dd2b99598b6bb7127de79690a90374888af8f8cf218dce0b2bb0"
+    }
+  ]
+}

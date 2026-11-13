@@ -13,6 +13,15 @@ export interface RecoveryAuthority {
   readonly head: PersistedStoreHead;
   verify(): Promise<void>;
 }
+// A session is usable only while its owning coordinator is still active.
+// The registry is internal to this module and no caller-constructed object is accepted.
+const liveSessions = new WeakMap<RecoveryAuthority, { directory: string; io: DirectoryIO }>();
+export function requireLiveRecoveryAuthority(authority: RecoveryAuthority, directory: string, io: DirectoryIO): void {
+  const session = liveSessions.get(authority);
+  if (!session || session.directory !== resolve(directory) || session.io !== io) {
+    throw new DirectoryIoError("RECOVERY_REQUIRED", "Invalid or expired internal writer authority.");
+  }
+}
 /** Internal trusted coordinator boundary. Same writer.lock protocol as Tranche 4. */
 export async function withRecoveryAuthority<T>(directory: string, io: DirectoryIO,
   run: (authority: RecoveryAuthority) => Promise<Result<T>>): Promise<Result<T>> {
@@ -55,7 +64,10 @@ export async function withRecoveryAuthority<T>(directory: string, io: DirectoryI
       }
     };
     await verify();
-    result = await run(Object.freeze({ directory, head, verify }));
+    const session: RecoveryAuthority = Object.freeze({ directory, head, verify });
+    liveSessions.set(session, { directory, io });
+    try { result = await run(session); }
+    finally { liveSessions.delete(session); }
   } catch (e) {
     const native = (e as NodeJS.ErrnoException)?.code;
     const code = e instanceof DirectoryIoError ? e.code : native === "EEXIST" ? "WRITER_BUSY"

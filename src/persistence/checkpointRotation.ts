@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { err, ok, type Result } from "../utils/result.js";
 import type { CommittedTip, MutationId } from "../types/persistence.js";
+import { sameCommittedTip } from "../utils/durablePersistence.js";
 import type { WalOperation } from "../types/persistence.js";
 import { encodeCheckpoint, encodeStoreHead, verifyCheckpoint, decodeStoreHead, PERSISTENCE_LIMITS, HEAD_FORMAT, HEAD_VERSION, DIGEST_ALGORITHM, type PersistedStoreHead } from "./codecs.js";
 import { activationMatches, nodeDirectoryIO, DirectoryIoError, type DirectoryIO } from "./directoryIO.js";
@@ -299,7 +300,7 @@ export async function rotateDurableStore(input: RotationInput): Promise<Result<R
         }
       } else if (walKind === "directory") {
         return err("RECOVERY_REQUIRED", "Unsafe WAL path.");
-      } else if (head.checkpoint.tip.txId !== generation.tip.txId) {
+      } else if (!sameCommittedTip(head.checkpoint.tip, generation.tip)) {
         // No WAL file: the checkpoint tip must already be the captured tip.
         return err("RECOVERY_REQUIRED", "The active WAL is absent but the checkpoint does not match the captured tip.");
       }

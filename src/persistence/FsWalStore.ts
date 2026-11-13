@@ -10,6 +10,10 @@ import { WalFileScan } from "./walFileScan.js";
 import { nodeWalIO, sameWalStamp, type WalFileHandle, type WalFileStamp, type WalIO } from "./walIO.js";
 import { canonicalJson, decodeCanonicalJson, freezeJson, type JsonObject } from "./walJson.js";
 import type { ReplayRegistry } from "./walOperations.js";
+import { requireLiveRecoveryAuthority, type RecoveryAuthority } from "./recoveryAuthority.js";
+
+// Not exported: only this module can invoke the authority-held route.
+const heldCommit = Symbol("heldCommit");
 
 export const MUTATION_CACHE_ENTRIES = 4096;
 const DIRECTORY_BYTES = 4096;
@@ -134,14 +138,14 @@ export class FsWalStore {
   }
 
   private async history(path: string, file: WalFileHandle, head: PersistedStoreHead, headBytes: Buffer,
-    verifyAuthority: () => Promise<void>, mutationId?: string): Promise<History> {
+    verifyAuthority: () => Promise<void>, mutationId?: string, fresh = false): Promise<History> {
     await verifyAuthority();
     const stamp = await file.stat();
     if (!sameWalStamp(stamp, await this.walIO.stamp(path))) throw new DirectoryIoError("RECOVERY_REQUIRED", "WAL changed before validation.");
     const cached = this.cache;
     // Safe for conforming append-only writers: changed history grows or changes HEAD.
     // Equal stamps do not certify bytes against external rewrites or storage corruption.
-    if (cached && cached.headBytes.equals(headBytes) && sameWalStamp(cached.stamp, stamp)
+    if (!fresh && cached && cached.headBytes.equals(headBytes) && sameWalStamp(cached.stamp, stamp)
       && (!mutationId || cached.completeIndex || cached.entries.has(mutationId))) {
       return { ...cached, found: mutationId ? cached.entries.get(mutationId) : undefined };
     }
@@ -169,7 +173,14 @@ export class FsWalStore {
     return { tip: cursor.tip, entries, completeIndex, found, stamp: scanner.stamp };
   }
 
-  private async run(request?: CommitRequest, lookup?: MutationId): Promise<Result<InternalCommitResult | CommittedTip | undefined>> {
+  async [heldCommit](authority: RecoveryAuthority, request: CommitRequest, expectedExisting?: CommittedTip): Promise<Result<InternalCommitResult>> {
+    requireLiveRecoveryAuthority(authority, this.directory, this.directoryIO);
+    const prepared = this.prepare(request);
+    if (!prepared.ok) return prepared;
+    return this.run(prepared.value, undefined, authority, expectedExisting) as Promise<Result<InternalCommitResult>>;
+  }
+
+  private async run(request?: CommitRequest, lookup?: MutationId, held?: RecoveryAuthority, expectedExisting?: CommittedTip): Promise<Result<InternalCommitResult | CommittedTip | undefined>> {
     const state: Attempt = { phase: "preflight", outcome: "not-committed", visibility: "none", durability: "unconfirmed" };
     const lock = join(this.directory, "writer.lock");
     let lockBytes: Buffer | undefined;
@@ -183,13 +194,26 @@ export class FsWalStore {
       await this.directoryIO.syncDirectory(join(this.directory, "wal"));
       const headBytes = Buffer.from(await this.directoryIO.readBounded(join(this.directory, "HEAD"), PERSISTENCE_LIMITS.headBytes));
       const head = requireValue(decodeStoreHead(headBytes));
-      const authority: WriterAuthorityIdentity = { storeId: head.storeId, authorityId: randomUUID() };
-      lockBytes = Buffer.from(JSON.stringify(authority));
-      state.phase = "writer-acquire";
-      await this.directoryIO.writeExclusive(lock, lockBytes);
-      ownsLock = true;
-      await this.directoryIO.syncDirectory(this.directory);
+      if (held) {
+        requireLiveRecoveryAuthority(held, this.directory, this.directoryIO);
+        await held.verify();
+      } else {
+        const authority: WriterAuthorityIdentity = { storeId: head.storeId, authorityId: randomUUID() };
+        lockBytes = Buffer.from(JSON.stringify(authority));
+        state.phase = "writer-acquire";
+        await this.directoryIO.writeExclusive(lock, lockBytes);
+        ownsLock = true;
+        await this.directoryIO.syncDirectory(this.directory);
+      }
       const verifyAuthority = async () => {
+        if (held) {
+          requireLiveRecoveryAuthority(held, this.directory, this.directoryIO);
+          await held.verify();
+          if (!Buffer.from(await this.directoryIO.readBounded(join(this.directory, "HEAD"), PERSISTENCE_LIMITS.headBytes)).equals(headBytes)) {
+            throw new DirectoryIoError("RECOVERY_REQUIRED", "Selected HEAD changed.");
+          }
+          return;
+        }
         if (!ownsLock) throw new DirectoryIoError("RECOVERY_REQUIRED", "Writer authority has ended.");
         await this.layout();
         if (!Buffer.from(await this.directoryIO.readBounded(lock, 1024)).equals(lockBytes!)
@@ -209,7 +233,7 @@ export class FsWalStore {
       if (kind === "directory") throw new DirectoryIoError("RECOVERY_REQUIRED", "WAL path is not a regular file.");
       if (kind === "file") file = await this.walIO.open(path, false);
       state.phase = "history-validate";
-      const history: History = file ? await this.history(path, file, head, headBytes, verifyAuthority, request?.mutation.mutationId ?? lookup)
+      const history: History = file ? await this.history(path, file, head, headBytes, verifyAuthority, request?.mutation.mutationId ?? lookup, !!held)
         : { tip: head.checkpoint.tip, entries: new Map(), completeIndex: true, found: undefined };
       const before = history.stamp;
       let validatedStamp = before;
@@ -218,6 +242,9 @@ export class FsWalStore {
       if (request) {
         const previous = history.found;
         if (previous) {
+          if (expectedExisting && !sameCommittedTip(expectedExisting, previous.identity)) {
+            throw new DirectoryIoError("RECOVERY_REQUIRED", "Previously observed mutation identity changed.");
+          }
           state.outcome = "reconciliation-required";
           state.visibility = "complete";
           if (previous.mutation.digest !== request.mutation.digest || previous.operationsDigest !== operationsDigest(request.operations)) {
@@ -225,6 +252,7 @@ export class FsWalStore {
           }
           receipt = { status: "already-committed", identity: previous.identity, mutation: previous.mutation, ...acknowledgmentFor(this.directoryIO) };
         } else {
+          if (expectedExisting) throw new DirectoryIoError("RECOVERY_REQUIRED", "Previously observed mutation is no longer present in the selected WAL.");
           state.phase = "exact-base";
           if (!sameCommittedTip(request.expectedBase, history.tip)) throw new DirectoryIoError("STALE_TRANSACTION_BASE", "Expected base differs; automatic rebase is forbidden.");
           // Assign only from the validated tip while authority is held.
@@ -307,4 +335,9 @@ export class FsWalStore {
     }
     return result;
   }
+}
+
+/** Package-internal only; a forged or expired session cannot bypass writer acquisition. */
+export function commitUnderRecoveryAuthority(store: FsWalStore, authority: RecoveryAuthority, request: CommitRequest, expectedExisting?: CommittedTip): Promise<Result<InternalCommitResult>> {
+  return store[heldCommit](authority, request, expectedExisting);
 }
