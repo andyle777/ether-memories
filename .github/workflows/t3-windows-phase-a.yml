@@ -1,0 +1,39 @@
+﻿name: T3 Windows Phase A
+on:
+  push:
+    branches:
+      - test/t3-windows-enforcement-run
+permissions:
+  contents: read
+jobs:
+  phase-a:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Fail closed on unexpected invocation
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'andyle777/Ether-Memories' -or
+              $env:GITHUB_EVENT_NAME -cne 'push' -or
+              $env:GITHUB_REF -cne 'refs/heads/test/t3-windows-enforcement-run' -or
+              $env:RUNNER_ENVIRONMENT -cne 'github-hosted') {
+            throw 'Unexpected repository, event, branch, or runner'
+          }
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run mandatory Phase A
+        run: |
+          & .\scripts\t3-phase-a\Invoke-PhaseA.ps1 -RequiredBase '42f9b5bdf94e47c4c69c0f87127eb545dff13ed1' -OutputFile 't3-phase-a-sanitized.json'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve sanitized report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3-phase-a-sanitized
+          path: t3-phase-a-sanitized.json
+          if-no-files-found: error
+          retention-days: 7
