@@ -129,6 +129,18 @@ function New-PhaseATokenJournalBackend([hashtable]$Backend,[Collections.Generic.
   }.GetNewClosure()
   return $wrapped
 }
+function Test-PhaseACloseReceipt($Receipt,$Expected) {
+  try {
+    $fields=@('schema','mode','attempt','supervisorPid','supervisorCreatedAt','childPid','childCreatedAt','attempted','succeeded','error')
+    if ($Receipt -isnot [Collections.IDictionary] -or $Expected -isnot [Collections.IDictionary] -or $Receipt.Count -ne $fields.Count) { return $false }
+    foreach ($field in $fields) { if (-not (@($Receipt.Keys) -ccontains $field)) { return $false } }
+    if ($Receipt.schema -cne 'ether.phase-a.close-receipt.v1' -or $Receipt.mode -cne 'jobClosure' -or $Expected.mode -cne 'jobClosure' -or $Receipt.attempt -isnot [string] -or $Receipt.attempt -cnotmatch '^[0-9a-f]{32}$' -or $Receipt.attempt -cne $Expected.attempt -or $Receipt.attempted -isnot [bool] -or -not $Receipt.attempted -or $Receipt.succeeded -isnot [bool]) { return $false }
+    foreach ($field in @('supervisorPid','childPid')) { if ($Receipt[$field] -isnot [int] -or $Receipt[$field] -le 0 -or $Receipt[$field] -ne $Expected[$field]) { return $false } }
+    foreach ($field in @('supervisorCreatedAt','childCreatedAt')) { $a=[DateTimeOffset]::MinValue; $b=[DateTimeOffset]::MinValue; if (-not [DateTimeOffset]::TryParse([string]$Receipt[$field],[ref]$a) -or -not [DateTimeOffset]::TryParse([string]$Expected[$field],[ref]$b) -or $a -ne $b) { return $false } }
+    if ($Receipt.succeeded) { return ($Receipt.error -ceq 'NONE') }
+    return ($Receipt.error -cin @('WIN32_ACCESS_DENIED','WIN32_INVALID_HANDLE','WIN32_OTHER','NON_WIN32'))
+  } catch { return $false }
+}
 function Add-PhaseAInnerJobEvidence($VerdictInput,$HostedJournal,$ActorJournal,[string]$EvidenceClass) {
   try {
     if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $HostedJournal -isnot [hashtable]) { return }
@@ -155,8 +167,9 @@ function Add-PhaseAInnerJobEvidence($VerdictInput,$HostedJournal,$ActorJournal,[
         elseif ($innerValid) { $outcome='PASS';$reason='NONE' }
         elseif ($inner.status -ceq 'FAILED' -and $released -and (($inner.reason -ceq 'LIMIT_MISMATCH' -and -not $limitsValid -and ($inner.limitFlags -is [int] -or $inner.limitFlags -is [uint32])) -or ($inner.reason -ceq 'JOB_MISMATCH' -and $limitsValid -and $inner.member -is [bool] -and $inner.supervisorMember -is [bool] -and -not $memberValid))) { $outcome='FAIL';$reason='CONTROL_FAILED' }
         elseif ($inner.status -ceq 'FAILED' -and $inner.reason -cin @('INSPECTION_FAILED','INSPECTION_RELEASE_FAILED','PID_MISMATCH','TIME_MISMATCH','EARLY_EXIT')) { $outcome='FAIL';$reason='SETUP_FAILED' }
-      } elseif (-not $identityMismatch -and $innerValid -and $record.childRunningBeforeAction -is [bool] -and $record.childRunningBeforeAction -and $record.action -ceq 'CLOSE_REQUESTED' -and $record.supervisorWaitSucceeded -is [bool] -and $record.supervisorWaitSucceeded -and $record.supervisorExitCode -is [int] -and $record.supervisorExitCode -eq 0) {
-        if ($record.childWaitOutcome -ceq 'SIGNALED' -and $record.childAliveAfterWait -is [bool] -and -not $record.childAliveAfterWait -and $record.childExitCode -is [int] -and $record.childExitCode -ne 259) { $outcome='PASS';$reason='NONE' }
+      } elseif (-not $identityMismatch -and $innerValid -and $record.childRunningBeforeAction -is [bool] -and $record.childRunningBeforeAction -and $record.action -ceq 'CLOSE_REQUESTED' -and $record.supervisorWaitSucceeded -is [bool] -and $record.supervisorWaitSucceeded -and $record.supervisorExitCode -is [int] -and (Test-PhaseACloseReceipt $record.closeReceipt $record)) {
+        if (-not $record.closeReceipt.succeeded) { $outcome='FAIL';$reason='SETUP_FAILED' }
+        elseif ($record.childWaitOutcome -ceq 'SIGNALED' -and $record.supervisorExitCode -eq 0 -and $record.childAliveAfterWait -is [bool] -and -not $record.childAliveAfterWait -and $record.childExitCode -is [int] -and $record.childExitCode -ne 259) { $outcome='PASS';$reason='NONE' }
         elseif ($record.childWaitOutcome -ceq 'TIMEOUT' -and $record.childAliveAfterWait -is [bool] -and $record.childAliveAfterWait -and $null -eq $record.childExitCode) { $outcome='FAIL';$reason='CONTROL_FAILED' }
         elseif ($record.childWaitOutcome -ceq 'FAILED') { $outcome='FAIL';$reason='SETUP_FAILED' }
       }
@@ -164,7 +177,10 @@ function Add-PhaseAInnerJobEvidence($VerdictInput,$HostedJournal,$ActorJournal,[
       if (-not $record.cleanupSucceeded -and $outcome -ceq 'PASS') { $outcome='FAIL';$reason='CLEANUP_UNCONFIRMED' }
       if ($VerdictInput.cases[$control].state -cne 'NOT_RUN') { continue }
       $canonical=[ordered]@{control=$control;mode=$mode;state=$outcome;reason=$reason;supervisorPid=$record.supervisorPid;supervisorSid=$record.supervisorSid;supervisorCreatedAt=$record.supervisorCreatedAt;reportedChildPid=$record.childPid;reportedChildSid=$record.childSid;reportedChildCreatedAt=$record.childCreatedAt;pid=$inner.pid;sid=$inner.sid;createdAt=$inner.createdAt;innerStatus=$inner.status;innerReason=$inner.reason;limitFlags=$inner.limitFlags;member=$inner.member;supervisorMember=$inner.supervisorMember;released=$inner.released;cleanup=$record.cleanupSucceeded;actorPid=$obs.expectedPid;actorCreatedAt=$obs.observedCreatedAt}
-      if ($mode -ceq 'jobClosure') { foreach ($key in @('childRunningBeforeAction','action','supervisorWaitSucceeded','supervisorExitCode','childWaitOutcome','childExitCode','childAliveAfterWait')) { $canonical[$key]=$record[$key] } }
+      if ($mode -ceq 'jobClosure') {
+        foreach ($key in @('childRunningBeforeAction','action','supervisorWaitSucceeded','supervisorExitCode','childWaitOutcome','childExitCode','childAliveAfterWait','attempt')) { $canonical[$key]=$record[$key] }
+        $r=$record.closeReceipt; $canonical['closeReceipt']=[ordered]@{schema=$r.schema;mode=$r.mode;attempt=$r.attempt;supervisorPid=$r.supervisorPid;supervisorCreatedAt=$r.supervisorCreatedAt;childPid=$r.childPid;childCreatedAt=$r.childCreatedAt;attempted=$r.attempted;succeeded=$r.succeeded;error=$r.error}
+      }
       $sha=[Security.Cryptography.SHA256]::Create()
       try { $json=ConvertTo-Json -InputObject $canonical -Compress; $proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
       $VerdictInput.cases[$control]=@{state=$outcome;evidence=$EvidenceClass;reason=$reason;proof=$proof}

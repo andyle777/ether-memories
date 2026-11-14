@@ -381,6 +381,8 @@ Write-Output 'PASS inner-job verifier binding, forgery and simulated verdict con
 # The bounded closure adapter must preserve real outcomes while rejecting setup gaps.
 $innerGood=@{status='OBSERVED';reason='NONE';pid=123;sid='S-1-5-21-1';createdAt='2026-01-01T00:00:00Z';limitFlags=8192;member=$true;supervisorMember=$false;released=$true}
 $closureRecord=@{mode='jobClosure';source='INJECTED';supervisorPid=122;supervisorSid='S-1-5-21-1';supervisorCreatedAt='2026-01-01T00:00:00Z';childPid=123;childSid='S-1-5-21-1';childCreatedAt='2026-01-01T00:00:00Z';innerJobObservation=$innerGood;childRunningBeforeAction=$true;action='CLOSE_REQUESTED';supervisorWaitSucceeded=$true;supervisorExitCode=0;childWaitOutcome='SIGNALED';childExitCode=1;childAliveAfterWait=$false;cleanupSucceeded=$true}
+$closureRecord.attempt=('a'*32)
+$closureRecord.closeReceipt=@{schema='ether.phase-a.close-receipt.v1';mode='jobClosure';attempt=('a'*32);supervisorPid=122;supervisorCreatedAt='2026-01-01T00:00:00Z';childPid=123;childCreatedAt='2026-01-01T00:00:00Z';attempted=$true;succeeded=$true;error='NONE'}
 $bounded=@{jobClosure=$closureRecord}
 $x=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $x $bounded $journal.ToArray() 'SIMULATED_PASS'
 if ($x.cases.jobClosure.state -cne 'PASS') { throw 'Bounded closure success was not retained' }
@@ -411,3 +413,25 @@ foreach ($field in @('childRunningBeforeAction','action','supervisorWaitSucceede
  if ($v.cases.jobClosure.state -ceq 'PASS') { throw "Incomplete closure accepted: $field" }
 }
 Write-Output 'PASS survivor preservation, failed-proof verification and closure incompleteness controls (9)'
+if (-not (Get-Command Test-PhaseACloseReceipt -ErrorAction SilentlyContinue)) { throw 'Close receipt verifier is missing' }
+$receipt=@{schema='ether.phase-a.close-receipt.v1';mode='jobClosure';attempt=('a'*32);supervisorPid=122;supervisorCreatedAt='2026-01-01T00:00:00Z';childPid=123;childCreatedAt='2026-01-01T00:00:00Z';attempted=$true;succeeded=$true;error='NONE'}
+$bound=@{mode='jobClosure';attempt=('a'*32);supervisorPid=122;supervisorCreatedAt='2026-01-01T00:00:00Z';childPid=123;childCreatedAt='2026-01-01T00:00:00Z'}
+if (-not (Test-PhaseACloseReceipt $receipt $bound)) { throw 'Valid correlated receipt rejected' }
+foreach ($field in @('attempt','supervisorPid','childPid','childCreatedAt','attempted','error')) { $bad=$receipt.Clone();switch($field){'attempt' {$bad.attempt=('b'*32)} 'supervisorPid' {$bad.supervisorPid=999} 'childPid' {$bad.childPid=999} 'childCreatedAt' {$bad.childCreatedAt='2020-01-01T00:00:00Z'} 'attempted' {$bad.attempted=$false} 'error' {$bad.error='WIN32_OTHER'}};if(Test-PhaseACloseReceipt $bad $bound){throw "Forged receipt accepted: $field"} }
+Write-Output 'PASS close receipt lifecycle correlation controls (7)'
+$without=$closureRecord.Clone();$without.Remove('closeReceipt');$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $v @{jobClosure=$without} $journal.ToArray() 'SIMULATED_PASS'
+if ($v.cases.jobClosure.state -ceq 'PASS') { throw 'Missing close receipt was accepted' }
+Write-Output 'PASS missing close receipt blocks bounded closure'
+foreach ($field in @('attempt','supervisorPid','childPid','childCreatedAt')) {
+ $bad=$closureRecord.Clone();$bad.closeReceipt=$closureRecord.closeReceipt.Clone()
+ switch($field){'attempt' {$bad.closeReceipt.attempt=('b'*32)} 'supervisorPid' {$bad.closeReceipt.supervisorPid=321} 'childPid' {$bad.closeReceipt.childPid=321} 'childCreatedAt' {$bad.closeReceipt.childCreatedAt='2020-01-01T00:00:00Z'}}
+ $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $v @{jobClosure=$bad} $journal.ToArray() 'SIMULATED_PASS'
+ if($v.cases.jobClosure.state -cne 'NOT_RUN'){throw "Mismatched receipt promoted: $field"}
+}
+$bad=$closureRecord.Clone();$bad.closeReceipt=$closureRecord.closeReceipt.Clone();$bad.closeReceipt.succeeded=$false;$bad.closeReceipt.error='WIN32_INVALID_HANDLE';$bad.supervisorExitCode=1
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $v @{jobClosure=$bad} $journal.ToArray() 'SIMULATED_PASS'
+if($v.cases.jobClosure.state -cne 'FAIL' -or $v.cases.jobClosure.reason -cne 'SETUP_FAILED'){throw 'Failed CloseHandle was not retained as unverified setup'}
+$bad=$closureRecord.Clone();$bad.supervisorExitCode=1;$bad.childWaitOutcome='TIMEOUT';$bad.childExitCode=$null;$bad.childAliveAfterWait=$true
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $v @{jobClosure=$bad} $journal.ToArray() 'SIMULATED_PASS'
+if($v.cases.jobClosure.state -cne 'FAIL' -or $v.cases.jobClosure.reason -cne 'CONTROL_FAILED'){throw 'Verified survivor was lost after supervisor nonzero exit'}
+Write-Output 'PASS failed close, forged receipt and survivor controls (6)'

@@ -1,4 +1,4 @@
-﻿# Proposed inner-job acceptance clarification v1
+# Proposed inner-job acceptance clarification v1
 
 Status: PROPOSED, owner adoption pending. This does not amend or recover the
 historical frozen T3 contract.
@@ -6,8 +6,9 @@ historical frozen T3 contract.
 The bounded job-closure observation consists of a live, identity-bound child;
 manager inspection of the supervisor-reported inner job with the expected limit
 and child membership; checked release of the manager's query handle; a close
-request; the reviewed supervisor's successful exit after its close-and-wait
-path; an independent signaled child wait and non-active exit state; and confirmed
+request; a supervisor-generated receipt of the actual close attempt, correlated
+with manager-observed process identities and the attempt nonce; the reviewed
+supervisor's successful exit after its close-and-wait path; an independent signaled child wait and non-active exit state; and confirmed
 cleanup. A supervisor-death observation is separate and is not a reported close.
 
 This sequence shows ordered observations under the controlled launcher and
@@ -23,3 +24,8 @@ not live cross-identity acceptance evidence.
 Owner decision needed: whether this bounded sequence is sufficient for the
 provisional jobClosure acceptance control. The source adapter is provisional;
 no freeze or historical scope decision follows from it.
+
+The close receipt reports the supervisor's operation; it is not independently
+authoritative. Missing, malformed, mismatched, or failed close receipts cannot
+satisfy successful closure. A correlated failed close is a setup failure, not
+an independently verified security violation.

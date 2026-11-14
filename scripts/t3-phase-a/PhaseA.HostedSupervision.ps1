@@ -37,7 +37,7 @@ function Invoke-PhaseAHostedSupervision($Account,$Token,[hashtable]$Backend,[str
     try { $o=& $Backend.Run $Account $Token $mode }
     catch { if ($_.Exception.GetBaseException().Message -ceq 'STAGE2_CHILD_UNCONFIRMED') { $cases[$mode]=@{status='FAIL';evidence=$Evidence;reason='CHILD_UNCONFIRMED'}; $base=$_.Exception.GetBaseException(); $partial=$base.Data['PhaseAProcessLifetime']; if ($partial -is [hashtable]) { $partial['source']=$Evidence; $Sink.processLifetime[$mode]=$partial } else { $Sink.processLifetime[$mode]=@{mode=$mode;source=$Evidence;error='CHILD_UNCONFIRMED';lastHandleVerified=$false;cleanupSucceeded=$false} }; throw 'STAGE2_CHILD_UNCONFIRMED' }; $reason='BACKEND_FAILURE' }
     if ($o -is [hashtable] -and $o.ContainsKey('processLifetime') -and $o.processLifetime -is [hashtable]) {
-      $copy=@{}; foreach ($key in @('mode','jobLimitFlags','handleCountBeforeClose','lastHandleVerified','supervisorPid','supervisorSid','supervisorCreatedAt','childPid','childSid','childCreatedAt','membership','childRunningBeforeAction','childWaitSucceeded','childWaitOutcome','childExitCode','childAliveAfterWait','supervisorExitCode','outerJobClosed','cleanupSucceeded','innerJobObservation','action','supervisorWaitSucceeded','error')) { if ($o.processLifetime.ContainsKey($key)) { $copy[$key]=$o.processLifetime[$key] } }; $copy['source']=$Evidence; $Sink.processLifetime[$mode]=$copy
+      $copy=@{}; foreach ($key in @('mode','jobLimitFlags','handleCountBeforeClose','lastHandleVerified','supervisorPid','supervisorSid','supervisorCreatedAt','childPid','childSid','childCreatedAt','membership','childRunningBeforeAction','childWaitSucceeded','childWaitOutcome','childExitCode','childAliveAfterWait','supervisorExitCode','outerJobClosed','cleanupSucceeded','innerJobObservation','action','supervisorWaitSucceeded','attempt','closeReceipt','receiptStatus','error')) { if ($o.processLifetime.ContainsKey($key)) { $copy[$key]=$o.processLifetime[$key] } }; $copy['source']=$Evidence; $Sink.processLifetime[$mode]=$copy
     }
     if ($reason -ceq 'NONE') {
       if ($o -isnot [hashtable]) { $reason='MISSING_OBSERVATION' }
@@ -64,8 +64,8 @@ function New-PhaseAHostedSupervisorBackend {
     if ([string]::IsNullOrWhiteSpace($common)) { throw 'directory unavailable' }
     $parent=[IO.Path]::GetFullPath($common).TrimEnd('\')
     $root=Join-Path $parent ('ether-phase-a-supervisor-'+[Guid]::NewGuid().ToString('N'))
-    $ready=Join-Path $root 'ready.json'; $gate=Join-Path $root 'gate'; $script=Join-Path $root 'PhaseA.HostedSupervisor.ps1'
-    $lifetime=@{mode=$mode;jobLimitFlags=$null;handleCountBeforeClose=$null;lastHandleVerified=$false;supervisorPid=$null;supervisorSid=$null;supervisorCreatedAt=$null;childPid=$null;childSid=$null;childCreatedAt=$null;membership=$null;childRunningBeforeAction=$null;childWaitSucceeded=$null;childWaitOutcome='NOT_RUN';childExitCode=$null;childAliveAfterWait=$null;supervisorExitCode=$null;outerJobClosed=$false;cleanupSucceeded=$false;innerJobObservation=$null;action='NOT_RUN';supervisorWaitSucceeded=$null;error='NOT_RUN'}
+    $ready=Join-Path $root 'ready.json'; $gate=Join-Path $root 'gate'; $receiptPath=Join-Path $root 'close.json'; $attempt=[Guid]::NewGuid().ToString('N'); $script=Join-Path $root 'PhaseA.HostedSupervisor.ps1'
+    $lifetime=@{mode=$mode;jobLimitFlags=$null;handleCountBeforeClose=$null;lastHandleVerified=$false;supervisorPid=$null;supervisorSid=$null;supervisorCreatedAt=$null;childPid=$null;childSid=$null;childCreatedAt=$null;membership=$null;childRunningBeforeAction=$null;childWaitSucceeded=$null;childWaitOutcome='NOT_RUN';childExitCode=$null;childAliveAfterWait=$null;supervisorExitCode=$null;outerJobClosed=$false;cleanupSucceeded=$false;innerJobObservation=$null;action='NOT_RUN';supervisorWaitSucceeded=$null;attempt=$attempt;closeReceipt=$null;receiptStatus='NOT_RUN';error='NOT_RUN'}
     $job=[IntPtr]::Zero; $supervisor=$null; $supProcess=$null; $child=$null; $created=$false; $resumed=$false; $identified=$false; $cleanupFailed=$false; $observed=$null; $failureReason='SETUP_FAILED'
     try {
       $null=New-Item -ItemType Directory -Path $root -ErrorAction Stop; $created=$true
@@ -79,8 +79,8 @@ function New-PhaseAHostedSupervisorBackend {
       Set-Acl -LiteralPath $root -AclObject $acl -ErrorAction Stop
       foreach ($name in @('PhaseA.HostedSupervisor.ps1','PhaseA.Native.ps1','PhaseA.Atomic.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $root $name) -ErrorAction Stop }
       $exe=Join-Path $PSHOME 'powershell.exe'
-      foreach ($path in @($root,$script,$ready,$gate,$exe)) { if ($path.Contains('"')) { throw 'invalid path' } }
-      $command='"'+$exe+'" -NoProfile -NonInteractive -File "'+$script+'" -Ready "'+$ready+'" -Gate "'+$gate+'" -Mode '+$mode
+      foreach ($path in @($root,$script,$ready,$gate,$receiptPath,$exe)) { if ($path.Contains('"')) { throw 'invalid path' } }
+      $command='"'+$exe+'" -NoProfile -NonInteractive -File "'+$script+'" -Ready "'+$ready+'" -Gate "'+$gate+'" -Mode '+$mode+' -Receipt "'+$receiptPath+'" -Attempt '+$attempt
       $failureReason='LAUNCH_FAILED'
       $job=[EtherPhaseAJob]::Create()
       try { $lifetime.jobLimitFlags=[EtherPhaseAJob]::QueryLimitFlags($job) } catch { $lifetime.error='JOB_QUERY_FAILED' }
@@ -128,8 +128,21 @@ function New-PhaseAHostedSupervisorBackend {
       $failureReason='TERMINATION_FAILED'
       if ($mode -ceq 'timeout') { $observed.timeoutObserved= -not $child.WaitForExit(250) }
       if ($mode -ceq 'jobClosure') { [IO.File]::WriteAllText($gate,'go'); $lifetime.action='CLOSE_REQUESTED' } else { $supervisor.Terminate(); $lifetime.action='SUPERVISOR_TERMINATED' }
-      $observed.supervisorTerminated=[bool]$supervisor.Wait(10000); $lifetime.supervisorWaitSucceeded=$observed.supervisorTerminated
+      $observed.supervisorTerminated=[bool]$supervisor.Wait(15000); $lifetime.supervisorWaitSucceeded=$observed.supervisorTerminated
       if ($observed.supervisorTerminated) { $lifetime.supervisorExitCode=[int]$supervisor.ExitCode() }
+      if ($mode -ceq 'jobClosure') {
+        $lifetime.receiptStatus='MISSING'
+        try {
+          if ([IO.File]::Exists($receiptPath)) {
+            $lifetime.receiptStatus='REJECTED'
+            if ((Get-Item -LiteralPath $receiptPath -ErrorAction Stop).Length -le 4096) {
+              $raw=Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+              $candidate=@{}; foreach ($property in $raw.PSObject.Properties) { $candidate[$property.Name]=$property.Value }
+              if (Test-PhaseACloseReceipt $candidate $lifetime) { $lifetime.closeReceipt=$candidate; $lifetime.receiptStatus='CORRELATED' }
+            }
+          }
+        } catch { $lifetime.receiptStatus='REJECTED' }
+      }
       try {
         $observed.childTerminated=[bool]$child.WaitForExit(10000); $lifetime.childWaitSucceeded=$observed.childTerminated
         if ($observed.childTerminated) { $lifetime.childWaitOutcome='SIGNALED'; $lifetime.childAliveAfterWait=$false; $lifetime.childExitCode=[int]$child.ExitCode }
@@ -155,7 +168,7 @@ function New-PhaseAHostedSupervisorBackend {
       if ($created) {
         try {
           if (((Get-Item -LiteralPath $root -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'reparse point' }
-          foreach ($name in @('ready.json','gate','PhaseA.HostedSupervisor.ps1','PhaseA.Native.ps1','PhaseA.Atomic.ps1')) {
+          foreach ($name in @('ready.json','gate','close.json','PhaseA.HostedSupervisor.ps1','PhaseA.Native.ps1','PhaseA.Atomic.ps1')) {
             $path=Join-Path $root $name
             if (Test-Path -LiteralPath $path) { $entry=Get-Item -LiteralPath $path -Force -ErrorAction Stop; if (($entry.Attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0) { throw 'unexpected entry' }; [IO.File]::Delete($path) }
           }

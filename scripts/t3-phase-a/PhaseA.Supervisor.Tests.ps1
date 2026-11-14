@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.HostedSupervision.ps1"
+. "$PSScriptRoot/PhaseA.Evidence.ps1"
 $ready = Join-Path ([IO.Path]::GetTempPath()) ("ether-phase-a-ready-" + [Guid]::NewGuid().ToString("N") + ".txt")
 $supervisor = $null; $child = $null
 try {
@@ -43,10 +44,11 @@ try {
 }
 $ready=Join-Path ([IO.Path]::GetTempPath()) ('ether-phase-a-hosted-ready-'+[Guid]::NewGuid().ToString('N')+'.json')
 $gate=Join-Path ([IO.Path]::GetTempPath()) ('ether-phase-a-hosted-gate-'+[Guid]::NewGuid().ToString('N'))
+$receipt=$ready+'.close'; $attempt=[Guid]::NewGuid().ToString('N')
 $supervisor=$null; $child=$null
 try {
   $script=Join-Path $PSScriptRoot 'PhaseA.HostedSupervisor.ps1'
-  $supervisor=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-File',('"'+$script+'"'),'-Ready',('"'+$ready+'"'),'-Gate',('"'+$gate+'"'),'-Mode','jobClosure')
+  $supervisor=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-File',('"'+$script+'"'),'-Ready',('"'+$ready+'"'),'-Gate',('"'+$gate+'"'),'-Mode','jobClosure','-Receipt',('"'+$receipt+'"'),'-Attempt',$attempt)
   $deadline=[DateTime]::UtcNow.AddSeconds(20)
   while (-not [IO.File]::Exists($ready)) { if ($supervisor.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Hosted helper readiness failed' }; Start-Sleep -Milliseconds 100 }
   $record=Get-Content -LiteralPath $ready -Raw | ConvertFrom-Json
@@ -69,11 +71,15 @@ try {
   if ($wrong.status -cne 'FAILED' -or $wrong.reason -cne 'TIME_MISMATCH') { throw 'Wrong child creation time accepted' }
   [IO.File]::WriteAllText($gate,'go')
   if (-not $supervisor.WaitForExit(15000) -or $supervisor.ExitCode -ne 0 -or -not $child.WaitForExit(10000)) { throw 'Hosted helper job close failed' }
-  Write-Output 'PASS hosted supervisor helper with same-identity child'
+  if (-not [IO.File]::Exists($receipt)) { throw 'Supervisor close receipt is missing' }
+  $raw=Get-Content -Raw -LiteralPath $receipt | ConvertFrom-Json; $r=@{}; foreach ($property in $raw.PSObject.Properties) { $r[$property.Name]=$property.Value }
+  $expected=@{mode='jobClosure';attempt=$attempt;supervisorPid=$supervisor.Id;supervisorCreatedAt=$supervisor.StartTime.ToUniversalTime().ToString('o');childPid=$child.Id;childCreatedAt=$record.createdAt}
+  if (-not (Test-PhaseACloseReceipt $r $expected) -or -not $r.succeeded) { throw 'Supervisor close receipt was not correlated' }
+  Write-Output 'PASS same-identity supervisor close receipt and child termination'
 } finally {
   if ($supervisor -and -not $supervisor.HasExited) { $supervisor.Kill(); $null=$supervisor.WaitForExit(5000) }
   if ($child -and -not $child.HasExited) { $child.Kill(); $null=$child.WaitForExit(5000) }
-  foreach ($file in @($ready,$gate)) { if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
+  foreach ($file in @($ready,$gate,$receipt)) { if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
 }
 Add-Type -TypeDefinition @"
 using System;
