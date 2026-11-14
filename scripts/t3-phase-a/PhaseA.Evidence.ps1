@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 # A journal item is recorded only after the real Stage 2 backend has returned.
 # Raw identity data remains in manager memory and is not written to the report.
 function Add-PhaseAActorEvidence($VerdictInput,$Journal,[string]$EvidenceClass) {
@@ -53,7 +53,7 @@ function New-PhaseAActorJournalBackend([hashtable]$Backend,[Collections.Generic.
   }.GetNewClosure()
   return @{Run=$wrapped}
 }
-function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[bool]$ProvenanceVerified,[bool]$LiveAuthorized,[string]$EvidenceClass) {
+function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[bool]$ProvenanceVerified,[bool]$LiveAuthorized,[string]$EvidenceClass,$TokenJournal=@()) {
   $boundAudience=Get-PhaseAEvidenceAudience $BoundRecord $RunAttempt
   $items=@($Journal)
   return {
@@ -67,11 +67,64 @@ function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[b
       if ([string]::IsNullOrEmpty($boundAudience) -or (Get-PhaseAEvidenceAudience $candidate $RunAttempt) -cne $boundAudience) { return $false }
       if ($kind -ceq 'authorization') { return ($ProvenanceVerified -and $LiveAuthorized) }
       if ($kind -ceq 'workflow_provenance') { return $ProvenanceVerified }
-      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding')) { return $false }
+      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken')) { return $false }
       $fresh=New-PhaseAManagerVerdictInput $candidate.commit $candidate.runId
       Add-PhaseAActorEvidence $fresh $items $EvidenceClass
+      Add-PhaseAPrimaryTokenEvidence $fresh $TokenJournal $items $EvidenceClass
       $expected=$fresh.cases[$kind]
       return ($entry -is [Collections.IDictionary] -and $entry.state -ceq 'PASS' -and $entry.evidence -ceq $EvidenceClass -and $entry.reason -ceq 'NONE' -and $expected.state -ceq 'PASS' -and $entry.proof -ceq $expected.proof)
     } catch { return $false }
   }.GetNewClosure()
+}
+function Add-PhaseAPrimaryTokenEvidence($VerdictInput,$TokenJournal,$ActorJournal,[string]$EvidenceClass) {
+  if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS')) { return }
+  $items=@($TokenJournal); if ($items.Count -ne 2) { return }
+  $actor=New-PhaseAManagerVerdictInput $VerdictInput.commit $VerdictInput.runId
+  Add-PhaseAActorEvidence $actor $ActorJournal $EvidenceClass
+  if ($actor.cases.actorSidBinding.state -cne 'PASS') { return }
+  $canonical=New-Object 'System.Collections.Generic.List[object]'
+  foreach ($i in 0,1) {
+    $item=$items[$i]; $role=@('broker','legacy')[$i]
+    if ($item -isnot [hashtable]) { return }
+    foreach ($key in @('role','accountSid','first','second','closed')) { if (-not $item.ContainsKey($key)) { return } }
+    if ($item.role -cne $role -or $item.closed -isnot [bool] -or -not $item.closed -or $item.first -isnot [hashtable] -or $item.second -isnot [hashtable]) { return }
+    $first=$item.first; $second=$item.second
+    foreach ($sample in @($first,$second)) { foreach ($key in @('sid','primary','admin','elevated','standard')) { if (-not $sample.ContainsKey($key)) { return } } }
+    if (-not $second.ContainsKey('handleOpen')) { return }
+    if ($item.accountSid -isnot [string] -or [string]::IsNullOrWhiteSpace($item.accountSid) -or $first.sid -cne $item.accountSid -or $second.sid -cne $item.accountSid -or $second.handleOpen -isnot [bool] -or -not $second.handleOpen) { return }
+    foreach ($sample in @($first,$second)) {
+      if ($sample.primary -isnot [bool] -or -not $sample.primary -or $sample.admin -isnot [bool] -or $sample.admin -or $sample.elevated -isnot [bool] -or $sample.elevated -or $sample.standard -isnot [bool] -or -not $sample.standard) { return }
+    }
+    $probe=@($ActorJournal | Where-Object { $_.role -ceq $role -and $_.operation -ceq 'probe' })
+    if ($probe.Count -ne 1 -or $probe[0].accountSid -cne $item.accountSid) { return }
+    $canonical.Add([ordered]@{role=$role;sid=$item.accountSid;primary=$second.primary;admin=$second.admin;elevated=$second.elevated;standard=$second.standard;handleOpen=$second.handleOpen;closed=$item.closed;actorProof=$actor.cases.actorSidBinding.proof})
+  }
+  $json=ConvertTo-Json -InputObject @($canonical.ToArray()) -Compress -Depth 5
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try { foreach ($name in @('brokerPrimaryToken','legacyPrimaryToken')) {
+    if ($VerdictInput.cases[$name].state -cne 'NOT_RUN') { return }
+    $proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($name+"`n"+$json))).Replace('-','').ToLowerInvariant()
+    $VerdictInput.cases[$name]=@{state='PASS';evidence=$EvidenceClass;reason='NONE';proof=$proof}
+  } } finally { $sha.Dispose() }
+}
+function New-PhaseATokenJournalBackend([hashtable]$Backend,[Collections.Generic.List[object]]$Journal,[scriptblock]$Inspect) {
+  if ($null -eq $Inspect -or $null -eq $Journal) { throw 'TOKEN_JOURNAL_INVALID' }
+  $wrapped=$Backend.Clone(); $authenticate=$Backend.Authenticate; $close=$Backend.Close
+  $wrapped.Authenticate={ param($account)
+    $token=& $authenticate $account
+    try {
+      $first=@{sid=[string]$token.sid;primary=[bool]$token.primary;admin=[bool]$token.admin;elevated=[bool]$token.elevated;standard=[bool]$token.standard}
+      $observation=& $Inspect $token
+      if ($observation -isnot [hashtable]) { throw 'TOKEN_INSPECTION_FAILED' }
+      $Journal.Add(@{role=$account.role;accountSid=$account.sid;first=$first;second=$observation;closed=$false})
+      return $token
+    } catch { try { $null=& $close $token } catch { throw 'ACCOUNT_CLEANUP_FAILED' }; throw }
+  }.GetNewClosure()
+  $wrapped.Close={ param($token)
+    $null=& $close $token
+    $matches=@($Journal | Where-Object { $_.accountSid -ceq $token.sid })
+    if ($matches.Count -ne 1) { throw 'ACCOUNT_CLEANUP_FAILED' }
+    $matches[0].closed=$true
+  }.GetNewClosure()
+  return $wrapped
 }

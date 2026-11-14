@@ -1,4 +1,4 @@
-﻿# Provisional Phase A evidence bridge
+# Provisional Phase A evidence bridge
 
 The table describes source connections, not executed Windows enforcement. The
 manager checks the journal against independently obtained process/token
@@ -13,8 +13,8 @@ on trusted run provenance and owner authorization for a final verdict.
 | identityDistinct | Stage 2 actor journal; rechecks distinct account and observed token SIDs. | Connected |
 | brokerNonAdmin | Stage 2 process-token observation; rechecks broker SID and non-admin observation. | Connected |
 | legacyNonAdmin | Stage 2 process-token observation; rechecks legacy SID and non-admin observation. | Connected |
-| brokerPrimaryToken | Stage 1 account gate checks the primary token; no retained independent proof record. | Missing |
-| legacyPrimaryToken | Stage 1 account gate checks the primary token; no retained independent proof record. | Missing |
+| brokerPrimaryToken | Stage 1 authentication and a second open-handle inspection are bound to the broker actor observation and checked handle closure; failure proof remains incomplete. | Partial |
+| legacyPrimaryToken | Stage 1 authentication and a second open-handle inspection are bound to the legacy actor observation and checked handle closure; failure proof remains incomplete. | Partial |
 | brokerActorBinding | Stage 2 journal rechecks broker account, token and actor observations. | Connected |
 | legacyActorBinding | Stage 2 journal rechecks legacy account, token and actor observations. | Connected |
 | actorPidBinding | Stage 2 journal compares launcher and independently observed actor PID. | Connected |
@@ -45,3 +45,5 @@ An observed security violation must have a verified per-control record and
 confirmed cleanup before RED can be produced. Current failure aggregation does
 not preserve sufficient independent violation evidence, so it stays UNVERIFIED.
 No missing control is inferred from a stage completion result.
+
+Primary-token PASS records are produced only after the second inspection, actor identity binding and successful token-handle close. The second inspection re-queries the same handle using GetTokenInformation and WindowsIdentity; it is corroboration by a separate OS query, not a separate security authority. Failed or incomplete inspections do not yet produce independently verifiable failure records. Supervisor and process cleanup records remain unconnected.

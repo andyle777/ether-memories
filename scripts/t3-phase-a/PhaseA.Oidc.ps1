@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 function ConvertFrom-PhaseABase64Url([string]$Value) {
   if ([string]::IsNullOrEmpty($Value) -or $Value -cnotmatch '^[A-Za-z0-9_-]+$' -or ($Value.Length % 4) -eq 1) { throw 'invalid encoding' }
   $padded=$Value.Replace('-','+').Replace('_','/')
@@ -48,6 +48,10 @@ function Get-PhaseAEvidenceAudience($Record,[string]$RunAttempt) {
   $sha=[Security.Cryptography.SHA256]::Create()
   try { $digest=$sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($builder.ToString())); return 'urn:ether:phase-a:'+([BitConverter]::ToString($digest).Replace('-','').ToLowerInvariant()) } finally { $sha.Dispose() }
 }
+function Test-PhaseAOidcEvidenceBinding($Record,[string]$RunAttempt,[string]$ExpectedAudience) {
+  $recomputed=Get-PhaseAEvidenceAudience $Record $RunAttempt
+  return (-not [string]::IsNullOrEmpty($recomputed) -and $recomputed -ceq $ExpectedAudience)
+}
 function Test-PhaseAGitHubOidcProvenance($Record,[string]$RunAttempt) {
   $handler=$null; $client=$null; $request=$null; $response=$null; $jwksResponse=$null; $token=$null; $secret=$null
   try {
@@ -76,7 +80,8 @@ function Test-PhaseAGitHubOidcProvenance($Record,[string]$RunAttempt) {
     $jwks=$keyBody | ConvertFrom-Json -ErrorAction Stop; $keys=@($jwks.keys)
     if ($keys.Count -lt 1 -or $keys.Count -gt 100) { return $false }
     $expected=@{audience=$audience;repository='andyle777/Ether-Memories';repositoryId='1345912571';workflowRef='andyle777/Ether-Memories/.github/workflows/t3-windows-phase-a.yml@refs/heads/test/t3-windows-enforcement-run';ref='refs/heads/test/t3-windows-enforcement-run';event='push';runner='github-hosted';sha=$Record.commit;runId=$Record.runId;runAttempt=$RunAttempt}
-    return (Test-PhaseAOidcToken $token $keys $expected ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()))
+    if (-not (Test-PhaseAOidcToken $token $keys $expected ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()))) { return $false }
+    return (Test-PhaseAOidcEvidenceBinding $Record $RunAttempt $audience)
   } catch { return $false }
   finally {
     $token=$null; $secret=$null; $body=$null; $payload=$null

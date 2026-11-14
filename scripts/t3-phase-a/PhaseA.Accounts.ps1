@@ -77,6 +77,20 @@ public static class EtherPhaseAAccountNative {
   [DllImport("advapi32.dll", SetLastError=true)]
   static extern bool GetTokenInformation(EtherPhaseAToken token, int kind, out int value, int length, out int returned);
   public sealed class Result { public EtherPhaseAToken handle; public string sid; public bool primary, admin, elevated, standard; }
+  public static Result Inspect(EtherPhaseAToken token) {
+    if (token==null || token.IsClosed || token.IsInvalid) throw new InvalidOperationException("token unavailable");
+    int type, elevation, len;
+    if (!GetTokenInformation(token,8,out type,sizeof(int),out len)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    if (!GetTokenInformation(token,20,out elevation,sizeof(int),out len)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    using (WindowsIdentity identity=new WindowsIdentity(token.DangerousGetHandle())) {
+      bool admin=false, standard=false;
+      foreach (IdentityReference group in identity.Groups) {
+        if (group.Value=="S-1-5-32-544") admin=true;
+        if (group.Value=="S-1-5-32-545") standard=true;
+      }
+      return new Result { sid=identity.User.Value, primary=type==1, admin=admin, elevated=elevation!=0, standard=standard };
+    }
+  }
   public static Result Authenticate(string user, SecureString password) {
     IntPtr buffer=IntPtr.Zero; EtherPhaseAToken token=null;
     try {

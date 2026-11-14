@@ -318,3 +318,36 @@ Write-Output 'PASS evidence bridge rejects identical identities'
 $provenanceOnly=New-PhaseAEvidenceVerifier $journal.ToArray() $bridged '1' $true $false 'SIMULATED_PASS'
 if (-not (& $provenanceOnly 'workflow_provenance' $null $bridged) -or (& $provenanceOnly 'authorization' $null $bridged)) { throw 'OIDC provenance was mistaken for owner authorization' }
 Write-Output 'PASS provenance does not imply owner authorization'
+# Primary-token records require a second handle inspection, matching actor OS
+# evidence, and an observed successful handle close; simulated records stay simulated.
+$tokenJournal=@(
+  @{role='broker';accountSid='S-1-5-21-1';first=@{sid='S-1-5-21-1';primary=$true;admin=$false;elevated=$false;standard=$true};second=@{sid='S-1-5-21-1';primary=$true;admin=$false;elevated=$false;standard=$true;handleOpen=$true};closed=$true},
+  @{role='legacy';accountSid='S-1-5-21-2';first=@{sid='S-1-5-21-2';primary=$true;admin=$false;elevated=$false;standard=$true};second=@{sid='S-1-5-21-2';primary=$true;admin=$false;elevated=$false;standard=$true;handleOpen=$true};closed=$true}
+)
+$tokenCandidate=New-PhaseAManagerVerdictInput ('1'*40) '123'
+if (-not (Get-Command Add-PhaseAPrimaryTokenEvidence -ErrorAction SilentlyContinue)) { throw 'Primary-token evidence adapter is missing' }
+Add-PhaseAPrimaryTokenEvidence $tokenCandidate $tokenJournal $journal.ToArray() 'SIMULATED_PASS'
+if ($tokenCandidate.cases.brokerPrimaryToken.state -cne 'PASS' -or $tokenCandidate.cases.legacyPrimaryToken.evidence -cne 'SIMULATED_PASS') { throw 'Valid token evidence rejected' }
+foreach ($field in @('sid','primary','handleOpen','closed')) {
+  $bad=@($tokenJournal | ForEach-Object { $copy=$_.Clone(); $copy.first=$_.first.Clone(); $copy.second=$_.second.Clone(); $copy })
+  switch ($field) { 'sid' {$bad[0].second.sid='S-1-5-21-9'} 'primary' {$bad[0].second.primary=$false} 'handleOpen' {$bad[0].second.handleOpen=$false} 'closed' {$bad[0].closed=$false} }
+  $candidate=New-PhaseAManagerVerdictInput ('1'*40) '123'
+  Add-PhaseAPrimaryTokenEvidence $candidate $bad $journal.ToArray() 'SIMULATED_PASS'
+  if ($candidate.cases.brokerPrimaryToken.state -cne 'NOT_RUN') { throw "Invalid token evidence accepted: $field" }
+}
+Write-Output 'PASS independent primary-token evidence and failure controls (5)'
+$tokenRecord=New-PhaseAManagerVerdictInput ('1'*40) '123'
+$audienceBefore=Get-PhaseAEvidenceAudience $tokenRecord '1'
+if (-not (Get-Command Test-PhaseAOidcEvidenceBinding -ErrorAction SilentlyContinue)) { throw 'OIDC final evidence recheck is missing' }
+if (-not (Test-PhaseAOidcEvidenceBinding $tokenRecord '1' $audienceBefore)) { throw 'Stable evidence binding rejected' }
+$tokenRecord.cases.brokerPrimaryToken=@{state='PASS';evidence='LIVE_OBSERVED';reason='NONE';proof=('a'*64)}
+if (Test-PhaseAOidcEvidenceBinding $tokenRecord '1' $audienceBefore) { throw 'Evidence mutation after token request accepted' }
+Write-Output 'PASS OIDC final evidence mutation rejection'
+$tokenBound=New-PhaseAManagerVerdictInput ('1'*40) '123'
+Add-PhaseAActorEvidence $tokenBound $journal.ToArray() 'SIMULATED_PASS'
+Add-PhaseAPrimaryTokenEvidence $tokenBound $tokenJournal $journal.ToArray() 'SIMULATED_PASS'
+$tokenVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $tokenBound '1' $true $true 'SIMULATED_PASS' $tokenJournal
+if (-not (& $tokenVerifier 'brokerPrimaryToken' $tokenBound.cases.brokerPrimaryToken $tokenBound)) { throw 'Primary-token proof was not rechecked' }
+$forged=$tokenBound.cases.brokerPrimaryToken.Clone(); $forged.proof=('f'*64)
+if (& $tokenVerifier 'brokerPrimaryToken' $forged $tokenBound) { throw 'Forged primary-token proof accepted' }
+Write-Output 'PASS independent primary-token proof recheck and forgery rejection'

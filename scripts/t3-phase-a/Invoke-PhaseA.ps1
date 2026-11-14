@@ -25,6 +25,7 @@ $config = @{
   base=$RequiredBase
 }
 $repository = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$tokenJournal=New-Object 'System.Collections.Generic.List[object]'
 $actorJournal=New-Object 'System.Collections.Generic.List[object]'
 $stage3Result=@{}; $hostedResult=@{}; $stage=$null; $adversarialStatus='NOT_RUN'; $supervision=@{injected='NOT_RUN';sameIdentity='NOT_RUN'}
 $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
@@ -37,7 +38,11 @@ $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
   elseif (-not $EnableAccountStage) { "IMPLEMENTATION_INCOMPLETE" }
   else {
     try {
-      $backend=New-PhaseAWindowsAccountBackend
+      $backend=New-PhaseATokenJournalBackend (New-PhaseAWindowsAccountBackend) $tokenJournal { param($token)
+        $open= -not $token.handle.IsClosed -and -not $token.handle.IsInvalid
+        $v=[EtherPhaseAAccountNative]::Inspect($token.handle)
+        return @{sid=$v.sid;primary=$v.primary;admin=$v.admin;elevated=$v.elevated;standard=$v.standard;handleOpen=[bool]$open}
+      }
       $launchBackend=if ($EnableActorStage) { New-PhaseAActorJournalBackend (New-PhaseAStage2Backend) $actorJournal } else { @{} }
       $fixtureBackend=if ($EnableFilesystemStage) { New-PhaseAStage3Backend } else { @{} }
       $supervisorBackend=if ($EnableActorStage) { New-PhaseAHostedSupervisorBackend } else { @{} }
@@ -69,12 +74,13 @@ $runRef=if ($runId -cmatch '^[1-9][0-9]{0,19}$') { $runId } else { 'unknown' }
 $attemptRaw=[Environment]::GetEnvironmentVariable('GITHUB_RUN_ATTEMPT'); $attempt=if ($attemptRaw -cmatch '^[1-9][0-9]{0,9}$') { $attemptRaw } else { 'unknown' }
 $verdictInput=New-PhaseAManagerVerdictInput $commit $runRef
 Add-PhaseAActorEvidence $verdictInput $actorJournal.ToArray() 'LIVE_OBSERVED'
+Add-PhaseAPrimaryTokenEvidence $verdictInput $tokenJournal.ToArray() $actorJournal.ToArray() 'LIVE_OBSERVED'
 $liveExecutionRequested=[bool]($EnableAccountStage -and $EnableActorStage -and $EnableFilesystemStage -and $EnableSupervisorProbe -and $null -ne $stage)
 $provenanceVerified=$false
 if ($liveExecutionRequested -and $runRef -cne 'unknown' -and $attempt -cne 'unknown' -and $commit -cne 'unknown') { $provenanceVerified=Test-PhaseAGitHubOidcProvenance $verdictInput $attempt }
 # Signed run provenance and explicit switches do not themselves prove owner approval.
 $ownerAuthorizationVerified=$false
-$evidenceVerifier=New-PhaseAEvidenceVerifier $actorJournal.ToArray() $verdictInput $attempt $provenanceVerified $ownerAuthorizationVerified 'LIVE_OBSERVED'
+$evidenceVerifier=New-PhaseAEvidenceVerifier $actorJournal.ToArray() $verdictInput $attempt $provenanceVerified $ownerAuthorizationVerified 'LIVE_OBSERVED' $tokenJournal.ToArray()
 $verdict=Get-PhaseAVerdict $verdictInput $evidenceVerifier
 if ($verdict.status -ceq 'GREEN') { $reason='VERDICT_GREEN' }
 elseif ($verdict.status -ceq 'RED') { $reason='VERDICT_RED' }

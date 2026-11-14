@@ -105,7 +105,7 @@ workflow behavior remains fail-closed.
 Verdict work is incomplete. `phase-a-core-provisional-v1` is a provisional
 30-control policy and does not adopt the proposed delete/rename addendum.
 The manager retains actor observations and independently rechecks eight identity
-controls. The other 22 controls have no retained, independently checkable proof;
+controls. Two primary-token controls now have a partial success-only bridge with a second open-handle query and checked closure. The remaining 20 controls have no independently checkable proof;
 see EVIDENCE-MAP.md. The production authorization decision remains false, so the
 real manager cannot currently return GREEN or RED. Synthetic evaluator outcomes
 are unit-test results, not Windows enforcement evidence.
@@ -118,3 +118,4 @@ are not saved or logged. This path and the runner endpoint remain untested on a
 hosted run. The current workflow remains unchanged, lacks the required proposed
 `id-token: write` permission and does not enable the live stage switches. Any
 workflow activation and privileged hosted execution require separate approval.
+Primary-token failure records, supervisor and process-cleanup evidence remain incomplete; do not interpret success-only token records as completion of the evidence group. OIDC evidence is reserialized and compared with the requested audience after signature validation. No live run has tested that path.

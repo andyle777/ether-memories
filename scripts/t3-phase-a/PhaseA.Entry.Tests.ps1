@@ -300,3 +300,22 @@ if (-not (Test-PhaseAObservationReport $redTop $trustFake)) { throw 'Verified sy
 $badRed=$redTop.Clone(); $badRed.status='GREEN'; $badRed.reason='VERDICT_GREEN'
 if (Test-PhaseAObservationReport $badRed $trustFake) { throw 'RED evidence accepted as GREEN' }
 Write-Output 'PASS nested RED report consistency controls (2)'
+. "$PSScriptRoot/PhaseA.Evidence.ps1"
+$script:events.Clear(); $script:seq=0
+$tokenJournal=New-Object 'System.Collections.Generic.List[object]'
+$wrappedAccount=New-PhaseATokenJournalBackend $fake $tokenJournal { param($token) return @{sid=$token.sid;primary=$true;admin=$false;elevated=$false;standard=$true;handleOpen=$true} }
+$r=Invoke-PhaseAStages $true $true $wrappedAccount $stage2fake
+if ($r -cne 'STAGE2_COMPLETE' -or $tokenJournal.Count -ne 2 -or -not $tokenJournal[0].closed -or -not $tokenJournal[1].closed) { throw 'Manager-connected token journal did not retain inspection and closure' }
+$script:events.Clear(); $script:seq=0
+$tokenJournal=New-Object 'System.Collections.Generic.List[object]'
+$wrappedAccount=New-PhaseATokenJournalBackend $fake $tokenJournal { param($token) throw 'inspection failed' }
+$r=Invoke-PhaseAStages $true $true $wrappedAccount $stage2fake
+if ($r -cne 'ACCOUNT_AUTHENTICATION_FAILED' -or -not $script:events.Contains('close:broker') -or $tokenJournal.Count -ne 0) { throw 'Failed inspection leaked token or recorded proof' }
+Write-Output 'PASS manager-connected token inspection and failure cleanup (2)'
+$script:events.Clear(); $script:seq=0
+$tokenJournal=New-Object 'System.Collections.Generic.List[object]'
+$closeFailure=$fake.Clone(); $closeFailure.Close={ param($token) throw 'injected close failure' }
+$wrappedAccount=New-PhaseATokenJournalBackend $closeFailure $tokenJournal { param($token) return @{sid=$token.sid;primary=$true;admin=$false;elevated=$false;standard=$true;handleOpen=$true} }
+$r=Invoke-PhaseAStages $true $true $wrappedAccount $stage2fake
+if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $tokenJournal[0].closed -or $tokenJournal[1].closed) { throw 'Failed handle cleanup was recorded as successful' }
+Write-Output 'PASS token handle cleanup failure remains unconfirmed'
