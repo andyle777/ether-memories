@@ -319,3 +319,21 @@ $wrappedAccount=New-PhaseATokenJournalBackend $closeFailure $tokenJournal { para
 $r=Invoke-PhaseAStages $true $true $wrappedAccount $stage2fake
 if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $tokenJournal[0].closed -or $tokenJournal[1].closed) { throw 'Failed handle cleanup was recorded as successful' }
 Write-Output 'PASS token handle cleanup failure remains unconfirmed'
+$lifeSink=@{}
+$lifeBackend=@{Run={param($account,$token,$mode) @{outcome='OBSERVED';identity=$true;pid=$true;creationTime=$true;membership=$true;childTerminated=$true;supervisorTerminated=$true;cleanup=$true;timeoutObserved=$true;processLifetime=@{mode=$mode;source='INJECTED';jobLimitFlags=8192;handleCountBeforeClose=1;lastHandleVerified=$false}} }}
+$life=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $lifeBackend 'INJECTED' $lifeSink
+if (-not $lifeSink.ContainsKey('processLifetime') -or $lifeSink.processLifetime.Count -ne 3) { throw 'Supervisor process lifetime observations not retained' }
+if ($lifeSink.processLifetime.jobClosure.source -cne 'INJECTED' -or $lifeSink.processLifetime.jobClosure.lastHandleVerified) { throw 'Simulated or unconfirmed last-handle evidence misclassified' }
+Write-Output 'PASS injected supervisor lifetime evidence retention'
+$lifeSink=@{}
+$unconfirmed=@{Run={param($account,$token,$mode) throw 'STAGE2_CHILD_UNCONFIRMED'}}
+try { $null=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $unconfirmed 'INJECTED' $lifeSink; throw 'Unconfirmed child was accepted' } catch { if ($_.Exception.GetBaseException().Message -cne 'STAGE2_CHILD_UNCONFIRMED') { throw } }
+if (-not $lifeSink.processLifetime.ContainsKey('supervisorDeath') -or $lifeSink.processLifetime.supervisorDeath.error -cne 'CHILD_UNCONFIRMED') { throw 'Unconfirmed child failure was not retained' }
+Write-Output 'PASS unconfirmed child failure retained'
+. "$PSScriptRoot/PhaseA.Oidc.ps1"
+$policyInput=New-PhaseAManagerVerdictInput ('1'*40) '123'
+$proofVerifier=New-PhaseAEvidenceVerifier @() $policyInput '1' $true $true 'SIMULATED_PASS'
+foreach ($control in @('jobContainment','jobClosure','childTermination','processCleanup')) {
+ if (& $proofVerifier $control @{state='PASS';evidence='LIVE_OBSERVED';reason='NONE';proof=('a'*64)} $policyInput) { throw "Unverified lifetime proof accepted: $control" }
+}
+Write-Output 'PASS incomplete lifetime observations cannot satisfy verdict controls (4)'

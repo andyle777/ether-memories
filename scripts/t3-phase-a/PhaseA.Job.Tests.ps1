@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Core.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
@@ -34,6 +34,8 @@ try {
     Start-Sleep -Milliseconds 50
   }
   if ([IO.File]::ReadAllText($marker) -cne 'clean') { throw 'Parent environment leaked into child' }
+  if ($atomic.Exited()) { throw 'Child exited before job closure' }
+  if (([EtherPhaseAJob]::QueryLimitFlags($atomicJob) -band 0x2000) -eq 0 -or [EtherPhaseAJob]::QueryHandleCount($atomicJob) -ne 1) { throw 'Job limit or handle ownership not established' }
   [EtherPhaseAJob]::Close($atomicJob); $atomicJob = [IntPtr]::Zero
   if (-not $atomic.Wait(10000)) { throw 'Atomic job child survived job close' }
   if ($atomic.ExitCode() -eq 259) { throw 'Terminated child reported as active' }
@@ -77,3 +79,29 @@ try {
   if (-not $selfChild.Wait(10000)) { throw 'Self-token atomic child survived' }
   Write-Output 'PASS atomic current-process token child and job cleanup'
 } finally { if ($selfJob -ne [IntPtr]::Zero) { [EtherPhaseAJob]::Close($selfJob) }; if ($selfChild) { $selfChild.Dispose() } }
+# Same-identity native observation only; no accounts or policy changes.
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class PhaseATestHandle {
+ [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool DuplicateHandle(IntPtr source,IntPtr handle,IntPtr target,out IntPtr duplicate,uint access,bool inherit,uint options);
+ [DllImport("kernel32.dll",SetLastError=true)] public static extern bool CloseHandle(IntPtr handle);
+ public static IntPtr Duplicate(IntPtr h) { IntPtr d; if (!DuplicateHandle(GetCurrentProcess(),h,GetCurrentProcess(),out d,0,false,2)) throw new Exception("duplicate failed"); return d; }
+}
+"@
+$probeJob=[IntPtr]::Zero; $duplicate=[IntPtr]::Zero
+try {
+  $probeJob=[EtherPhaseAJob]::Create()
+  if (-not ([EtherPhaseAJob].GetMethod('QueryLimitFlags')) -or -not ([EtherPhaseAJob].GetMethod('QueryHandleCount'))) { throw 'Job limit and handle count observation is missing' }
+  if (([EtherPhaseAJob]::QueryLimitFlags($probeJob) -band 0x2000) -eq 0) { throw 'Kill-on-close flag missing' }
+  if ([EtherPhaseAJob]::QueryHandleCount($probeJob) -ne 1) { throw 'New job did not have one handle' }
+  $duplicate=[PhaseATestHandle]::Duplicate($probeJob)
+  if ([EtherPhaseAJob]::QueryHandleCount($probeJob) -ne 2) { throw 'Duplicate job handle was not observed' }
+  if (-not [PhaseATestHandle]::CloseHandle($duplicate)) { throw 'Duplicate close failed' }; $duplicate=[IntPtr]::Zero
+  if ([EtherPhaseAJob]::QueryHandleCount($probeJob) -ne 1) { throw 'Job handle close was not observed' }
+  Write-Output 'PASS same-identity job limit and duplicate-handle observations'
+} finally {
+  if ($duplicate -ne [IntPtr]::Zero) { [void][PhaseATestHandle]::CloseHandle($duplicate) }
+  if ($probeJob -ne [IntPtr]::Zero) { [EtherPhaseAJob]::Close($probeJob) }
+}

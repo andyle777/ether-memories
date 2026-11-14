@@ -1,4 +1,4 @@
-﻿if (-not ("EtherPhaseANative" -as [type])) {
+if (-not ("EtherPhaseANative" -as [type])) {
   Add-Type -TypeDefinition @"
 using System;
 using System.ComponentModel;
@@ -81,6 +81,32 @@ public static class EtherPhaseAJob {
     private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
     [DllImport("kernel32.dll", SetLastError=true)]
     private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool QueryInformationJobObject(IntPtr job, int cls, out ExtendedLimit value, uint length, out uint returned);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern IntPtr GetModuleHandle(string name);
+    [DllImport("kernel32.dll", CharSet=CharSet.Ansi, SetLastError=true)]
+    private static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate int NtQueryObjectDelegate(IntPtr handle, int infoClass, IntPtr info, uint length, out uint returned);
+    public static uint QueryLimitFlags(IntPtr job) {
+        ExtendedLimit value; uint returned;
+        if (!QueryInformationJobObject(job,9,out value,(uint)Marshal.SizeOf(typeof(ExtendedLimit)),out returned)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return value.BasicLimitInformation.LimitFlags;
+    }
+    public static uint QueryHandleCount(IntPtr job) {
+        IntPtr module=GetModuleHandle("ntdll.dll");
+        if (module==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr entry=GetProcAddress(module,"NtQueryObject");
+        if (entry==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var query=(NtQueryObjectDelegate)Marshal.GetDelegateForFunctionPointer(entry,typeof(NtQueryObjectDelegate));
+        IntPtr info=Marshal.AllocHGlobal(56);
+        try {
+            uint returned; int status=query(job,0,info,56,out returned);
+            if (status<0 || returned<16) throw new InvalidOperationException("Job handle count unavailable");
+            return unchecked((uint)Marshal.ReadInt32(info,8));
+        } finally { Marshal.FreeHGlobal(info); }
+    }
     public static IntPtr Create() {
         IntPtr job=CreateJobObject(IntPtr.Zero,null);
         if (job==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());

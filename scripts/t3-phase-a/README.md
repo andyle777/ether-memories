@@ -119,3 +119,5 @@ hosted run. The current workflow remains unchanged, lacks the required proposed
 `id-token: write` permission and does not enable the live stage switches. Any
 workflow activation and privileged hosted execution require separate approval.
 Primary-token failure records, supervisor and process-cleanup evidence remain incomplete; do not interpret success-only token records as completion of the evidence group. OIDC evidence is reserialized and compared with the requested audience after signature validation. No live run has tested that path.
+
+The hosted supervision backend retains a bounded in-memory outer-job/process observation for later integration. It does not prove last-handle closure of the supervisor-owned inner job and supplies no process-lifetime verdict PASS. Same-identity job tests query the limit flags and a momentary handle count, including a deliberate duplicate-handle negative control. These tests are not cross-identity evidence.
