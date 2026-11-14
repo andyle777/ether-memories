@@ -1,4 +1,4 @@
-# Local same-identity feasibility probe only. Not wired into the manager.
+﻿# Local same-identity feasibility probe only. Not wired into the manager.
 if (-not ('EtherPhaseAAtomic' -as [type])) {
 Add-Type -TypeDefinition @'
 using System;
@@ -21,6 +21,8 @@ public sealed class EtherPhaseAAtomic : IDisposable {
   [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
   [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   static extern bool CreateProcessAsUserW(IntPtr token, string app, StringBuilder command, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref StartupInfoEx startup, out ProcessInfo info);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern bool CreateProcessW(string app, StringBuilder command, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref StartupInfoEx startup, out ProcessInfo info);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
@@ -42,7 +44,13 @@ public sealed class EtherPhaseAAtomic : IDisposable {
     return CreateWithTokenInDirectory(token,job,app,command,System.IO.Path.GetTempPath());
   }
   public static EtherPhaseAAtomic CreateWithTokenInDirectory(IntPtr token, IntPtr job, string app, string command, string tempPath) {
-    if (token == IntPtr.Zero || job == IntPtr.Zero || String.IsNullOrEmpty(app) || String.IsNullOrEmpty(command)) throw new ArgumentException();
+    return CreateCore(token,job,app,command,tempPath,false);
+  }
+  public static EtherPhaseAAtomic CreateSelfInDirectory(IntPtr job, string app, string command, string tempPath) {
+    return CreateCore(IntPtr.Zero,job,app,command,tempPath,true);
+  }
+  static EtherPhaseAAtomic CreateCore(IntPtr token, IntPtr job, string app, string command, string tempPath, bool useSelf) {
+    if ((!useSelf && token == IntPtr.Zero) || job == IntPtr.Zero || String.IsNullOrEmpty(app) || String.IsNullOrEmpty(command)) throw new ArgumentException();
     if (String.IsNullOrWhiteSpace(tempPath) || tempPath.IndexOf('\0')>=0 || tempPath.IndexOf('=')>=0) throw new ArgumentException();
     IntPtr list=IntPtr.Zero, value=IntPtr.Zero, env=IntPtr.Zero, size=IntPtr.Zero;
     bool initialized=false;
@@ -61,7 +69,8 @@ public sealed class EtherPhaseAAtomic : IDisposable {
       byte[] envBytes=Encoding.Unicode.GetBytes(environment);
       env=Marshal.AllocHGlobal(envBytes.Length); Marshal.Copy(envBytes,0,env,envBytes.Length);
       ProcessInfo info;
-      Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,temp,ref start,out info));
+      if (useSelf) Require(CreateProcessW(app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,temp,ref start,out info));
+      else Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,temp,ref start,out info));
       return new EtherPhaseAAtomic(job,info);
     } finally {
       if(initialized) DeleteProcThreadAttributeList(list);

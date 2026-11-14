@@ -2,6 +2,7 @@
 . "$PSScriptRoot/PhaseA.Core.ps1"
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
+. "$PSScriptRoot/PhaseA.HostedSupervision.ps1"
 function Invoke-PhaseAActorOperation($Account, $Token, [hashtable]$Backend, [string]$Operation, [string]$Target, [string]$ExpectedOutcome) {
   if ($Operation -notin @('Create','Read','Overwrite','Delete','Rename') -or $ExpectedOutcome -notin @('allowed','denied') -or
       $Token.sid -cne $Account.sid) { throw 'STAGE2_OBSERVATION_REJECTED' }
@@ -33,16 +34,22 @@ function Invoke-PhaseAStage2($Accounts, $Tokens, [hashtable]$Backend) {
   }
   return 'STAGE2_COMPLETE'
 }
-function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashtable]$AccountBackend, [hashtable]$ActorBackend, [bool]$FilesystemEnabled=$false, [hashtable]$FixtureBackend=@{}, [hashtable]$Stage3Result=@{}) {
+function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashtable]$AccountBackend, [hashtable]$ActorBackend, [bool]$FilesystemEnabled=$false, [hashtable]$FixtureBackend=@{}, [hashtable]$Stage3Result=@{}, [bool]$HostedEnabled=$false, [hashtable]$SupervisorBackend=@{}, [hashtable]$HostedResult=@{}) {
   if ($FilesystemEnabled -and (-not $AccountEnabled -or -not $ActorEnabled)) { return 'STAGE3_GUARD_REJECTED' }
   if ($ActorEnabled -and -not $AccountEnabled) { return 'STAGE2_GUARD_REJECTED' }
   if (-not $AccountEnabled) { return 'LIVE_DISABLED' }
-  $state=@{reason='IMPLEMENTATION_INCOMPLETE';enabled=$ActorEnabled;backend=$ActorBackend;filesystem=$FilesystemEnabled;fixture=$FixtureBackend;result=$Stage3Result}
+  $state=@{reason='IMPLEMENTATION_INCOMPLETE';enabled=$ActorEnabled;backend=$ActorBackend;filesystem=$FilesystemEnabled;fixture=$FixtureBackend;result=$Stage3Result;hosted=$HostedEnabled;supervisor=$SupervisorBackend;hostedResult=$HostedResult}
   $callback={
     param($accounts,$tokens)
     if ($state.enabled) {
       $state.reason=Invoke-PhaseAStage2 $accounts $tokens $state.backend
       if ($state.reason -cne 'STAGE2_COMPLETE') { throw 'stage 2 failed' }
+      if ($state.hosted) {
+        try { $control=Invoke-PhaseAHostedSupervision $accounts[0] $tokens[0] $state.supervisor 'LIVE' $state.hostedResult }
+        catch { if ($_.Exception.GetBaseException().Message -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; throw }
+        $state.hostedResult['cases']=$control.cases
+        if ($control.status -cne 'LIVE_OBSERVED') { $state.reason='SUPERVISOR_LIVE_FAILED'; throw 'hosted supervisor controls failed' }
+      }
       if ($state.filesystem) {
         $experiment=Invoke-PhaseAStage3 $accounts $tokens $state.fixture $state.backend
         $state.reason=$experiment.status
@@ -183,7 +190,7 @@ function Get-PhaseAAdversarialStatus($Result) {
   return 'SIMULATED_PASS'
 }
 function Invoke-PhaseASupervisorEvidence([scriptblock]$SameIdentityProbe) {
-  $result=@{injected='FAIL';sameIdentity='FAIL'}
+  $result=@{injected='FAIL';sameIdentity='NOT_RUN';reason='SUPERVISOR_INJECTED_FAILED'}
   $accounts=@(@{role='broker';sid='S-1-5-21-1'},@{role='legacy';sid='S-1-5-21-2'})
   $tokens=@(@{sid='S-1-5-21-1'},@{sid='S-1-5-21-2'})
   $positive=@{Run={param($a,$t) @{role=$a.role;expectedSid=$a.sid;observedSid=$a.sid;reportedSid=$a.sid;expectedPid=123;reportedPid=123;tokenNonAdmin=$true;tokenObserved=$true;createdAt='2026-01-01T00:00:00Z';observedCreatedAt='2026-01-01T00:00:00Z';expectedNonce='n';reportedNonce='n';exitCode=0;outcome='allowed';contained=$true;terminated=$true}}}
@@ -195,9 +202,9 @@ function Invoke-PhaseASupervisorEvidence([scriptblock]$SameIdentityProbe) {
       try { $observed=Invoke-PhaseAStage2 $accounts $tokens $backend } catch { $observed=$_.Exception.GetBaseException().Message }
       if ($observed -cne $reason) { return $result }
     }
-    $result.injected='SIMULATED_PASS'
+    $result.injected='SIMULATED_PASS'; $result.sameIdentity='FAIL'; $result.reason='SUPERVISOR_PROBE_FAILED'
     $probeResult=& $SameIdentityProbe
-    if ($probeResult -is [bool] -and $probeResult) { $result.sameIdentity='SAME_IDENTITY_PASS' }
-  } catch { }
+    if ($probeResult -is [bool] -and $probeResult) { $result.sameIdentity='SAME_IDENTITY_PASS'; $result.reason='NONE' }
+  } catch { $message=$_.Exception.GetBaseException().Message; if ($message -cin @('SUPERVISOR_JOB_PROBE_FAILED','SUPERVISOR_DEATH_PROBE_FAILED')) { $result.reason=$message } }
   return $result
 }

@@ -83,13 +83,21 @@ NTFS enforcement evidence. A failed or missing synthetic check prevents the
 live account path. An explicit `-EnableSupervisorProbe` runs existing same-identity
 job and supervisor probes and labels their result `SAME_IDENTITY_PASS`; simulated
 timeout, cleanup failure and unconfirmed-child controls are separately labeled.
-Neither proves alternate-identity failure behavior. Delete and rename remain
+Neither proves alternate-identity failure behavior. The guarded live account
+callback now also runs separate supervisor-death, job-closure and timeout
+controls using the alternate token. Each control records an allowlisted status
+and reason, with evidence labeled LIVE rather than attested hosted evidence.
+This path has not been executed with alternate identities. It retains the outer
+job while independently checking the child SID, process and parent IDs, creation
+time, job membership and exit. Unconfirmed children prevent account cleanup.
+Delete and rename remain
 contract-unresolved; their proposed additional cases are separate from the
 unrecovered frozen matrix and await owner acceptance.
 
 A future separately approved hosted invocation would need the existing
 `-EnableAccountStage`, `-EnableActorStage`, `-EnableFilesystemStage`, and
 `-EnableSupervisorProbe` switches.
-Do not add these switches to the workflow until the incomplete supervisor and
-contract gates are resolved and the exact workflow change is reviewed. Current
+Do not add these switches to the workflow until the exact source and workflow
+change have been independently reviewed and separately authorized. The proposed
+delete and rename addendum remains pending owner acceptance. Current
 workflow behavior remains fail-closed.

@@ -66,3 +66,14 @@ try {
 } finally {
   if ($timeoutChild -and -not $timeoutChild.HasExited) { $timeoutChild.Kill(); $null=$timeoutChild.WaitForExit(5000) }
 }
+$selfJob=[IntPtr]::Zero; $selfChild=$null
+try {
+  $selfJob=[EtherPhaseAJob]::Create(); $exe=Join-Path $PSHOME 'powershell.exe'
+  $selfChild=[EtherPhaseAAtomic]::CreateSelfInDirectory($selfJob,$exe,('"'+$exe+'" -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"'),[IO.Path]::GetTempPath())
+  if (-not $selfChild.InJob() -or $selfChild.Exited()) { throw 'Self-token atomic child not contained' }
+  $selfProcess=Get-Process -Id $selfChild.Pid -ErrorAction Stop; $otherJob=[EtherPhaseAJob]::Create()
+  try { if (-not [EtherPhaseAJob]::Contains($selfJob,$selfProcess.Handle) -or [EtherPhaseAJob]::Contains($otherJob,$selfProcess.Handle)) { throw 'Independent job membership check failed' } } finally { [EtherPhaseAJob]::Close($otherJob); $selfProcess.Dispose() }
+  [EtherPhaseAJob]::Close($selfJob); $selfJob=[IntPtr]::Zero
+  if (-not $selfChild.Wait(10000)) { throw 'Self-token atomic child survived' }
+  Write-Output 'PASS atomic current-process token child and job cleanup'
+} finally { if ($selfJob -ne [IntPtr]::Zero) { [EtherPhaseAJob]::Close($selfJob) }; if ($selfChild) { $selfChild.Dispose() } }

@@ -78,6 +78,8 @@ public static class EtherPhaseAJob {
     [DllImport("kernel32.dll", SetLastError=true)]
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+    [DllImport("kernel32.dll", SetLastError=true)]
     private static extern bool CloseHandle(IntPtr handle);
     public static IntPtr Create() {
         IntPtr job=CreateJobObject(IntPtr.Zero,null);
@@ -88,6 +90,7 @@ public static class EtherPhaseAJob {
         }
         return job;
     }
+    public static bool Contains(IntPtr job, IntPtr process) { bool result; if (!IsProcessInJob(process,job,out result)) throw new Win32Exception(Marshal.GetLastWin32Error()); return result; }
     public static void Assign(IntPtr job, IntPtr process) {
         if (!AssignProcessToJobObject(job,process)) throw new Win32Exception(Marshal.GetLastWin32Error());
     }

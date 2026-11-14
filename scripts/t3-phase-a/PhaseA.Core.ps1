@@ -76,14 +76,14 @@ function Test-PhaseAReport([hashtable]$Report) {
   return (Test-RequiredCases $Report.cases)
 }
 function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
-  $fields=@('schema','status','source','commit','reason','cases')
+  $fields=@('schema','status','source','commit','reason','cases','supervisorCases')
   if ($Report.Count -ne $fields.Count) { return $false }
   foreach ($field in $fields) { if (-not $Report.Contains($field)) { return $false } }
   if ($Report.schema -cne 'ether.t3.phase-a.observations.v1' -or $Report.status -cne 'UNVERIFIED' -or
       $Report.source -cne '42f9b5bdf94e47c4c69c0f87127eb545dff13ed1' -or
       ($Report.commit -cne 'unknown' -and $Report.commit -cnotmatch '^[0-9a-f]{40}$')) { return $false }
   $reasons=@('CONFIGURATION_REJECTED','CHECKOUT_REJECTED','STAGE2_GUARD_REJECTED','STAGE3_GUARD_REJECTED',
-    'IMPLEMENTATION_INCOMPLETE','SUPERVISOR_CONTROL_FAILED','SUPERVISOR_PROBE_REQUIRED','ADVERSARIAL_CONTROL_FAILED','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
+    'IMPLEMENTATION_INCOMPLETE','SUPERVISOR_LIVE_FAILED','SUPERVISOR_INJECTED_FAILED','SUPERVISOR_PROBE_FAILED','SUPERVISOR_JOB_PROBE_FAILED','SUPERVISOR_DEATH_PROBE_FAILED','SUPERVISOR_PROBE_REQUIRED','ADVERSARIAL_CONTROL_FAILED','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
     'ACCOUNT_AUTHENTICATION_FAILED','ACCOUNT_PRIVILEGE_UNAVAILABLE','ACCOUNT_LOGON_RIGHT_UNAVAILABLE','ACCOUNT_CONSUMER_FAILED',
     'ACCOUNT_CLEANUP_FAILED','STAGE2_OBSERVATION_REJECTED','STAGE2_LAUNCH_FAILED','STAGE2_TIMEOUT','STAGE2_CLEANUP_FAILED',
     'STAGE3_SETUP_FAILED','STAGE3_ACL_REJECTED','STAGE3_CASE_FAILED','STAGE3_CLEANUP_FAILED')
@@ -96,6 +96,14 @@ function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
     if (-not $Report.cases.Contains($case)) { return $false }
     $allowed=@('PASS','FAIL','NOT_RUN'); if ($case -cin @('adversarialControls','supervisorInjected')) { $allowed+=@('SIMULATED_PASS') }; if ($case -ceq 'supervisorFailure') { $allowed+=@('SAME_IDENTITY_PASS') }
     if ($Report.cases[$case] -cnotin $allowed) { return $false }
+  }
+  if ($Report.supervisorCases -isnot [Collections.IDictionary] -or $Report.supervisorCases.Count -ne 3) { return $false }
+  $allowedReasons=@('NOT_RUN','NONE','BACKEND_FAILURE','SETUP_FAILED','LAUNCH_FAILED','SUPERVISOR_IDENTITY_MISMATCH','READINESS_MISSING','EARLY_EXIT','TERMINATION_FAILED','MISSING_OBSERVATION','IDENTITY_MISMATCH','PID_MISMATCH','TIME_MISMATCH','JOB_MISMATCH','SUPERVISOR_SURVIVED','CHILD_SURVIVED','CHILD_UNCONFIRMED','CLEANUP_FAILED','TIMEOUT_NOT_OBSERVED')
+  foreach ($mode in @('supervisorDeath','jobClosure','timeout')) {
+    if (-not $Report.supervisorCases.Contains($mode)) { return $false }
+    $entry=$Report.supervisorCases[$mode]
+    if ($entry -isnot [Collections.IDictionary] -or $entry.Count -ne 3 -or -not $entry.Contains('status') -or -not $entry.Contains('reason') -or -not $entry.Contains('evidence') -or $entry.evidence -cne 'LIVE' -or $entry.status -cnotin @('NOT_RUN','LIVE_OBSERVED','FAIL') -or $entry.reason -cnotin $allowedReasons) { return $false }
+    if (($entry.status -ceq 'NOT_RUN' -and $entry.reason -cne 'NOT_RUN') -or ($entry.status -ceq 'LIVE_OBSERVED' -and $entry.reason -cne 'NONE') -or ($entry.status -ceq 'FAIL' -and $entry.reason -cin @('NOT_RUN','NONE'))) { return $false }
   }
   return $true
 }

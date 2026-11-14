@@ -6,7 +6,8 @@ $reports=@()
 . "$PSScriptRoot/PhaseA.Stage3.ps1"
 $reportCases=@{}
 foreach ($k in @('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead','authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','proposedDelete','proposedRename','inventory','insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorInjected','supervisorFailure')) { $reportCases[$k]='NOT_RUN' }
-$reportTest=@{schema='ether.t3.phase-a.observations.v1';status='UNVERIFIED';source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1';commit='unknown';reason='IMPLEMENTATION_INCOMPLETE';cases=$reportCases}
+$supervisorCases=@{}; foreach ($mode in @('supervisorDeath','jobClosure','timeout')) { $supervisorCases[$mode]=@{status='NOT_RUN';evidence='LIVE';reason='NOT_RUN'} }
+$reportTest=@{supervisorCases=$supervisorCases;schema='ether.t3.phase-a.observations.v1';status='UNVERIFIED';source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1';commit='unknown';reason='IMPLEMENTATION_INCOMPLETE';cases=$reportCases}
 if (-not (Test-PhaseAObservationReport $reportTest)) { throw 'Valid report rejected' }
 $badReport=$reportTest.Clone(); $badCases=$reportCases.Clone(); $badCases.Remove('inventory'); $badReport.cases=$badCases
 if (Test-PhaseAObservationReport $badReport) { throw 'Report with missing observation accepted' }
@@ -184,7 +185,7 @@ try {
     $value=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
     $expected=if ($mode -eq "valid-looking") { "CHECKOUT_REJECTED" } else { "CONFIGURATION_REJECTED" }
     $names=@($value.PSObject.Properties.Name)
-    if ($names.Count -ne 6 -or $value.status -cne "UNVERIFIED" -or
+    if ($names.Count -ne 7 -or $value.status -cne "UNVERIFIED" -or
         $value.schema -cne "ether.t3.phase-a.observations.v1" -or $value.reason -cne $expected -or
         @($value.cases.PSObject.Properties.Name).Count -ne 22 -or $value.cases.adversarialControls -cne 'NOT_RUN' -or
         $value.cases.supervisorFailure -cne 'NOT_RUN') { throw "Invalid failure report" }
@@ -222,3 +223,45 @@ foreach ($op in @('Delete','Rename')) {
   if ($r.status -ceq 'STAGE3_COMPLETE') { throw "Unexpected $op success accepted" }
 }
 Write-Output 'PASS proposed delete and rename unexpected-success rejection (2)'
+. "$PSScriptRoot/PhaseA.HostedSupervision.ps1"
+$fakeHosted=@{Run={param($account,$token,$mode) @{outcome='OBSERVED';identity=$true;pid=$true;creationTime=$true;membership=$true;childTerminated=$true;supervisorTerminated=$true;cleanup=$true;timeoutObserved=$true} }}
+$sv=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1';role='broker'} @{sid='S-1-5-21-1'} $fakeHosted 'INJECTED'
+if ($sv.status -cne 'SIMULATED_PASS' -or $sv.cases.Count -ne 3) { throw 'Hosted supervisor injected success failed' }
+$fakeHosted.Run={param($account,$token,$mode) @{outcome='OBSERVED';identity=$true;pid=$true;creationTime=$true;membership=$true;childTerminated=$false;supervisorTerminated=$true;cleanup=$true;timeoutObserved=$true} }
+$sv=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1';role='broker'} @{sid='S-1-5-21-1'} $fakeHosted 'INJECTED'
+if ($sv.status -cne 'FAIL' -or $sv.cases.supervisorDeath.reason -cne 'CHILD_SURVIVED') { throw 'Surviving supervisor child accepted' }
+Write-Output 'PASS hosted supervisor injected orchestration (2)'
+$hostedGood=@{Run={param($account,$token,$mode) @{outcome='OBSERVED';identity=$true;pid=$true;creationTime=$true;membership=$true;childTerminated=$true;supervisorTerminated=$true;cleanup=$true;timeoutObserved=$true} }}
+$script:events.Clear(); $script:seq=0; $liveResult=@{}
+$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $hostedGood $liveResult
+if ($r -cne 'STAGE2_COMPLETE' -or $liveResult.cases.timeout.status -cne 'LIVE_OBSERVED' -or -not $script:events.Contains('remove:broker')) { throw 'Manager supervisor dispatch failed' }
+foreach ($pair in @(@('identity','IDENTITY_MISMATCH'),@('pid','PID_MISMATCH'),@('creationTime','TIME_MISMATCH'),@('membership','JOB_MISMATCH'),@('supervisorTerminated','SUPERVISOR_SURVIVED'),@('cleanup','CLEANUP_FAILED'),@('timeoutObserved','TIMEOUT_NOT_OBSERVED'))) {
+  $script:badSupervisorField=$pair[0]
+  $bad=@{Run={param($a,$t,$mode) $v=@{outcome='OBSERVED';identity=$true;pid=$true;creationTime=$true;membership=$true;childTerminated=$true;supervisorTerminated=$true;cleanup=$true;timeoutObserved=$true}; $v[$script:badSupervisorField]=$false; $v }}
+  $v=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $bad 'INJECTED'
+  $entry=if ($pair[0] -ceq 'timeoutObserved') { $v.cases.timeout } else { $v.cases.supervisorDeath }
+  if ($v.status -cne 'FAIL' -or $entry.reason -cne $pair[1]) { throw "Supervisor failure not classified: $($pair[0])" }
+}
+$bad=@{Run={param($a,$t,$mode) throw 'STAGE2_CHILD_UNCONFIRMED'}}
+$script:events.Clear(); $script:seq=0
+$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $bad @{}
+if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('remove:broker')) { throw 'Unconfirmed supervisor child was not fail-closed' }
+Write-Output 'PASS manager-connected supervisor controls and failure categories (9)'
+$script:events.Clear(); $script:seq=0; $uncertain=@{}
+$r=Invoke-PhaseAStages $true $true $fake $stage3actors $false @{} @{} $true $bad $uncertain
+if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $uncertain.cases.supervisorDeath.reason -cne 'CHILD_UNCONFIRMED') { throw 'Unconfirmed child reason lost' }
+$malformed=$reportTest.Clone(); $malformed.supervisorCases=@{}
+if (Test-PhaseAObservationReport $malformed) { throw 'Missing supervisor observations accepted' }
+$malformed=$reportTest.Clone(); $badCases=$supervisorCases.Clone(); $badCases.timeout=@{status='LIVE_OBSERVED';reason='NOT_RUN';evidence='LIVE'}; $malformed.supervisorCases=$badCases
+if (Test-PhaseAObservationReport $malformed) { throw 'Invalid supervisor status and reason accepted' }
+Write-Output 'PASS supervisor report fail-closed controls (3)'
+$missingHosted=@{Run={param($a,$t,$mode) $null}}
+$v=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $missingHosted 'INJECTED'
+if ($v.status -cne 'FAIL' -or $v.cases.supervisorDeath.reason -cne 'MISSING_OBSERVATION' -or $v.cases.jobClosure.status -cne 'NOT_RUN') { throw 'Missing observation accepted' }
+$badReason=@{Run={param($a,$t,$mode) @{outcome='FAILED';reason='LAUNCH_FAILED'}}}
+$v=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $badReason 'INJECTED'
+if ($v.status -cne 'FAIL' -or $v.cases.supervisorDeath.reason -cne 'LAUNCH_FAILED') { throw 'Launch failure reason lost' }
+$badReason.Run={param($a,$t,$mode) @{outcome='FAILED';reason='untrusted details'}}
+$v=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $badReason 'INJECTED'
+if ($v.cases.supervisorDeath.reason -cne 'MISSING_OBSERVATION') { throw 'Untrusted failure detail accepted' }
+Write-Output 'PASS missing, launch and untrusted supervisor reports (3)'
