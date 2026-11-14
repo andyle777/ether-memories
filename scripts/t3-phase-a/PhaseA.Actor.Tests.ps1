@@ -66,6 +66,17 @@ try {
   [IO.Directory]::Delete($emptyDirectory)
   if ((Get-PhaseAInventory $root) -cne $sameSize) { throw "Restored layout did not match" }
   Write-Output "PASS inventory detects file mutation"
+  foreach ($op in @('Rename','Delete')) {
+    Remove-Item -LiteralPath $ready,$result -ErrorAction SilentlyContinue
+    $extra=Join-Path $root ("proposed-"+$op+".bin")
+    [IO.File]::WriteAllText($extra,'synthetic')
+    $p=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-File',('"'+$actor+'"'),'-Operation',$op,'-Target',('"'+$extra+'"'),'-Ready',('"'+$ready+'"'),'-Gate',('"'+$gate+'"'),'-Result',('"'+$result+'"'),'-Nonce','offline-test')
+    if (-not $p.WaitForExit(15000)) { $p.Kill(); throw 'Additional actor operation timed out' }
+    if ($p.ExitCode -ne 0 -or (Test-Path -LiteralPath $extra)) { throw "Additional actor operation failed: $op" }
+    if ($op -ceq 'Rename' -and -not (Test-Path -LiteralPath ($extra+'.renamed'))) { throw 'Renamed entry missing' }
+  }
+  Write-Output 'PASS proposed rename and delete actor operations'
+
 } finally {
   if ($null -ne $p -and -not $p.HasExited) { $p.Kill(); $null = $p.WaitForExit(5000) }
   $resolved = [IO.Path]::GetFullPath($root)

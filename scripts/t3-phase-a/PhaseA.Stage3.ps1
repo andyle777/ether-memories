@@ -1,9 +1,9 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Inventory.ps1"
 function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hashtable]$ActorBackend) {
   $cases=@{acl=$false;authorizedRead=$false;authorizedCreate=$false;authorizedReadback=$false;
-    unauthorizedRead=$false;unauthorizedWrite=$false;unauthorizedCreate=$false;inventory=$false;insecureRejected=$false;fixtureCleanup=$false}
+    unauthorizedRead=$false;unauthorizedWrite=$false;unauthorizedCreate=$false;proposedDelete=$false;proposedRename=$false;inventory=$false;insecureRejected=$false;fixtureCleanup=$false}
   $fixture=$null; $status='STAGE3_SETUP_FAILED'; $unconfirmed=$false
   try {
     $fixture=& $FixtureBackend.Setup $Accounts
@@ -30,6 +30,12 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
     if ([string]::IsNullOrWhiteSpace([string]$deniedPath) -or (& $FixtureBackend.Exists $deniedPath)) { throw 'create control invalid' }
     $null=Invoke-PhaseAActorOperation $Accounts[1] $Tokens[1] $ActorBackend 'Create' $deniedPath 'denied'; $cases.unauthorizedCreate=$true
     if ((& $FixtureBackend.Inventory $fixture) -cne $before) { throw 'inventory changed after create' }; $cases.inventory=$true
+    if (-not (& $FixtureBackend.Exists $fixture.protectedFile) -or (& $FixtureBackend.Exists ($fixture.protectedFile+'.renamed'))) { throw 'rename fixture invalid' }
+    $null=Invoke-PhaseAActorOperation $Accounts[1] $Tokens[1] $ActorBackend 'Rename' $fixture.protectedFile 'denied'
+    if ((& $FixtureBackend.Inventory $fixture) -cne $before) { throw 'inventory changed after rename' }; $cases.proposedRename=$true
+    if (-not (& $FixtureBackend.Exists $fixture.protectedFile)) { throw 'delete fixture invalid' }
+    $null=Invoke-PhaseAActorOperation $Accounts[1] $Tokens[1] $ActorBackend 'Delete' $fixture.protectedFile 'denied'
+    if ((& $FixtureBackend.Inventory $fixture) -cne $before) { throw 'inventory changed after delete' }; $cases.proposedDelete=$true
     $insecure=Invoke-PhaseAActorOperation $Accounts[1] $Tokens[1] $ActorBackend 'Read' $fixture.controlFile 'allowed'
     if (Test-ActorObservation $insecure $Accounts[1].role 'denied') { throw 'insecure control accepted' }; $cases.insecureRejected=$true
     $status='STAGE3_COMPLETE'
@@ -71,7 +77,7 @@ function Remove-PhaseAFixture($Fixture) {
   foreach ($dir in @($root,$Fixture.protectedDir,$Fixture.controlDir)) {
     if ([IO.Directory]::Exists($dir) -and ((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'fixture reparse point rejected' }
   }
-  foreach ($file in @($Fixture.protectedFile,$Fixture.newFile,$Fixture.deniedFile,$Fixture.controlFile)) {
+  foreach ($file in @($Fixture.protectedFile,$Fixture.newFile,$Fixture.deniedFile,($Fixture.protectedFile+'.renamed'),$Fixture.controlFile)) {
     if (Test-Path -LiteralPath $file) {
       $entry=Get-Item -LiteralPath $file -Force -ErrorAction Stop
       if (($entry.Attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0) { throw 'unexpected fixture entry' }

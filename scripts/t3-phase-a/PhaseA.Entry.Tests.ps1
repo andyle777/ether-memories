@@ -5,7 +5,7 @@ $reports=@()
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Stage3.ps1"
 $reportCases=@{}
-foreach ($k in @('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead','authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','inventory','insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorFailure')) { $reportCases[$k]='NOT_RUN' }
+foreach ($k in @('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead','authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','proposedDelete','proposedRename','inventory','insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorInjected','supervisorFailure')) { $reportCases[$k]='NOT_RUN' }
 $reportTest=@{schema='ether.t3.phase-a.observations.v1';status='UNVERIFIED';source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1';commit='unknown';reason='IMPLEMENTATION_INCOMPLETE';cases=$reportCases}
 if (-not (Test-PhaseAObservationReport $reportTest)) { throw 'Valid report rejected' }
 $badReport=$reportTest.Clone(); $badCases=$reportCases.Clone(); $badCases.Remove('inventory'); $badReport.cases=$badCases
@@ -16,7 +16,7 @@ $badReport=$reportTest.Clone(); $badReport.status='GREEN'
 if (Test-PhaseAObservationReport $badReport) { throw 'Premature GREEN accepted' }
 $script:stage3events=New-Object 'System.Collections.Generic.List[string]'
 $script:created3=$false
-$stage3fixture=@{ Setup={ param($a) @{protectedFile='existing';newFile='new';deniedFile='missing';controlFile='control';initialDigest=('a'*64);writeDigest=('b'*64);aclInspected=$true} }; Exists={ param($p) if ($p -eq 'new') { $script:created3 } else { $p -ne 'missing' } }; Digest={ param($p) if ($p -eq 'existing') {'a'*64} else {'b'*64} }; Inventory={ param($f) 'unchanged' }; Cleanup={ param($f) $script:stage3events.Add('cleanup') } }
+$stage3fixture=@{ Setup={ param($a) @{protectedFile='existing';newFile='new';deniedFile='missing';controlFile='control';initialDigest=('a'*64);writeDigest=('b'*64);aclInspected=$true} }; Exists={ param($p) if ($p -eq 'new') { $script:created3 } else { $p -ne 'missing' -and -not $p.EndsWith('.renamed') } }; Digest={ param($p) if ($p -eq 'existing') {'a'*64} else {'b'*64} }; Inventory={ param($f) 'unchanged' }; Cleanup={ param($f) $script:stage3events.Add('cleanup') } }
 $stage3actors=@{Run={ param($a,$t,$operation,$target) $denied=($a.role -ceq 'legacy' -and -not [string]::IsNullOrEmpty($target) -and $target -ne 'control'); if ($a.role -eq 'broker' -and $operation -eq 'Create' -and $target -eq 'new') { $script:created3=$true }; $out=if ($denied) {'denied'} else {'allowed'}; $code=if ($denied) {20} else {0}; $o=@{expectedSid=$a.sid;observedSid=$a.sid;reportedSid=$a.sid;expectedPid=123;reportedPid=123;tokenNonAdmin=$true;tokenObserved=$true;createdAt='2026-01-01T00:00:00Z';observedCreatedAt='2026-01-01T00:00:00Z';expectedNonce='nonce';reportedNonce='nonce';exitCode=$code;outcome=$out;role=$a.role;contained=$true;terminated=$true}; if ($operation -eq 'Read' -and -not $denied) { $o.digest=if ($target -eq 'existing') {'a'*64} else {'b'*64} }; $o } }
 $accounts3=@(@{role='broker';sid='S-1-5-21-1'},@{role='legacy';sid='S-1-5-21-2'}); $tokens3=@(@{sid='S-1-5-21-1'},@{sid='S-1-5-21-2'})
 $s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $stage3fixture $stage3actors
@@ -186,7 +186,7 @@ try {
     $names=@($value.PSObject.Properties.Name)
     if ($names.Count -ne 6 -or $value.status -cne "UNVERIFIED" -or
         $value.schema -cne "ether.t3.phase-a.observations.v1" -or $value.reason -cne $expected -or
-        @($value.cases.PSObject.Properties.Name).Count -ne 19 -or $value.cases.adversarialControls -cne 'NOT_RUN' -or
+        @($value.cases.PSObject.Properties.Name).Count -ne 22 -or $value.cases.adversarialControls -cne 'NOT_RUN' -or
         $value.cases.supervisorFailure -cne 'NOT_RUN') { throw "Invalid failure report" }
   }
   Write-Output "PASS invalid and valid-looking context remain UNVERIFIED with sanitized report"
@@ -209,3 +209,16 @@ $simulated=$reportTest.Clone(); $simCases=$reportCases.Clone(); $simCases.advers
 if (-not (Test-PhaseAObservationReport $simulated)) { throw 'Correctly labeled simulated evidence rejected' }
 $simCases.supervisorFailure='SIMULATED_PASS'
 if (Test-PhaseAObservationReport $simulated) { throw 'Misplaced simulated evidence accepted' }
+$probe={ return $true }
+$supervision=Invoke-PhaseASupervisorEvidence $probe
+if ($supervision.injected -cne 'SIMULATED_PASS' -or $supervision.sameIdentity -cne 'SAME_IDENTITY_PASS') { throw 'Supervisor evidence classification failed' }
+$supervision=Invoke-PhaseASupervisorEvidence { return $false }
+if ($supervision.sameIdentity -cne 'FAIL') { throw 'Failed local probe accepted' }
+Write-Output 'PASS supervisor evidence classification (2)'
+foreach ($op in @('Delete','Rename')) {
+  $script:created3=$false; $script:attemptOp=$op
+  $unexpected=@{Run={ param($a,$t,$operation,$target) $v=& $script:stage3Run $a $t $operation $target; if ($a.role -ceq 'legacy' -and $operation -ceq $script:attemptOp) { $v.outcome='allowed'; $v.exitCode=0 }; $v } }
+  $r=Invoke-PhaseAStage3 $accounts3 $tokens3 $stage3fixture $unexpected
+  if ($r.status -ceq 'STAGE3_COMPLETE') { throw "Unexpected $op success accepted" }
+}
+Write-Output 'PASS proposed delete and rename unexpected-success rejection (2)'

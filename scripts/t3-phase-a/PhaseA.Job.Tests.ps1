@@ -1,5 +1,6 @@
 ﻿$ErrorActionPreference = "Stop"
 . "$PSScriptRoot/PhaseA.Native.ps1"
+. "$PSScriptRoot/PhaseA.Core.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
 $marker = Join-Path ([IO.Path]::GetTempPath()) ("ether-phase-a-atomic-" + [Guid]::NewGuid().ToString('N') + '.txt')
 $atomic = $null; $atomicJob = [IntPtr]::Zero
@@ -54,4 +55,14 @@ try {
 } finally {
   if ($job -ne [IntPtr]::Zero) { [EtherPhaseAJob]::Close($job) }
   if ($null -ne $child -and -not $child.HasExited) { $child.Kill(); $null = $child.WaitForExit(5000) }
+}
+
+$timeoutChild=$null
+try {
+  $timeoutChild=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60')
+  $timeoutResult=Wait-PhaseAProcess $timeoutChild 100
+  if ($timeoutResult.completed -or -not $timeoutResult.timeout -or -not $timeoutResult.terminated) { throw 'Timed out child not confirmed terminated' }
+  Write-Output 'PASS real same-identity child timeout and termination'
+} finally {
+  if ($timeoutChild -and -not $timeoutChild.HasExited) { $timeoutChild.Kill(); $null=$timeoutChild.WaitForExit(5000) }
 }

@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-  [Parameter(Mandatory=$true)][ValidateSet("Create","Read","Overwrite")][string]$Operation,
+  [Parameter(Mandatory=$true)][ValidateSet("Create","Read","Overwrite","Delete","Rename")][string]$Operation,
   [Parameter(Mandatory=$true)][string]$Target,
   [Parameter(Mandatory=$true)][string]$Ready,
   [Parameter(Mandatory=$true)][string]$Gate,
@@ -26,6 +26,10 @@ try {
       try { $record['digest']=[BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
       finally { $sha.Dispose() }
     } finally { $stream.Dispose() }
+  } elseif ($Operation -ceq "Delete") {
+    [IO.File]::Delete($Target)
+  } elseif ($Operation -ceq "Rename") {
+    [IO.File]::Move($Target,($Target + ".renamed"))
   } else {
     $mode = if ($Operation -eq "Create") { [IO.FileMode]::CreateNew } else { [IO.FileMode]::Open }
     $stream = [IO.File]::Open($Target, $mode, [IO.FileAccess]::Write, [IO.FileShare]::None)

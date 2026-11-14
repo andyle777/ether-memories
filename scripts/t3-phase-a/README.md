@@ -1,4 +1,4 @@
-# Phase A development checkpoint: incomplete
+﻿# Phase A development checkpoint: incomplete
 
 This is local development scaffolding based on commit
 `42f9b5bdf94e47c4c69c0f87127eb545dff13ed1`. It contains an experimental distinct-identity enforcement path, but the
@@ -22,7 +22,7 @@ requires both earlier switches and connects a protected NTFS fixture, access
 operations, inventory comparison, and an intentionally permissive control.
 The workflow does not enable these switches. Actual ACL and cross-identity
 behavior has not been executed. Adversarial controls and supervisor-failure
-evidence remain NOT_RUN; the manager cannot report GREEN. The observed local job-object test begins after
+evidence are not cross-identity PASS; the manager cannot report GREEN. The observed local job-object test begins after
 assignment and does not prove safe containment between process creation and
 assignment. A separate same-identity probe uses CreateProcessAsUserW with a
 primary token, STARTUPINFOEX, a job-list attribute and suspended start; local
@@ -80,12 +80,16 @@ fencing, or an independent production witness. Those remain separate T3 gates.
 The manager runs eleven synthetic observation-substitution checks after checkout
 validation. Their result is labeled `SIMULATED_PASS`; it is not cross-identity
 NTFS enforcement evidence. A failed or missing synthetic check prevents the
-live account path. `supervisorFailure` remains `NOT_RUN`: the existing local
-supervisor tests are not yet connected to the manager and do not cover every
-required lifecycle observation. Delete and rename remain contract-unresolved.
+live account path. An explicit `-EnableSupervisorProbe` runs existing same-identity
+job and supervisor probes and labels their result `SAME_IDENTITY_PASS`; simulated
+timeout, cleanup failure and unconfirmed-child controls are separately labeled.
+Neither proves alternate-identity failure behavior. Delete and rename remain
+contract-unresolved; their proposed additional cases are separate from the
+unrecovered frozen matrix and await owner acceptance.
 
 A future separately approved hosted invocation would need the existing
-`-EnableAccountStage`, `-EnableActorStage`, and `-EnableFilesystemStage` switches.
+`-EnableAccountStage`, `-EnableActorStage`, `-EnableFilesystemStage`, and
+`-EnableSupervisorProbe` switches.
 Do not add these switches to the workflow until the incomplete supervisor and
 contract gates are resolved and the exact workflow change is reviewed. Current
 workflow behavior remains fail-closed.

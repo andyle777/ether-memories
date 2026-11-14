@@ -3,7 +3,7 @@
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
 function Invoke-PhaseAActorOperation($Account, $Token, [hashtable]$Backend, [string]$Operation, [string]$Target, [string]$ExpectedOutcome) {
-  if ($Operation -notin @('Create','Read','Overwrite') -or $ExpectedOutcome -notin @('allowed','denied') -or
+  if ($Operation -notin @('Create','Read','Overwrite','Delete','Rename') -or $ExpectedOutcome -notin @('allowed','denied') -or
       $Token.sid -cne $Account.sid) { throw 'STAGE2_OBSERVATION_REJECTED' }
   $obs=& $Backend.Run $Account $Token $Operation $Target
   if ($obs -isnot [hashtable] -or -not $obs.ContainsKey('terminated') -or
@@ -65,7 +65,7 @@ function New-PhaseAStage2Backend {
     $actor=Join-Path $root 'Actor.ps1'; $ready=Join-Path $root 'ready.json'; $gate=Join-Path $root 'gate'
     $result=Join-Path $root 'result.json'; $target=Join-Path $root 'probe.bin'
     if ([string]::IsNullOrEmpty($operation)) { $operation='Create' }
-    if ($operation -notin @('Create','Read','Overwrite')) { throw 'invalid operation' }
+    if ($operation -notin @('Create','Read','Overwrite','Delete','Rename')) { throw 'invalid operation' }
     if ([string]::IsNullOrEmpty($operationTarget)) { $operationTarget=$target }
     $job=[IntPtr]::Zero; $child=$null; $process=$null; $safeToRemove=$true; $cleanupFailed=$false; $createdRoot=$false
     try {
@@ -181,4 +181,23 @@ function Get-PhaseAAdversarialStatus($Result) {
   if ($Result -isnot [hashtable] -or -not $Result.ContainsKey('kind') -or $Result.kind -cne 'injected' -or -not $Result.ContainsKey('cases') -or $Result.cases -isnot [hashtable] -or $Result.cases.Count -ne $keys.Count) { return 'FAIL' }
   foreach ($key in $keys) { if (-not $Result.cases.ContainsKey($key) -or $Result.cases[$key] -isnot [bool] -or -not $Result.cases[$key]) { return 'FAIL' } }
   return 'SIMULATED_PASS'
+}
+function Invoke-PhaseASupervisorEvidence([scriptblock]$SameIdentityProbe) {
+  $result=@{injected='FAIL';sameIdentity='FAIL'}
+  $accounts=@(@{role='broker';sid='S-1-5-21-1'},@{role='legacy';sid='S-1-5-21-2'})
+  $tokens=@(@{sid='S-1-5-21-1'},@{sid='S-1-5-21-2'})
+  $positive=@{Run={param($a,$t) @{role=$a.role;expectedSid=$a.sid;observedSid=$a.sid;reportedSid=$a.sid;expectedPid=123;reportedPid=123;tokenNonAdmin=$true;tokenObserved=$true;createdAt='2026-01-01T00:00:00Z';observedCreatedAt='2026-01-01T00:00:00Z';expectedNonce='n';reportedNonce='n';exitCode=0;outcome='allowed';contained=$true;terminated=$true}}}
+  try {
+    if ((Invoke-PhaseAStage2 $accounts $tokens $positive) -cne 'STAGE2_COMPLETE') { return $result }
+    foreach ($reason in @('STAGE2_TIMEOUT','STAGE2_CLEANUP_FAILED','STAGE2_CHILD_UNCONFIRMED')) {
+      $backend=@{Run={param($a,$t) throw $reason}.GetNewClosure()}
+      $observed=''
+      try { $observed=Invoke-PhaseAStage2 $accounts $tokens $backend } catch { $observed=$_.Exception.GetBaseException().Message }
+      if ($observed -cne $reason) { return $result }
+    }
+    $result.injected='SIMULATED_PASS'
+    $probeResult=& $SameIdentityProbe
+    if ($probeResult -is [bool] -and $probeResult) { $result.sameIdentity='SAME_IDENTITY_PASS' }
+  } catch { }
+  return $result
 }

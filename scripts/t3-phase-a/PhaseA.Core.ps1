@@ -83,18 +83,18 @@ function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
       $Report.source -cne '42f9b5bdf94e47c4c69c0f87127eb545dff13ed1' -or
       ($Report.commit -cne 'unknown' -and $Report.commit -cnotmatch '^[0-9a-f]{40}$')) { return $false }
   $reasons=@('CONFIGURATION_REJECTED','CHECKOUT_REJECTED','STAGE2_GUARD_REJECTED','STAGE3_GUARD_REJECTED',
-    'IMPLEMENTATION_INCOMPLETE','ADVERSARIAL_CONTROL_FAILED','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
+    'IMPLEMENTATION_INCOMPLETE','SUPERVISOR_CONTROL_FAILED','SUPERVISOR_PROBE_REQUIRED','ADVERSARIAL_CONTROL_FAILED','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
     'ACCOUNT_AUTHENTICATION_FAILED','ACCOUNT_PRIVILEGE_UNAVAILABLE','ACCOUNT_LOGON_RIGHT_UNAVAILABLE','ACCOUNT_CONSUMER_FAILED',
     'ACCOUNT_CLEANUP_FAILED','STAGE2_OBSERVATION_REJECTED','STAGE2_LAUNCH_FAILED','STAGE2_TIMEOUT','STAGE2_CLEANUP_FAILED',
     'STAGE3_SETUP_FAILED','STAGE3_ACL_REJECTED','STAGE3_CASE_FAILED','STAGE3_CLEANUP_FAILED')
   if ($Report.reason -cnotin $reasons -or $Report.cases -isnot [Collections.IDictionary]) { return $false }
   $required=@('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead',
-    'authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','inventory',
-    'insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorFailure')
+    'authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','proposedDelete','proposedRename','inventory',
+    'insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorInjected','supervisorFailure')
   if ($Report.cases.Count -ne $required.Count) { return $false }
   foreach ($case in $required) {
     if (-not $Report.cases.Contains($case)) { return $false }
-    $allowed=@('PASS','FAIL','NOT_RUN'); if ($case -ceq 'adversarialControls') { $allowed+=@('SIMULATED_PASS') }
+    $allowed=@('PASS','FAIL','NOT_RUN'); if ($case -cin @('adversarialControls','supervisorInjected')) { $allowed+=@('SIMULATED_PASS') }; if ($case -ceq 'supervisorFailure') { $allowed+=@('SAME_IDENTITY_PASS') }
     if ($Report.cases[$case] -cnotin $allowed) { return $false }
   }
   return $true
