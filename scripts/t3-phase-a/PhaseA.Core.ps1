@@ -83,7 +83,7 @@ function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
       $Report.source -cne '42f9b5bdf94e47c4c69c0f87127eb545dff13ed1' -or
       ($Report.commit -cne 'unknown' -and $Report.commit -cnotmatch '^[0-9a-f]{40}$')) { return $false }
   $reasons=@('CONFIGURATION_REJECTED','CHECKOUT_REJECTED','STAGE2_GUARD_REJECTED','STAGE3_GUARD_REJECTED',
-    'IMPLEMENTATION_INCOMPLETE','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
+    'IMPLEMENTATION_INCOMPLETE','ADVERSARIAL_CONTROL_FAILED','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
     'ACCOUNT_AUTHENTICATION_FAILED','ACCOUNT_PRIVILEGE_UNAVAILABLE','ACCOUNT_LOGON_RIGHT_UNAVAILABLE','ACCOUNT_CONSUMER_FAILED',
     'ACCOUNT_CLEANUP_FAILED','STAGE2_OBSERVATION_REJECTED','STAGE2_LAUNCH_FAILED','STAGE2_TIMEOUT','STAGE2_CLEANUP_FAILED',
     'STAGE3_SETUP_FAILED','STAGE3_ACL_REJECTED','STAGE3_CASE_FAILED','STAGE3_CLEANUP_FAILED')
@@ -93,7 +93,9 @@ function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
     'insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorFailure')
   if ($Report.cases.Count -ne $required.Count) { return $false }
   foreach ($case in $required) {
-    if (-not $Report.cases.Contains($case) -or $Report.cases[$case] -cnotin @('PASS','FAIL','NOT_RUN')) { return $false }
+    if (-not $Report.cases.Contains($case)) { return $false }
+    $allowed=@('PASS','FAIL','NOT_RUN'); if ($case -ceq 'adversarialControls') { $allowed+=@('SIMULATED_PASS') }
+    if ($Report.cases[$case] -cnotin $allowed) { return $false }
   }
   return $true
 }

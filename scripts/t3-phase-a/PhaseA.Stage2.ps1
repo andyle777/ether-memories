@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Core.ps1"
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
@@ -145,4 +145,40 @@ function New-PhaseAStage2Backend {
       if ($cleanupFailed) { throw 'STAGE2_CLEANUP_FAILED' }
     }
   } }
+}
+function Invoke-PhaseAAdversarialControls {
+  $base=@{role='legacy';expectedSid='S-1-5-21-1';observedSid='S-1-5-21-1';reportedSid='S-1-5-21-1';expectedPid=123;reportedPid=123;tokenNonAdmin=$true;tokenObserved=$true;createdAt='2026-01-01T00:00:00Z';observedCreatedAt='2026-01-01T00:00:00Z';expectedNonce='synthetic-nonce';reportedNonce='synthetic-nonce';exitCode=20;outcome='denied';contained=$true;terminated=$true}
+  $account=@{role='legacy';sid='S-1-5-21-1'}; $token=@{sid='S-1-5-21-1'}
+  $cases=@{}
+  $positive=@{Run={ param($a,$t,$op,$target) $base }.GetNewClosure()}
+  try { $null=Invoke-PhaseAActorOperation $account $token $positive 'Read' 'synthetic' 'denied'; $baseline=$true } catch { $baseline=$false }
+  $cases.sameSid= -not (Test-DistinctActorSids $account.sid $account.sid)
+  foreach ($name in @('wrongSid','wrongPid','wrongCreationTime','forgedObservation','malformedObservation','missingObservation','wrongJob','unexpectedSuccess','wrongDenial','missingDenial')) {
+    $sample=$base.Clone()
+    switch ($name) {
+      'wrongSid' { $sample.reportedSid='S-1-5-21-2' }
+      'wrongPid' { $sample.reportedPid=124 }
+      'wrongCreationTime' { $sample.createdAt='2026-01-01T00:00:01Z' }
+      'forgedObservation' { $sample.reportedNonce='forged' }
+      'malformedObservation' { $sample.Remove('reportedNonce') }
+      'missingObservation' { $sample=$null }
+      'wrongJob' { $sample.contained=$false }
+      'unexpectedSuccess' { $sample.outcome='allowed'; $sample.exitCode=0 }
+      'wrongDenial' { $sample.exitCode=21 }
+      'missingDenial' { $sample.Remove('exitCode') }
+    }
+    $backend=@{Run={ param($a,$t,$op,$target) $sample }.GetNewClosure()}
+    $rejected=$false
+    try { $null=Invoke-PhaseAActorOperation $account $token $backend 'Read' 'synthetic' 'denied' }
+    catch { $rejected=$_.Exception.GetBaseException().Message -cin @('STAGE2_OBSERVATION_REJECTED','STAGE2_CHILD_UNCONFIRMED') }
+    $cases[$name]=$rejected
+  }
+  if (-not $baseline) { foreach ($key in @($cases.Keys)) { $cases[$key]=$false } }
+  return @{kind='injected';cases=$cases}
+}
+function Get-PhaseAAdversarialStatus($Result) {
+  $keys=@('wrongSid','sameSid','wrongPid','wrongCreationTime','forgedObservation','malformedObservation','missingObservation','wrongJob','unexpectedSuccess','wrongDenial','missingDenial')
+  if ($Result -isnot [hashtable] -or -not $Result.ContainsKey('kind') -or $Result.kind -cne 'injected' -or -not $Result.ContainsKey('cases') -or $Result.cases -isnot [hashtable] -or $Result.cases.Count -ne $keys.Count) { return 'FAIL' }
+  foreach ($key in $keys) { if (-not $Result.cases.ContainsKey($key) -or $Result.cases[$key] -isnot [bool] -or -not $Result.cases[$key]) { return 'FAIL' } }
+  return 'SIMULATED_PASS'
 }

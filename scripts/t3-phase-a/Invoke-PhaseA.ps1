@@ -21,9 +21,10 @@ $config = @{
   base=$RequiredBase
 }
 $repository = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$stage3Result=@{}; $stage=$null
+$stage3Result=@{}; $stage=$null; $adversarialStatus='NOT_RUN'
 $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
   elseif (-not (Test-PhaseACheckout $repository $config.sha $RequiredBase)) { "CHECKOUT_REJECTED" }
+  elseif (($adversarialStatus=Get-PhaseAAdversarialStatus (Invoke-PhaseAAdversarialControls)) -ceq 'FAIL') { 'ADVERSARIAL_CONTROL_FAILED' }
   elseif ($EnableFilesystemStage -and (-not $EnableAccountStage -or -not $EnableActorStage)) { 'STAGE3_GUARD_REJECTED' }
   elseif ($EnableActorStage -and -not $EnableAccountStage) { 'STAGE2_GUARD_REJECTED' }
   elseif (-not $EnableAccountStage) { "IMPLEMENTATION_INCOMPLETE" }
@@ -40,6 +41,7 @@ $cases=[ordered]@{ accountIdentity='NOT_RUN'; brokerIdentity='NOT_RUN'; legacyId
   authorizedRead='NOT_RUN'; authorizedCreate='NOT_RUN'; authorizedReadback='NOT_RUN'; unauthorizedRead='NOT_RUN';
   unauthorizedWrite='NOT_RUN'; unauthorizedCreate='NOT_RUN'; inventory='NOT_RUN'; insecureRejected='NOT_RUN';
   processCleanup='NOT_RUN'; fixtureCleanup='NOT_RUN'; accountCleanup='NOT_RUN'; adversarialControls='NOT_RUN'; supervisorFailure='NOT_RUN' }
+$cases.adversarialControls=$adversarialStatus
 if ($stage -in @('STAGE1_COMPLETE','STAGE2_COMPLETE','STAGE3_COMPLETE')) { $cases.accountIdentity='PASS'; $cases.brokerIdentity='PASS'; $cases.legacyIdentity='PASS'; $cases.accountCleanup='PASS' }
 if ($stage -in @('STAGE2_COMPLETE','STAGE3_COMPLETE')) { $cases.actorIdentity='PASS'; $cases.containment='PASS'; $cases.processCleanup='PASS' }
 if ($stage -ceq 'ACCOUNT_CLEANUP_FAILED') { $cases.accountCleanup='FAIL' }

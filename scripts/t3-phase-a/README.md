@@ -76,3 +76,16 @@ disposable VM. Stage 2 never makes the overall Phase A status GREEN.
 The hosted experiment cannot establish production integration, old-writer
 exclusion, HEAD v2, read authorization, pending-data visibility, delayed I/O
 fencing, or an independent production witness. Those remain separate T3 gates.
+
+The manager runs eleven synthetic observation-substitution checks after checkout
+validation. Their result is labeled `SIMULATED_PASS`; it is not cross-identity
+NTFS enforcement evidence. A failed or missing synthetic check prevents the
+live account path. `supervisorFailure` remains `NOT_RUN`: the existing local
+supervisor tests are not yet connected to the manager and do not cover every
+required lifecycle observation. Delete and rename remain contract-unresolved.
+
+A future separately approved hosted invocation would need the existing
+`-EnableAccountStage`, `-EnableActorStage`, and `-EnableFilesystemStage` switches.
+Do not add these switches to the workflow until the incomplete supervisor and
+contract gates are resolved and the exact workflow change is reviewed. Current
+workflow behavior remains fail-closed.

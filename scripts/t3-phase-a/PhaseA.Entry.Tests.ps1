@@ -193,3 +193,19 @@ try {
 } finally {
   foreach($report in $reports) { if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report -Force } }
 }
+. "$PSScriptRoot/PhaseA.Stage2.ps1"
+$controls=Invoke-PhaseAAdversarialControls
+$required=@('wrongSid','sameSid','wrongPid','wrongCreationTime','forgedObservation','malformedObservation','missingObservation','wrongJob','unexpectedSuccess','wrongDenial','missingDenial')
+if ($controls.kind -cne 'injected' -or $controls.cases.Count -ne $required.Count) { throw 'Invalid adversarial result' }
+foreach ($name in $required) { if (-not $controls.cases.ContainsKey($name) -or $controls.cases[$name] -isnot [bool] -or -not $controls.cases[$name]) { throw "Adversarial control failed: $name" } }
+Write-Output 'PASS injected adversarial observation controls (11)'
+if ((Get-PhaseAAdversarialStatus $controls) -cne 'SIMULATED_PASS') { throw 'Simulated result not classified' }
+$badControls=@{kind='injected';cases=$controls.cases.Clone()}; $badControls.cases.Remove('wrongJob')
+if ((Get-PhaseAAdversarialStatus $badControls) -cne 'FAIL') { throw 'Missing control accepted' }
+$badControls=@{kind='hosted';cases=$controls.cases.Clone()}
+if ((Get-PhaseAAdversarialStatus $badControls) -cne 'FAIL') { throw 'Wrong evidence kind accepted' }
+Write-Output 'PASS adversarial evidence classification (3)'
+$simulated=$reportTest.Clone(); $simCases=$reportCases.Clone(); $simCases.adversarialControls='SIMULATED_PASS'; $simulated.cases=$simCases
+if (-not (Test-PhaseAObservationReport $simulated)) { throw 'Correctly labeled simulated evidence rejected' }
+$simCases.supervisorFailure='SIMULATED_PASS'
+if (Test-PhaseAObservationReport $simulated) { throw 'Misplaced simulated evidence accepted' }
