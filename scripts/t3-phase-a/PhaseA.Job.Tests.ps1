@@ -3,9 +3,11 @@
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
 $marker = Join-Path ([IO.Path]::GetTempPath()) ("ether-phase-a-atomic-" + [Guid]::NewGuid().ToString('N') + '.txt')
 $atomic = $null; $atomicJob = [IntPtr]::Zero
+$previousSentinel = [Environment]::GetEnvironmentVariable('PHASE_A_PRIVATE_SENTINEL', 'Process')
 try {
+  [Environment]::SetEnvironmentVariable('PHASE_A_PRIVATE_SENTINEL', 'sensitive-test-value', 'Process')
   $atomicJob = [EtherPhaseAJob]::Create()
-  $payload = "[IO.File]::WriteAllText('" + $marker + "','started'); Start-Sleep -Seconds 60"
+  $payload = "`$v=[Environment]::GetEnvironmentVariable('PHASE_A_PRIVATE_SENTINEL'); if (`$null -eq `$v) { `$v='clean' }; [IO.File]::WriteAllText('" + $marker + "',`$v); Start-Sleep -Seconds 60"
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
   $exe = Join-Path $PSHOME 'powershell.exe'
   $atomic = [EtherPhaseAAtomic]::CreateCurrentUser($atomicJob, $exe, ('"' + $exe + '" -NoProfile -NonInteractive -EncodedCommand ' + $encoded))
@@ -27,10 +29,12 @@ try {
     if ($atomic.Exited() -or [DateTime]::UtcNow -gt $deadline) { throw 'Atomic child did not resume' }
     Start-Sleep -Milliseconds 50
   }
+  if ([IO.File]::ReadAllText($marker) -cne 'clean') { throw 'Parent environment leaked into child' }
   [EtherPhaseAJob]::Close($atomicJob); $atomicJob = [IntPtr]::Zero
   if (-not $atomic.Wait(10000)) { throw 'Atomic job child survived job close' }
   Write-Output 'PASS atomic job assignment, suspended start, resume and kill-on-close'
 } finally {
+  [Environment]::SetEnvironmentVariable('PHASE_A_PRIVATE_SENTINEL', $previousSentinel, 'Process')
   if ($atomicJob -ne [IntPtr]::Zero) { [EtherPhaseAJob]::Close($atomicJob) }
   if ($atomic) { $atomic.Dispose() }
   if ([IO.File]::Exists($marker)) { [IO.File]::Delete($marker) }

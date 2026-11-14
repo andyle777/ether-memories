@@ -16,8 +16,8 @@ assignment. A separate same-identity probe uses CreateProcessAsUserW with a
 primary token, STARTUPINFOEX, a job-list attribute and suspended start; local
 tests verify job membership before resume and child termination on supervisor
 death. The probe is not the manager's launcher and alternate-token behavior,
-privileges and hosted nested-job support remain unverified. The probe inherits
-the caller environment and is not ready for sensitive hosted execution. Tests
+privileges and hosted nested-job support remain unverified. The probe passes a
+minimal explicit environment; it is not ready for hosted execution. Tests
 using a single identity or test doubles are not enforcement
 evidence. All account, policy, hosted-image and cross-identity behavior remains
 unverified.

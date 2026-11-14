@@ -38,7 +38,7 @@ public sealed class EtherPhaseAAtomic : IDisposable {
   }
   public static EtherPhaseAAtomic CreateWithToken(IntPtr token, IntPtr job, string app, string command) {
     if (token == IntPtr.Zero || job == IntPtr.Zero || String.IsNullOrEmpty(app) || String.IsNullOrEmpty(command)) throw new ArgumentException();
-    IntPtr list=IntPtr.Zero, value=IntPtr.Zero, size=IntPtr.Zero;
+    IntPtr list=IntPtr.Zero, value=IntPtr.Zero, env=IntPtr.Zero, size=IntPtr.Zero;
     bool initialized=false;
     try {
       InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
@@ -47,13 +47,21 @@ public sealed class EtherPhaseAAtomic : IDisposable {
       value=Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(value,job);
       Require(UpdateProcThreadAttribute(list,0,new IntPtr(0x2000d),value,new IntPtr(IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
       StartupInfoEx start=new StartupInfoEx(); start.startup.cb=Marshal.SizeOf(typeof(StartupInfoEx)); start.attributes=list;
+      string windows=Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+      if (String.IsNullOrEmpty(windows)) throw new InvalidOperationException("Windows directory unavailable");
+      string system=System.IO.Path.Combine(windows,"System32");
+      string temp=System.IO.Path.GetTempPath().TrimEnd('\\');
+      string environment="PATH=" + system + "\0SystemRoot=" + windows + "\0TEMP=" + temp + "\0TMP=" + temp + "\0WINDIR=" + windows + "\0\0";
+      byte[] envBytes=Encoding.Unicode.GetBytes(environment);
+      env=Marshal.AllocHGlobal(envBytes.Length); Marshal.Copy(envBytes,0,env,envBytes.Length);
       ProcessInfo info;
-      Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080004,IntPtr.Zero,null,ref start,out info));
+      Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,null,ref start,out info));
       return new EtherPhaseAAtomic(job,info);
     } finally {
       if(initialized) DeleteProcThreadAttributeList(list);
       if(list!=IntPtr.Zero) Marshal.FreeHGlobal(list);
       if(value!=IntPtr.Zero) Marshal.FreeHGlobal(value);
+      if(env!=IntPtr.Zero) Marshal.FreeHGlobal(env);
     }
   }
   public bool InJob() { bool yes; Require(IsProcessInJob(process,job,out yes)); return yes; }
