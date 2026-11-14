@@ -1,4 +1,4 @@
-﻿param([Parameter(Mandatory=$true)][string]$Ready,[Parameter(Mandatory=$true)][string]$Gate,[Parameter(Mandatory=$true)][string]$Mode)
+param([Parameter(Mandatory=$true)][string]$Ready,[Parameter(Mandatory=$true)][string]$Gate,[Parameter(Mandatory=$true)][string]$Mode)
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
@@ -12,7 +12,7 @@ try {
   try { $createdAt=$process.StartTime.ToUniversalTime().ToString('o') } finally { $process.Dispose() }
   $child.Resume()
   if ($child.Exited()) { throw 'child exited before readiness' }
-  [IO.File]::WriteAllText($Ready,(@{pid=$child.Pid;createdAt=$createdAt} | ConvertTo-Json -Compress))
+  [IO.File]::WriteAllText($Ready,(@{pid=$child.Pid;createdAt=$createdAt;innerJobHandle=$job.ToInt64()} | ConvertTo-Json -Compress))
   if ($Mode -ceq 'jobClosure') {
     $deadline=[DateTime]::UtcNow.AddSeconds(40)
     while (-not [IO.File]::Exists($Gate)) { if ([DateTime]::UtcNow -ge $deadline) { throw 'gate timeout' }; Start-Sleep -Milliseconds 50 }

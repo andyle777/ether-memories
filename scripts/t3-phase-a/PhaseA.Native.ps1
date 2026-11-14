@@ -89,6 +89,28 @@ public static class EtherPhaseAJob {
     private static extern IntPtr GetProcAddress(IntPtr module, string name);
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int NtQueryObjectDelegate(IntPtr handle, int infoClass, IntPtr info, uint length, out uint returned);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr sourceHandle, IntPtr targetProcess, out IntPtr targetHandle, uint access, bool inherit, uint options);
+    public static IntPtr DuplicateQueryFromProcess(int pid, long handleValue) {
+        if (pid<=0 || handleValue<=0) throw new ArgumentException("Invalid process or job handle");
+        IntPtr source=OpenProcess(0x0040,false,pid);
+        if (source==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr copy=IntPtr.Zero;
+        try {
+            if (!DuplicateHandle(source,new IntPtr(handleValue),GetCurrentProcess(),out copy,0x0004,false,0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return copy;
+        } finally {
+            if (!CloseHandle(source)) {
+                int error=Marshal.GetLastWin32Error();
+                if (copy!=IntPtr.Zero) CloseHandle(copy);
+                throw new Win32Exception(error);
+            }
+        }
+    }
     public static uint QueryLimitFlags(IntPtr job) {
         ExtendedLimit value; uint returned;
         if (!QueryInformationJobObject(job,9,out value,(uint)Marshal.SizeOf(typeof(ExtendedLimit)),out returned)) throw new Win32Exception(Marshal.GetLastWin32Error());

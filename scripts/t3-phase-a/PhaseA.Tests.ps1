@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 . "$PSScriptRoot/PhaseA.Core.ps1"
 $script:passed = 0
 function Check([bool]$value, [string]$name) { if (-not $value) { throw "FAIL: $name" }; $script:passed++ }
@@ -351,3 +351,30 @@ if (-not (& $tokenVerifier 'brokerPrimaryToken' $tokenBound.cases.brokerPrimaryT
 $forged=$tokenBound.cases.brokerPrimaryToken.Clone(); $forged.proof=('f'*64)
 if (& $tokenVerifier 'brokerPrimaryToken' $forged $tokenBound) { throw 'Forged primary-token proof accepted' }
 Write-Output 'PASS independent primary-token proof recheck and forgery rejection'
+$innerObservation=@{status='OBSERVED';reason='NONE';pid=123;sid='S-1-5-21-1';createdAt='2026-01-01T00:00:00Z';limitFlags=8192;member=$true;supervisorMember=$false;released=$true}
+$innerEvidence=@{supervisorDeath=@{mode='supervisorDeath';source='INJECTED';supervisorPid=122;supervisorSid='S-1-5-21-1';supervisorCreatedAt='2026-01-01T00:00:00Z';childPid=123;childSid='S-1-5-21-1';childCreatedAt='2026-01-01T00:00:00Z';innerJobObservation=$innerObservation;cleanupSucceeded=$true}}
+$innerVerdict=New-PhaseAManagerVerdictInput ('1'*40) '123'
+if (-not (Get-Command Add-PhaseAInnerJobEvidence -ErrorAction SilentlyContinue)) { throw 'Inner job verdict adapter is missing' }
+Add-PhaseAInnerJobEvidence $innerVerdict $innerEvidence $journal.ToArray() 'SIMULATED_PASS'
+if ($innerVerdict.cases.jobContainment.state -cne 'PASS' -or $innerVerdict.cases.jobContainment.evidence -cne 'SIMULATED_PASS') { throw 'Valid simulated inner containment record rejected' }
+if ($innerVerdict.cases.jobClosure.state -cne 'NOT_RUN') { throw 'Unobserved job closure promoted' }
+$innerEvidence.supervisorDeath.innerJobObservation.supervisorMember=$true
+$innerVerdict=New-PhaseAManagerVerdictInput ('1'*40) '123'
+Add-PhaseAInnerJobEvidence $innerVerdict $innerEvidence $journal.ToArray() 'SIMULATED_PASS'
+if ($innerVerdict.cases.jobContainment.state -cne 'NOT_RUN') { throw 'Outer job substitution accepted' }
+Write-Output 'PASS simulated inner-job adapter and outer-job substitution (3)'
+foreach ($field in @('pid','sid','createdAt','limitFlags','member','released','cleanupSucceeded','source')) {
+ $rec=$innerEvidence.supervisorDeath.Clone(); $item=$innerObservation.Clone(); $item.supervisorMember=$false; $rec.innerJobObservation=$item
+ switch ($field) { 'pid' {$item.pid=124} 'sid' {$item.sid='S-1-5-21-9'} 'createdAt' {$item.createdAt='2026-01-01T00:00:01Z'} 'limitFlags' {$item.limitFlags=0} 'member' {$item.member=$false} 'released' {$item.released=$false} 'cleanupSucceeded' {$rec.cleanupSucceeded=$false} 'source' {$rec.source='LIVE'} }
+ $x=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAInnerJobEvidence $x @{supervisorDeath=$rec} $journal.ToArray() 'SIMULATED_PASS'
+ if ($x.cases.jobContainment.state -cne 'NOT_RUN') { throw "Invalid inner observation accepted: $field" }
+}
+Write-Output 'PASS inner-job identity, limit, ownership and simulated source controls (8)'
+$innerObservation.supervisorMember=$false
+$innerBound=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAInnerJobEvidence $innerBound $innerEvidence $journal.ToArray() 'SIMULATED_PASS'
+$innerVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $innerBound '1' $true $true 'SIMULATED_PASS' @() $innerEvidence
+if (-not (& $innerVerifier 'jobContainment' $innerBound.cases.jobContainment $innerBound)) { throw 'Inner job proof was not independently rechecked' }
+$fakeProof=$innerBound.cases.jobContainment.Clone(); $fakeProof.proof=('f'*64)
+if (& $innerVerifier 'jobContainment' $fakeProof $innerBound) { throw 'Forged inner job proof accepted' }
+if ((Get-PhaseAVerdict $innerBound $innerVerifier).status -cne 'UNVERIFIED') { throw 'Simulated inner job promoted to live verdict' }
+Write-Output 'PASS inner-job verifier binding, forgery and simulated verdict controls (3)'

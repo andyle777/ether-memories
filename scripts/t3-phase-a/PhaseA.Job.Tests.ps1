@@ -105,3 +105,20 @@ try {
   if ($duplicate -ne [IntPtr]::Zero) { [void][PhaseATestHandle]::CloseHandle($duplicate) }
   if ($probeJob -ne [IntPtr]::Zero) { [EtherPhaseAJob]::Close($probeJob) }
 }
+$retainedJob=[IntPtr]::Zero; $retainedCopy=[IntPtr]::Zero; $retainedChild=$null
+try {
+  $retainedJob=[EtherPhaseAJob]::Create()
+  $retainedChild=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30')
+  [EtherPhaseAJob]::Assign($retainedJob,$retainedChild.Handle)
+  $retainedCopy=[EtherPhaseAJob]::DuplicateQueryFromProcess($PID,$retainedJob.ToInt64())
+  [EtherPhaseAJob]::Close($retainedJob); $retainedJob=[IntPtr]::Zero
+  if ($retainedChild.WaitForExit(300)) { throw 'Child unexpectedly exited while duplicate job handle remained open' }
+  [EtherPhaseAJob]::Close($retainedCopy); $retainedCopy=[IntPtr]::Zero
+  if (-not $retainedChild.WaitForExit(10000)) { throw 'Child survived release of duplicate job handle' }
+  Write-Output 'PASS retained query handle delays job termination until released'
+} finally {
+  if ($retainedJob -ne [IntPtr]::Zero) {[EtherPhaseAJob]::Close($retainedJob)}
+  if ($retainedCopy -ne [IntPtr]::Zero) {[EtherPhaseAJob]::Close($retainedCopy)}
+  if ($retainedChild -and -not $retainedChild.HasExited) {$retainedChild.Kill(); $null=$retainedChild.WaitForExit(5000)}
+  if ($retainedChild) {$retainedChild.Dispose()}
+}
