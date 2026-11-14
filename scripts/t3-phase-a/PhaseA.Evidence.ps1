@@ -67,13 +67,13 @@ function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[b
       if ([string]::IsNullOrEmpty($boundAudience) -or (Get-PhaseAEvidenceAudience $candidate $RunAttempt) -cne $boundAudience) { return $false }
       if ($kind -ceq 'authorization') { return ($ProvenanceVerified -and $LiveAuthorized) }
       if ($kind -ceq 'workflow_provenance') { return $ProvenanceVerified }
-      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment')) { return $false }
+      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure')) { return $false }
       $fresh=New-PhaseAManagerVerdictInput $candidate.commit $candidate.runId
       Add-PhaseAActorEvidence $fresh $items $EvidenceClass
       Add-PhaseAPrimaryTokenEvidence $fresh $TokenJournal $items $EvidenceClass
       Add-PhaseAInnerJobEvidence $fresh $HostedJournal $items $EvidenceClass
       $expected=$fresh.cases[$kind]
-      return ($entry -is [Collections.IDictionary] -and $entry.state -ceq 'PASS' -and $entry.evidence -ceq $EvidenceClass -and $entry.reason -ceq 'NONE' -and $expected.state -ceq 'PASS' -and $entry.proof -ceq $expected.proof)
+      return ($entry -is [Collections.IDictionary] -and $expected.state -cin @('PASS','FAIL') -and $entry.state -ceq $expected.state -and $entry.evidence -ceq $EvidenceClass -and $entry.reason -ceq $expected.reason -and $entry.proof -ceq $expected.proof)
     } catch { return $false }
   }.GetNewClosure()
 }
@@ -131,22 +131,43 @@ function New-PhaseATokenJournalBackend([hashtable]$Backend,[Collections.Generic.
 }
 function Add-PhaseAInnerJobEvidence($VerdictInput,$HostedJournal,$ActorJournal,[string]$EvidenceClass) {
   try {
-    if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $HostedJournal -isnot [hashtable] -or -not $HostedJournal.ContainsKey('supervisorDeath')) { return }
+    if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $HostedJournal -isnot [hashtable]) { return }
     $source=if ($EvidenceClass -ceq 'LIVE_OBSERVED') {'LIVE'} else {'INJECTED'}
-    $record=$HostedJournal.supervisorDeath
-    if ($record -isnot [hashtable] -or $record.source -cne $source -or $record.mode -cne 'supervisorDeath' -or $record.cleanupSucceeded -isnot [bool] -or -not $record.cleanupSucceeded -or $record.innerJobObservation -isnot [hashtable]) { return }
-    $inner=$record.innerJobObservation
-    if ($inner.status -cne 'OBSERVED' -or $inner.reason -cne 'NONE' -or $inner.released -isnot [bool] -or -not $inner.released -or $inner.member -isnot [bool] -or -not $inner.member -or $inner.supervisorMember -isnot [bool] -or $inner.supervisorMember -or $inner.limitFlags -isnot [int] -and $inner.limitFlags -isnot [uint32] -or ($inner.limitFlags -band 0x2000) -eq 0) { return }
     $probes=@($ActorJournal | Where-Object { $_.role -ceq 'broker' -and $_.operation -ceq 'probe' })
     if ($probes.Count -ne 1) { return }
     $probe=$probes[0]; $obs=$probe.observation
     if ($probe.accountSid -cne $probe.tokenSid -or $obs.expectedSid -cne $probe.accountSid -or $obs.contained -isnot [bool] -or -not $obs.contained -or $obs.terminated -isnot [bool] -or -not $obs.terminated -or -not (Test-ActorObservation $obs 'broker' 'allowed')) { return }
-    if ($inner.pid -ne $record.childPid -or $inner.sid -cne $record.childSid -or $inner.sid -cne $probe.accountSid -or $inner.createdAt -cne $record.childCreatedAt -or $record.supervisorSid -cne $probe.accountSid -or $record.supervisorPid -isnot [int] -or $record.supervisorPid -le 0 -or $record.supervisorPid -eq $inner.pid) { return }
-    $supervisorTime=[DateTimeOffset]::MinValue; if (-not [DateTimeOffset]::TryParse([string]$record.supervisorCreatedAt,[ref]$supervisorTime)) { return }
-    if ($VerdictInput.cases.jobContainment.state -cne 'NOT_RUN') { return }
-    $canonical=[ordered]@{control='jobContainment';mode=$record.mode;supervisorPid=$record.supervisorPid;supervisorSid=$record.supervisorSid;supervisorCreatedAt=$record.supervisorCreatedAt;pid=$inner.pid;sid=$inner.sid;createdAt=$inner.createdAt;limitFlags=$inner.limitFlags;member=$inner.member;supervisorMember=$inner.supervisorMember;released=$inner.released;cleanup=$record.cleanupSucceeded;actorPid=$obs.expectedPid;actorCreatedAt=$obs.observedCreatedAt}
-    $sha=[Security.Cryptography.SHA256]::Create()
-    try { $json=ConvertTo-Json -InputObject $canonical -Compress; $proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
-    $VerdictInput.cases.jobContainment=@{state='PASS';evidence=$EvidenceClass;reason='NONE';proof=$proof}
+    foreach ($mode in @('supervisorDeath','jobClosure')) {
+      if (-not $HostedJournal.ContainsKey($mode)) { continue }
+      $record=$HostedJournal[$mode]
+      if ($record -isnot [hashtable] -or $record.source -cne $source -or $record.mode -cne $mode -or $record.innerJobObservation -isnot [hashtable] -or $record.cleanupSucceeded -isnot [bool]) { continue }
+      $inner=$record.innerJobObservation
+      if ($record.supervisorSid -cne $probe.accountSid -or $record.supervisorPid -isnot [int] -or $record.supervisorPid -le 0 -or $record.childPid -isnot [int] -or $record.childPid -le 0 -or $record.supervisorPid -eq $record.childPid -or $record.childSid -cne $probe.accountSid -or $inner.pid -isnot [int] -or $inner.sid -isnot [string] -or $inner.createdAt -isnot [string]) { continue }
+      $identityMismatch=($inner.pid -ne $record.childPid -or $inner.sid -cne $record.childSid -or $inner.createdAt -cne $record.childCreatedAt)
+      $supervisorTime=[DateTimeOffset]::MinValue; if (-not [DateTimeOffset]::TryParse([string]$record.supervisorCreatedAt,[ref]$supervisorTime)) { continue }
+      $outcome='NOT_RUN'; $reason='NOT_RUN'; $control=if ($mode -ceq 'supervisorDeath') {'jobContainment'} else {'jobClosure'}
+      $limitsValid=(($inner.limitFlags -is [int] -or $inner.limitFlags -is [uint32]) -and (($inner.limitFlags -band 0x2000) -ne 0))
+      $memberValid=($inner.member -is [bool] -and $inner.member -and $inner.supervisorMember -is [bool] -and -not $inner.supervisorMember)
+      $released=($inner.released -is [bool] -and $inner.released)
+      $innerValid=($inner.status -ceq 'OBSERVED' -and $inner.reason -ceq 'NONE' -and $limitsValid -and $memberValid -and $released)
+      if ($mode -ceq 'supervisorDeath') {
+        if ($identityMismatch) { $outcome='FAIL';$reason='SETUP_FAILED' }
+        elseif ($innerValid) { $outcome='PASS';$reason='NONE' }
+        elseif ($inner.status -ceq 'FAILED' -and $released -and (($inner.reason -ceq 'LIMIT_MISMATCH' -and -not $limitsValid -and ($inner.limitFlags -is [int] -or $inner.limitFlags -is [uint32])) -or ($inner.reason -ceq 'JOB_MISMATCH' -and $limitsValid -and $inner.member -is [bool] -and $inner.supervisorMember -is [bool] -and -not $memberValid))) { $outcome='FAIL';$reason='CONTROL_FAILED' }
+        elseif ($inner.status -ceq 'FAILED' -and $inner.reason -cin @('INSPECTION_FAILED','INSPECTION_RELEASE_FAILED','PID_MISMATCH','TIME_MISMATCH','EARLY_EXIT')) { $outcome='FAIL';$reason='SETUP_FAILED' }
+      } elseif (-not $identityMismatch -and $innerValid -and $record.childRunningBeforeAction -is [bool] -and $record.childRunningBeforeAction -and $record.action -ceq 'CLOSE_REQUESTED' -and $record.supervisorWaitSucceeded -is [bool] -and $record.supervisorWaitSucceeded -and $record.supervisorExitCode -is [int] -and $record.supervisorExitCode -eq 0) {
+        if ($record.childWaitOutcome -ceq 'SIGNALED' -and $record.childAliveAfterWait -is [bool] -and -not $record.childAliveAfterWait -and $record.childExitCode -is [int] -and $record.childExitCode -ne 259) { $outcome='PASS';$reason='NONE' }
+        elseif ($record.childWaitOutcome -ceq 'TIMEOUT' -and $record.childAliveAfterWait -is [bool] -and $record.childAliveAfterWait -and $null -eq $record.childExitCode) { $outcome='FAIL';$reason='CONTROL_FAILED' }
+        elseif ($record.childWaitOutcome -ceq 'FAILED') { $outcome='FAIL';$reason='SETUP_FAILED' }
+      }
+      if ($outcome -ceq 'NOT_RUN') { continue }
+      if (-not $record.cleanupSucceeded -and $outcome -ceq 'PASS') { $outcome='FAIL';$reason='CLEANUP_UNCONFIRMED' }
+      if ($VerdictInput.cases[$control].state -cne 'NOT_RUN') { continue }
+      $canonical=[ordered]@{control=$control;mode=$mode;state=$outcome;reason=$reason;supervisorPid=$record.supervisorPid;supervisorSid=$record.supervisorSid;supervisorCreatedAt=$record.supervisorCreatedAt;reportedChildPid=$record.childPid;reportedChildSid=$record.childSid;reportedChildCreatedAt=$record.childCreatedAt;pid=$inner.pid;sid=$inner.sid;createdAt=$inner.createdAt;innerStatus=$inner.status;innerReason=$inner.reason;limitFlags=$inner.limitFlags;member=$inner.member;supervisorMember=$inner.supervisorMember;released=$inner.released;cleanup=$record.cleanupSucceeded;actorPid=$obs.expectedPid;actorCreatedAt=$obs.observedCreatedAt}
+      if ($mode -ceq 'jobClosure') { foreach ($key in @('childRunningBeforeAction','action','supervisorWaitSucceeded','supervisorExitCode','childWaitOutcome','childExitCode','childAliveAfterWait')) { $canonical[$key]=$record[$key] } }
+      $sha=[Security.Cryptography.SHA256]::Create()
+      try { $json=ConvertTo-Json -InputObject $canonical -Compress; $proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+      $VerdictInput.cases[$control]=@{state=$outcome;evidence=$EvidenceClass;reason=$reason;proof=$proof}
+    }
   } catch { return }
 }

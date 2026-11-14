@@ -367,7 +367,7 @@ foreach ($field in @('pid','sid','createdAt','limitFlags','member','released','c
  $rec=$innerEvidence.supervisorDeath.Clone(); $item=$innerObservation.Clone(); $item.supervisorMember=$false; $rec.innerJobObservation=$item
  switch ($field) { 'pid' {$item.pid=124} 'sid' {$item.sid='S-1-5-21-9'} 'createdAt' {$item.createdAt='2026-01-01T00:00:01Z'} 'limitFlags' {$item.limitFlags=0} 'member' {$item.member=$false} 'released' {$item.released=$false} 'cleanupSucceeded' {$rec.cleanupSucceeded=$false} 'source' {$rec.source='LIVE'} }
  $x=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAInnerJobEvidence $x @{supervisorDeath=$rec} $journal.ToArray() 'SIMULATED_PASS'
- if ($x.cases.jobContainment.state -cne 'NOT_RUN') { throw "Invalid inner observation accepted: $field" }
+ if ($field -ceq 'cleanupSucceeded') { if ($x.cases.jobContainment.state -cne 'FAIL' -or $x.cases.jobContainment.reason -cne 'CLEANUP_UNCONFIRMED') { throw 'Cleanup failure was not retained' } } elseif ($field -cin @('pid','sid','createdAt')) { if ($x.cases.jobContainment.state -cne 'FAIL' -or $x.cases.jobContainment.reason -cne 'SETUP_FAILED') { throw 'Identity failure was not retained' } } elseif ($x.cases.jobContainment.state -cne 'NOT_RUN') { throw "Invalid inner observation accepted: $field" }
 }
 Write-Output 'PASS inner-job identity, limit, ownership and simulated source controls (8)'
 $innerObservation.supervisorMember=$false
@@ -378,3 +378,36 @@ $fakeProof=$innerBound.cases.jobContainment.Clone(); $fakeProof.proof=('f'*64)
 if (& $innerVerifier 'jobContainment' $fakeProof $innerBound) { throw 'Forged inner job proof accepted' }
 if ((Get-PhaseAVerdict $innerBound $innerVerifier).status -cne 'UNVERIFIED') { throw 'Simulated inner job promoted to live verdict' }
 Write-Output 'PASS inner-job verifier binding, forgery and simulated verdict controls (3)'
+# The bounded closure adapter must preserve real outcomes while rejecting setup gaps.
+$innerGood=@{status='OBSERVED';reason='NONE';pid=123;sid='S-1-5-21-1';createdAt='2026-01-01T00:00:00Z';limitFlags=8192;member=$true;supervisorMember=$false;released=$true}
+$closureRecord=@{mode='jobClosure';source='INJECTED';supervisorPid=122;supervisorSid='S-1-5-21-1';supervisorCreatedAt='2026-01-01T00:00:00Z';childPid=123;childSid='S-1-5-21-1';childCreatedAt='2026-01-01T00:00:00Z';innerJobObservation=$innerGood;childRunningBeforeAction=$true;action='CLOSE_REQUESTED';supervisorWaitSucceeded=$true;supervisorExitCode=0;childWaitOutcome='SIGNALED';childExitCode=1;childAliveAfterWait=$false;cleanupSucceeded=$true}
+$bounded=@{jobClosure=$closureRecord}
+$x=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $x $bounded $journal.ToArray() 'SIMULATED_PASS'
+if ($x.cases.jobClosure.state -cne 'PASS') { throw 'Bounded closure success was not retained' }
+$failed=$closureRecord.Clone();$failed.childWaitOutcome='TIMEOUT';$failed.childExitCode=$null;$failed.childAliveAfterWait=$true
+$x=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $x @{jobClosure=$failed} $journal.ToArray() 'SIMULATED_PASS'
+if ($x.cases.jobClosure.state -cne 'FAIL' -or $x.cases.jobClosure.reason -cne 'CONTROL_FAILED') { throw 'Observed surviving child was not retained' }
+$failed=$closureRecord.Clone();$failed.childWaitOutcome='FAILED';$failed.childExitCode=$null;$failed.childAliveAfterWait=$null
+$x=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $x @{jobClosure=$failed} $journal.ToArray() 'SIMULATED_PASS'
+if ($x.cases.jobClosure.state -ceq 'PASS' -or $x.cases.jobClosure.reason -ceq 'CONTROL_FAILED') { throw 'Failed wait was misclassified' }
+$badInner=$innerGood.Clone();$badInner.status='FAILED';$badInner.reason='JOB_MISMATCH';$badInner.member=$false
+$badContainment=$closureRecord.Clone();$badContainment.mode='supervisorDeath';$badContainment.innerJobObservation=$badInner
+$x=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $x @{supervisorDeath=$badContainment} $journal.ToArray() 'SIMULATED_PASS'
+if ($x.cases.jobContainment.state -cne 'FAIL') { throw 'Observed inner-job membership failure not retained' }
+Write-Output 'PASS bounded closure and containment outcome mapping (4)'
+$failureRecord=$closureRecord.Clone();$failureRecord.childWaitOutcome='TIMEOUT';$failureRecord.childExitCode=$null;$failureRecord.childAliveAfterWait=$true;$failureRecord.cleanupSucceeded=$false
+$failureJournal=@{jobClosure=$failureRecord}
+$failureVerdict=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $failureVerdict $failureJournal $journal.ToArray() 'SIMULATED_PASS'
+if ($failureVerdict.cases.jobClosure.state -cne 'FAIL' -or $failureVerdict.cases.jobClosure.reason -cne 'CONTROL_FAILED') { throw 'Later cleanup masked a verified survivor' }
+$failureVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $failureVerdict '1' $true $true 'SIMULATED_PASS' @() $failureJournal
+if (-not (& $failureVerifier 'jobClosure' $failureVerdict.cases.jobClosure $failureVerdict)) { throw 'Verified failure proof was rejected' }
+if ((Get-PhaseAVerdict $failureVerdict $failureVerifier).status -cne 'UNVERIFIED') { throw 'Incomplete simulated experiment gained a final verdict' }
+$fake=$failureVerdict.cases.jobClosure.Clone();$fake.state='PASS';$fake.reason='NONE'
+if (& $failureVerifier 'jobClosure' $fake $failureVerdict) { throw 'Failure promoted to PASS' }
+foreach ($field in @('childRunningBeforeAction','action','supervisorWaitSucceeded','childWaitOutcome','cleanupSucceeded')) {
+ $test=$closureRecord.Clone()
+ switch ($field) { 'childRunningBeforeAction' {$test.childRunningBeforeAction=$false} 'action' {$test.action='NOT_RUN'} 'supervisorWaitSucceeded' {$test.supervisorWaitSucceeded=$false} 'childWaitOutcome' {$test.childWaitOutcome='NOT_RUN'} 'cleanupSucceeded' {$test.cleanupSucceeded=$false} }
+ $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $v @{jobClosure=$test} $journal.ToArray() 'SIMULATED_PASS'
+ if ($v.cases.jobClosure.state -ceq 'PASS') { throw "Incomplete closure accepted: $field" }
+}
+Write-Output 'PASS survivor preservation, failed-proof verification and closure incompleteness controls (9)'

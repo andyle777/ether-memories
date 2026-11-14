@@ -337,3 +337,8 @@ foreach ($control in @('jobContainment','jobClosure','childTermination','process
  if (& $proofVerifier $control @{state='PASS';evidence='LIVE_OBSERVED';reason='NONE';proof=('a'*64)} $policyInput) { throw "Unverified lifetime proof accepted: $control" }
 }
 Write-Output 'PASS incomplete lifetime observations cannot satisfy verdict controls (4)'
+$partialSink=@{}
+$partialBackend=@{Run={param($a,$t,$mode) $e=New-Object InvalidOperationException('STAGE2_CHILD_UNCONFIRMED');$e.Data['PhaseAProcessLifetime']=@{mode=$mode;childWaitOutcome='TIMEOUT';childAliveAfterWait=$true;cleanupSucceeded=$false};throw $e}}
+try {$null=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $partialBackend 'INJECTED' $partialSink;throw 'Expected unconfirmed child'} catch {if($_.Exception.GetBaseException().Message -cne 'STAGE2_CHILD_UNCONFIRMED'){throw}}
+if ($partialSink.processLifetime.supervisorDeath.childWaitOutcome -cne 'TIMEOUT' -or -not $partialSink.processLifetime.supervisorDeath.childAliveAfterWait -or $partialSink.processLifetime.supervisorDeath.cleanupSucceeded) {throw 'Original unconfirmed-child observation was discarded'}
+Write-Output 'PASS retained original unconfirmed-child observation'
