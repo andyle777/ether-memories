@@ -15,7 +15,7 @@ function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Tok
     if ($raw -isnot [hashtable] -or $raw.impersonated -isnot [bool] -or -not $raw.impersonated -or $raw.sid -cne $ExpectedSid -or $raw.operation -cne $Operation -or $raw.attempted -isnot [bool] -or -not $raw.attempted -or $raw.allowed -isnot [bool] -or $raw.error -isnot [int] -or $raw.reverted -isnot [bool] -or -not $raw.reverted -or $raw.handlesClosed -isnot [bool] -or -not $raw.handlesClosed) { return $failure }
     $outcome=if ($raw.allowed -and $raw.error -eq 0) {'ALLOWED'} elseif (-not $raw.allowed -and $raw.error -eq 5) {'ACCESS_DENIED'} elseif (-not $raw.allowed -and $raw.error -in @(2,3,6,32,87,123)) { return @{status='UNVERIFIED';reason='NATIVE_ERROR';evidence=$EvidenceClass;operation=$Operation;target=$TargetId;nativeError=$raw.error} } else { return $failure }
     return @{status='OBSERVED';reason='NONE';evidence=$EvidenceClass;sid=$raw.sid;operation=$Operation;target=$TargetId;outcome=$outcome;nativeError=$raw.error;reverted=$raw.reverted;handlesClosed=$raw.handlesClosed}
-  } catch { return $failure }
+  } catch { if ($_.Exception.GetBaseException().Message -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; return $failure }
 }
 function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBackend,[hashtable]$FixtureBackend,$Fixture,[hashtable]$Journal,[string]$Control,[string]$Operation,[string]$Target,[string]$TargetId) {
   $entry=@{control=$Control;operation=$Operation;target=$TargetId;accountSid=$Account.sid;tokenSid=$Token.sid;beforeExists=$null;parentExists=$null;beforeInventory=$null;beforeDigest=$null;afterExists=$null;afterInventory=$null;observation=$null;witness=$null}

@@ -402,3 +402,16 @@ $wStatus=Invoke-PhaseAStages $true $true $fake $wWrapped $true $wFixture $wStage
 $wVerdict=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $wVerdict $wStage.evidence 'SIMULATED_PASS' $wJournal.ToArray()
 foreach($key in @('unauthorizedRead','unauthorizedWrite','unauthorizedCreate')) {if($wVerdict.cases[$key].state -cne 'PASS'){throw "Manager witness was not mapped: $key ($wStatus)"}}
 Write-Output 'PASS manager-to-verdict injected witness path (3)'
+$blockedFixture=@{protectedFile='exists';protectedDir='root'}
+$blockedToken=@{sid='S-1-5-21-2'}
+$blockedBackend=@{Exists={param($path) $true};DirectoryExists={param($path) $true};Probe={param($token,$sid,$op,$path,$root) throw 'STAGE2_CHILD_UNCONFIRMED'}}
+$propagated=$false
+try {$null=Invoke-PhaseATrustedAccess $blockedBackend $blockedFixture $blockedToken 'S-1-5-21-2' 'Read' 'protectedFile' 'INJECTED'} catch {$propagated=$_.Exception.GetBaseException().Message -ceq 'STAGE2_CHILD_UNCONFIRMED'}
+if (-not $propagated) {throw 'Unconfirmed witness process was swallowed before the account cleanup gate'}
+Write-Output 'PASS unconfirmed witness reaches account cleanup gate'
+$script:events.Clear();$script:seq=0;$script:created3=$false;$script:stage3events.Clear()
+$unconfirmedFixture=$wFixture.Clone();$unconfirmedFixture.Probe={param($token,$sid,$op,$path,$root) throw 'STAGE2_CHILD_UNCONFIRMED'}
+$uResult=Invoke-PhaseAStages $true $true $fake $wActors $true $unconfirmedFixture @{}
+if($uResult -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('close:broker') -or $script:events.Contains('remove:broker') -or $script:stage3events.Contains('cleanup')) {throw 'Witness unconfirmed-child did not retain dependent resources'}
+if($script:PhaseAUnconfirmedResources.accounts.Count -ne 2 -or $script:PhaseAUnconfirmedResources.tokens.Count -ne 2){throw 'Unconfirmed account resources not retained'}
+Write-Output 'PASS manager witness failure retains dependent fixture accounts and tokens'
