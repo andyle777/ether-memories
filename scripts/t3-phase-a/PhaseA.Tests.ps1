@@ -122,3 +122,80 @@ Check (-not (Test-PhaseACheckout $repo 'not-a-sha' $config.base)) 'malformed che
 Check (-not (Test-PhaseACheckout $repo ('0'*40) $config.base)) 'mismatched checkout SHA rejected'
 Write-Output 'PASS checkout controls'
 Write-Output "PASS: $script:passed assertions total"
+. "$PSScriptRoot/PhaseA.Verdict.ps1"
+$policy=Get-PhaseAVerdictPolicy
+$entries=@{}; foreach ($k in $policy) { $entries[$k]=@{state='PASS';evidence='LIVE_OBSERVED';reason='NONE';proof=('a'*64)} }
+$inputRecord=@{schema='ether.t3.phase-a.verdict-input.v1';policy='phase-a-core-provisional-v1';commit=('1'*40);runId='123';cases=$entries}
+$verify={param($kind,$record,$context) return $true}
+$v=Get-PhaseAVerdict $inputRecord $verify
+if ($v.status -cne 'GREEN') { throw 'Complete verified synthetic evidence did not compute GREEN' }
+Write-Output 'PASS synthetic verdict positive control'
+function Copy-VerdictInput($source) {
+  $r=$source.Clone(); $r.cases=@{}; foreach ($key in $source.cases.Keys) { $r.cases[$key]=$source.cases[$key].Clone() }; return $r
+}
+$checks=0
+foreach ($key in @('actorPidBinding','actorSidBinding','actorCreationTimeBinding','supervisorTermination','alternateTimeout')) {
+  $x=Copy-VerdictInput $inputRecord; $x.cases[$key]=@{state='NOT_RUN';evidence='NOT_RUN';reason='NOT_RUN';proof=''}
+  if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw "Missing $key accepted" }; $checks++
+}
+foreach ($evidence in @('SIMULATED_PASS','SAME_IDENTITY_PASS')) {
+  $x=Copy-VerdictInput $inputRecord; $x.cases.unauthorizedRead.evidence=$evidence
+  if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Non-live evidence accepted' }; $checks++
+}
+foreach ($key in @('unauthorizedRead','unauthorizedWrite','insecureAclControl')) {
+  $x=Copy-VerdictInput $inputRecord; $x.cases[$key].state='FAIL'; $x.cases[$key].reason='VIOLATION'
+  if ((Get-PhaseAVerdict $x $verify).status -cne 'RED') { throw "Verified $key violation not red" }; $checks++
+}
+foreach ($key in @('processCleanup','fixtureCleanup','accountCleanup')) {
+  $x=Copy-VerdictInput $inputRecord; $x.cases[$key].state='FAIL'; $x.cases[$key].reason='CLEANUP_UNCONFIRMED'
+  if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw "Incomplete $key accepted" }; $checks++
+}
+$x=Copy-VerdictInput $inputRecord; $x.cases.unauthorizedRead.state='FAIL'; $x.cases.unauthorizedRead.reason='VIOLATION'; $x.cases.accountCleanup.state='FAIL'; $x.cases.accountCleanup.reason='CLEANUP_UNCONFIRMED'
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Cleanup failure did not override red' }; $checks++
+$x=Copy-VerdictInput $inputRecord; $x.cases.Remove('actorPidBinding')
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Missing field accepted' }; $checks++
+$x=Copy-VerdictInput $inputRecord; $x.cases.brokerActorBinding.extra='private'
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Unexpected field accepted' }; $checks++
+$x=Copy-VerdictInput $inputRecord; $x.cases.actorSidBinding.proof='forged'
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Malformed proof accepted' }; $checks++
+$noProvenance={param($kind,$entry,$record) return ($kind -cne 'workflow_provenance')}
+if ((Get-PhaseAVerdict $inputRecord $noProvenance).status -cne 'UNVERIFIED') { throw 'Missing workflow provenance accepted' }; $checks++
+$wrongPid={param($kind,$entry,$record) return ($kind -cne 'actorPidBinding')}
+if ((Get-PhaseAVerdict $inputRecord $wrongPid).status -cne 'UNVERIFIED') { throw 'Uncorroborated PID accepted' }; $checks++
+$forgedFail={param($kind,$entry,$record) return ($kind -cne 'unauthorizedRead')}
+$x=Copy-VerdictInput $inputRecord; $x.cases.unauthorizedRead.state='FAIL'; $x.cases.unauthorizedRead.reason='VIOLATION'
+if ((Get-PhaseAVerdict $x $forgedFail).status -cne 'UNVERIFIED') { throw 'Uncorroborated violation accepted' }; $checks++
+Write-Output "PASS synthetic verdict negative controls ($checks)"
+$managerCandidate=New-PhaseAManagerVerdictInput ('1'*40) '123'
+if ((Get-PhaseAVerdict $managerCandidate $verify).status -cne 'UNVERIFIED') { throw 'Manager invented per-control evidence' }
+$x=Copy-VerdictInput $inputRecord; $x.policy='unknown-policy'
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Unknown policy accepted' }
+$noAuthorization={param($kind,$entry,$record) return ($kind -cne 'authorization')}
+if ((Get-PhaseAVerdict $inputRecord $noAuthorization).status -cne 'UNVERIFIED') { throw 'Unverified authorization accepted' }
+Write-Output 'PASS manager evidence, policy and authorization controls (3)'
+$x=Copy-VerdictInput $inputRecord; $x.cases.unauthorizedRead.state='FAIL'; $x.cases.unauthorizedRead.reason='VIOLATION'; $x.cases.supervisorTermination=@{state='NOT_RUN';evidence='NOT_RUN';reason='NOT_RUN';proof=''}
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Violation masked missing mandatory observation' }
+$x=Copy-VerdictInput $inputRecord; $x.cases.unauthorizedRead.state='FAIL'; $x.cases.unauthorizedRead.reason='VIOLATION'; $x.cases.aclInspection.state='FAIL'; $x.cases.aclInspection.reason='SETUP_FAILED'
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Violation masked incomplete setup' }
+Write-Output 'PASS missing and setup precedence controls (2)'
+if ((Get-PhaseAVerdict 'malformed' $verify).status -cne 'UNVERIFIED') { throw 'Non-map report accepted' }
+$x=Copy-VerdictInput $inputRecord; $x.cases.actorPidBinding.proof=@(('a'*64),('b'*64))
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Array proof accepted' }
+$x=Copy-VerdictInput $inputRecord; $x.cases.actorPidBinding.state=@('PASS')
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Array state accepted' }
+Write-Output 'PASS malformed type rejection controls (3)'
+foreach ($key in @('actorPidBinding','actorSidBinding','actorCreationTimeBinding')) {
+  $script:rejectedProof=$key
+  $reject={param($kind,$entry,$record) return ($kind -cne $script:rejectedProof)}
+  if ((Get-PhaseAVerdict $inputRecord $reject).status -cne 'UNVERIFIED') { throw "Mismatched observation accepted: $key" }
+}
+$throwingVerifier={param($kind,$entry,$record) throw 'synthetic verifier failure'}
+if ((Get-PhaseAVerdict $inputRecord $throwingVerifier).status -cne 'UNVERIFIED') { throw 'Verifier exception did not fail closed' }
+Write-Output 'PASS identity binding and verifier failure controls (4)'
+foreach ($key in $policy) {
+  $x=Copy-VerdictInput $inputRecord; $x.cases[$key].state='FAIL'; $x.cases[$key].reason='CONTROL_FAILED'
+  if ((Get-PhaseAVerdict $x $verify).status -ceq 'GREEN') { throw "Failed $key became GREEN" }
+}
+$x=Copy-VerdictInput $inputRecord; $x.cases.proposedDelete=@{state='PASS';evidence='LIVE_OBSERVED';reason='NONE';proof=('a'*64)}
+if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Unadopted policy field silently accepted' }
+Write-Output "PASS no failed mandatory case can compute GREEN ($($policy.Count)) and addendum remains separate"

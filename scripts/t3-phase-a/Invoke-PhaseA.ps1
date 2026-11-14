@@ -10,6 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/PhaseA.Core.ps1"
+. "$PSScriptRoot/PhaseA.Verdict.ps1"
 . "$PSScriptRoot/PhaseA.Accounts.ps1"
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Stage3.ps1"
@@ -58,7 +59,13 @@ $commit=if ($config.sha -cmatch '^[0-9a-f]{40}$') { $config.sha } else { 'unknow
 $supervisorCases=@{}
 foreach ($mode in @('supervisorDeath','jobClosure','timeout')) { $supervisorCases[$mode]=@{status='NOT_RUN';evidence='LIVE';reason='NOT_RUN'} }
 if ($hostedResult.ContainsKey('cases')) { $supervisorCases=$hostedResult.cases }
-$report = [ordered]@{ schema='ether.t3.phase-a.observations.v1'; status='UNVERIFIED'; source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1'; commit=$commit; reason=$reason; cases=$cases; supervisorCases=$supervisorCases }
+# The existing stages do not retain independent per-control proof, and the
+# environment variables cannot establish workflow provenance. The production
+# verifier therefore denies until a trusted evidence adapter is implemented.
+$runId=[Environment]::GetEnvironmentVariable('GITHUB_RUN_ID')
+$verdictInput=New-PhaseAManagerVerdictInput $commit $runId
+$verdict=Get-PhaseAVerdict $verdictInput { param($kind,$entry,$record) return $false }
+$report = [ordered]@{ schema='ether.t3.phase-a.observations.v1'; status=$verdict.status; source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1'; commit=$commit; reason=$reason; cases=$cases; supervisorCases=$supervisorCases }
 if (-not (Test-PhaseAObservationReport $report)) { Write-Error 'Sanitized Phase A report validation failed.'; exit 2 }
 try {
   $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Compress))
@@ -68,5 +75,5 @@ try {
   Write-Error "Sanitized Phase A failure report could not be created."
   exit 2
 }
-Write-Output "Phase A UNVERIFIED: $reason"
-exit 2
+Write-Output "Phase A $($verdict.status): $reason"
+exit (Get-PhaseAExitCode $verdict.status)

@@ -101,3 +101,16 @@ Do not add these switches to the workflow until the exact source and workflow
 change have been independently reviewed and separately authorized. The proposed
 delete and rename addendum remains pending owner acceptance. Current
 workflow behavior remains fail-closed.
+
+Verdict work is incomplete. `phase-a-core-provisional-v1` is an explicit test
+policy; it does not adopt or exclude the proposed delete/rename addendum. The
+standalone evaluator validates a complete, typed per-control record using an
+injected verifier. Its synthetic GREEN is a unit-test result only. The manager
+currently constructs NOT_RUN records because the existing stages do not retain
+the individual corroborated proof that the evaluator requires. Its production
+verifier denies authorization and provenance until a trusted evidence adapter is
+implemented. Therefore the real manager cannot yet return GREEN or RED.
+Environment variables and actor claims are not workflow provenance. A future
+review must establish trusted GitHub run provenance and bind the collected
+observations to that run, as well as preserve independently verifiable per-case
+records and cleanup outcomes. Do not enable the hosted workflow meanwhile.
