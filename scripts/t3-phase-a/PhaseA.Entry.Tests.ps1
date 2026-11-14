@@ -342,3 +342,22 @@ $partialBackend=@{Run={param($a,$t,$mode) $e=New-Object InvalidOperationExceptio
 try {$null=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $partialBackend 'INJECTED' $partialSink;throw 'Expected unconfirmed child'} catch {if($_.Exception.GetBaseException().Message -cne 'STAGE2_CHILD_UNCONFIRMED'){throw}}
 if ($partialSink.processLifetime.supervisorDeath.childWaitOutcome -cne 'TIMEOUT' -or -not $partialSink.processLifetime.supervisorDeath.childAliveAfterWait -or $partialSink.processLifetime.supervisorDeath.cleanupSucceeded) {throw 'Original unconfirmed-child observation was discarded'}
 Write-Output 'PASS retained original unconfirmed-child observation'
+$script:created3=$false
+$evidenceFixture=$stage3fixture.Clone();$evidenceFixture.DirectoryExists={param($path) $true};$evidenceFixture.CleanupVerified={param($f) $true}
+$evidenceActors=$stage3actors.Clone();$script:baseEvidenceRun=$stage3actors.Run
+$evidenceActors.Run={param($a,$t,$op,$target) $v=& $script:baseEvidenceRun $a $t $op $target;$v.errorCategory=if($v.outcome -ceq 'denied'){'ACCESS_DENIED'}else{'NONE'};$v}
+$evidenceFixture.Setup={param($a) @{protectedFile='existing';protectedDir='protected';newFile='new';deniedFile='missing';controlFile='control';initialDigest=('a'*64);writeDigest=('b'*64);aclInspected=$true;aclEvidence=@{expected='test';actual='test';protected=$true}}}
+$e=Invoke-PhaseAStage3 $accounts3 $tokens3 $evidenceFixture $evidenceActors
+if (-not $e.ContainsKey('evidence') -or -not $e.evidence.ContainsKey('unauthorizedRead')) {throw 'Stage 3 operation evidence missing'}
+if ($e.evidence.unauthorizedRead.observation.errorCategory -cne 'ACCESS_DENIED' -or -not $e.evidence.cleanupVerified) {throw 'Stage 3 evidence classification or cleanup missing'}
+Write-Output 'PASS Stage 3 injected operation evidence retention'
+$script:events.Clear();$script:seq=0;$script:created3=$false;$script:didWrite=$false
+$journalFixture=$evidenceFixture.Clone();$journalFixture.Inventory={param($f) if($script:didWrite){'c'*64}else{'b'*64}}
+$script:baseEvidenceRun=$stage3actors.Run
+$violationActors=@{Run={param($a,$t,$op,$target) $v=& $script:baseEvidenceRun $a $t $op $target;if($a.role -ceq 'legacy' -and $op -ceq 'Overwrite'){$v.outcome='allowed';$v.exitCode=0;$script:didWrite=$true};$v.errorCategory=if($v.outcome -ceq 'denied'){'ACCESS_DENIED'}else{'NONE'};$v.errorCode=if($v.outcome -ceq 'denied'){5}else{0};$v}}
+$operationJournal=New-Object 'System.Collections.Generic.List[object]';$wrappedActors=New-PhaseAActorJournalBackend $violationActors $operationJournal;$stageResult=@{}
+$stage=Invoke-PhaseAStages $true $true $fake $wrappedActors $true $journalFixture $stageResult
+if($stage -cne 'STAGE3_CASE_FAILED' -or -not $stageResult.ContainsKey('evidence')){throw 'Stage 3 manager did not retain failed operation evidence'}
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $stageResult.evidence 'SIMULATED_PASS' $operationJournal.ToArray()
+if($v.cases.unauthorizedWrite.state -cne 'FAIL'){throw 'Manager-connected violation did not reach provisional adapter'}
+Write-Output 'PASS Stage 3 manager retains and maps injected write violation'

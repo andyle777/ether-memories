@@ -77,12 +77,14 @@ Add-PhaseAActorEvidence $verdictInput $actorJournal.ToArray() 'LIVE_OBSERVED'
 Add-PhaseAPrimaryTokenEvidence $verdictInput $tokenJournal.ToArray() $actorJournal.ToArray() 'LIVE_OBSERVED'
 $innerJournal=if ($hostedResult.ContainsKey('processLifetime')) { $hostedResult.processLifetime } else { @{} }
 Add-PhaseAInnerJobEvidence $verdictInput $innerJournal $actorJournal.ToArray() 'LIVE_OBSERVED'
+$filesystemJournal=if ($stage3Result.ContainsKey('evidence')) { $stage3Result.evidence } else { @{} }
+Add-PhaseAStage3Evidence $verdictInput $filesystemJournal 'LIVE_OBSERVED' $actorJournal.ToArray()
 $liveExecutionRequested=[bool]($EnableAccountStage -and $EnableActorStage -and $EnableFilesystemStage -and $EnableSupervisorProbe -and $null -ne $stage)
 $provenanceVerified=$false
 if ($liveExecutionRequested -and $runRef -cne 'unknown' -and $attempt -cne 'unknown' -and $commit -cne 'unknown') { $provenanceVerified=Test-PhaseAGitHubOidcProvenance $verdictInput $attempt }
 # Signed run provenance and explicit switches do not themselves prove owner approval.
 $ownerAuthorizationVerified=$false
-$evidenceVerifier=New-PhaseAEvidenceVerifier $actorJournal.ToArray() $verdictInput $attempt $provenanceVerified $ownerAuthorizationVerified 'LIVE_OBSERVED' $tokenJournal.ToArray() $innerJournal
+$evidenceVerifier=New-PhaseAEvidenceVerifier $actorJournal.ToArray() $verdictInput $attempt $provenanceVerified $ownerAuthorizationVerified 'LIVE_OBSERVED' $tokenJournal.ToArray() $innerJournal $filesystemJournal
 $verdict=Get-PhaseAVerdict $verdictInput $evidenceVerifier
 if ($verdict.status -ceq 'GREEN') { $reason='VERDICT_GREEN' }
 elseif ($verdict.status -ceq 'RED') { $reason='VERDICT_RED' }

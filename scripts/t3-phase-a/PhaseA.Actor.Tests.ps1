@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 $root = Join-Path ([IO.Path]::GetTempPath()) ("ether-phase-a-actor-test-" + [Guid]::NewGuid().ToString("N"))
 . "$PSScriptRoot/PhaseA.Inventory.ps1"
 New-Item -ItemType Directory -Path $root | Out-Null
@@ -48,7 +48,7 @@ try {
   )
   if (-not $p.WaitForExit(15000)) { $p.Kill(); throw "Actor timed out" }
   $record = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
-  if ($p.ExitCode -ne 21 -or $record.outcome -cne "error") { throw "Missing file was incorrectly treated as access denial" }
+  if ($p.ExitCode -ne 21 -or $record.outcome -cne "error" -or $record.errorCategory -cne "FILE_NOT_FOUND" -or $record.errorCode -ne 2) { throw "Missing file was incorrectly treated as access denial" }
   Write-Output "PASS actor missing-file error is not access denial"
   $first = Get-PhaseAInventory $root
   $second = Get-PhaseAInventory $root

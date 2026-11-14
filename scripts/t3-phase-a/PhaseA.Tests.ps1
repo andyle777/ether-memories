@@ -435,3 +435,35 @@ $bad=$closureRecord.Clone();$bad.supervisorExitCode=1;$bad.childWaitOutcome='TIM
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAInnerJobEvidence $v @{jobClosure=$bad} $journal.ToArray() 'SIMULATED_PASS'
 if($v.cases.jobClosure.state -cne 'FAIL' -or $v.cases.jobClosure.reason -cne 'CONTROL_FAILED'){throw 'Verified survivor was lost after supervisor nonzero exit'}
 Write-Output 'PASS failed close, forged receipt and survivor controls (6)'
+if (-not (Get-Command Add-PhaseAStage3Evidence -ErrorAction SilentlyContinue)) { throw 'Stage 3 verdict adapter missing' }
+$allowed=$journal[8].observation.Clone();$allowed.errorCategory='NONE';$allowed.errorCode=0;$allowed.digest=('a'*64)
+$entry=@{control='unauthorizedWrite';operation='Overwrite';target='protectedFile';accountSid='S-1-5-21-2';tokenSid='S-1-5-21-2';beforeExists=$true;parentExists=$true;beforeInventory=('b'*64);beforeDigest=('a'*64);afterExists=$true;afterInventory=('c'*64);observation=$allowed}
+$fs=@{cleanupVerified=$true;aclInspection=@{expected='D:P(A;;FA;;;SY)';actual='D:P(A;;FA;;;SY)';protected=$true};unauthorizedWrite=$entry}
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $fs 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.aclInspection.state -cne 'PASS' -or $v.cases.unauthorizedWrite.state -cne 'FAIL' -or $v.cases.unauthorizedWrite.reason -cne 'VIOLATION'){throw 'Stage 3 verified outcomes not mapped'}
+$denied=$entry.Clone();$denied.control='unauthorizedRead';$denied.operation='Read';$denied.observation=$journal[5].observation.Clone();$denied.observation.errorCategory='ACCESS_DENIED'
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v @{cleanupVerified=$true;unauthorizedRead=$denied} 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'Uncorroborated denial promoted'}
+Write-Output 'PASS Stage 3 ACL, violation, uncorroborated denial controls'
+$fsVerdict=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $fsVerdict $fs 'SIMULATED_PASS' $journal.ToArray()
+$fsVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $fsVerdict '1' $true $true 'SIMULATED_PASS' @() @{} $fs
+if(-not (& $fsVerifier 'unauthorizedWrite' $fsVerdict.cases.unauthorizedWrite $fsVerdict)){throw 'Stage 3 violation proof was not rechecked'}
+$forged=$fsVerdict.cases.unauthorizedWrite.Clone();$forged.state='PASS';$forged.reason='NONE'
+if(& $fsVerifier 'unauthorizedWrite' $forged $fsVerdict){throw 'Stage 3 violation promoted to PASS'}
+$noCleanup=$fs.Clone();$noCleanup.cleanupVerified=$false;$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $noCleanup 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.aclInspection.state -cne 'NOT_RUN' -or $v.cases.unauthorizedWrite.state -cne 'FAIL'){throw 'Unconfirmed cleanup accepted or violation lost'}
+Write-Output 'PASS Stage 3 verifier, forged violation and missing cleanup controls'
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $noCleanup 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedWrite.state -cne 'FAIL' -or $v.cases.unauthorizedWrite.reason -cne 'VIOLATION'){throw 'Verified write violation lost when cleanup is unconfirmed'}
+Write-Output 'PASS Stage 3 violation survives unconfirmed cleanup'
+$wrongSid=$entry.Clone();$wrongSid.accountSid='S-1-5-21-99';$wrongSid.tokenSid='S-1-5-21-99';$wrongSid.observation=$entry.observation.Clone();$wrongSid.observation.expectedSid='S-1-5-21-99';$wrongSid.observation.observedSid='S-1-5-21-99';$wrongSid.observation.reportedSid='S-1-5-21-99'
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v @{cleanupVerified=$true;unauthorizedWrite=$wrongSid} 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedWrite.state -cne 'NOT_RUN'){throw 'Wrong independently expected actor SID accepted'}
+Write-Output 'PASS Stage 3 wrong expected actor SID rejected'
+foreach($field in @('parentExists','beforeExists','afterExists','afterInventory','errorCategory')) {
+ $bad=$entry.Clone();$bad.observation=$entry.observation.Clone()
+ switch($field){'parentExists' {$bad.parentExists=$false} 'beforeExists' {$bad.beforeExists=$false} 'afterExists' {$bad.afterExists=$false} 'afterInventory' {$bad.afterInventory=$bad.beforeInventory} 'errorCategory' {$bad.observation.errorCategory='FILE_NOT_FOUND'}}
+ $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v @{cleanupVerified=$true;unauthorizedWrite=$bad} 'SIMULATED_PASS' $journal.ToArray()
+ if($v.cases.unauthorizedWrite.state -cne 'NOT_RUN'){throw "Incomplete Stage 3 observation accepted: $field"}
+}
+Write-Output 'PASS Stage 3 missing resource, inventory and error-category controls (5)'

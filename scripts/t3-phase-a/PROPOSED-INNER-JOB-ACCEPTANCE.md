@@ -29,3 +29,10 @@ The close receipt reports the supervisor's operation; it is not independently
 authoritative. Missing, malformed, mismatched, or failed close receipts cannot
 satisfy successful closure. A correlated failed close is a setup failure, not
 an independently verified security violation.
+
+Proposed threat model: the supervisor is a controlled test-harness component;
+the filesystem actor is the adversarial identity. Supervisor receipts are
+correlated supporting evidence, while independent manager-observed process
+termination remains mandatory. No global last-handle proof is claimed. Early
+inspection failures remain UNVERIFIED unless an actual violation is established.
+This proposal is not adopted and does not change the frozen contract.

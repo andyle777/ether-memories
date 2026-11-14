@@ -53,7 +53,7 @@ function New-PhaseAActorJournalBackend([hashtable]$Backend,[Collections.Generic.
   }.GetNewClosure()
   return @{Run=$wrapped}
 }
-function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[bool]$ProvenanceVerified,[bool]$LiveAuthorized,[string]$EvidenceClass,$TokenJournal=@(),$HostedJournal=@{}) {
+function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[bool]$ProvenanceVerified,[bool]$LiveAuthorized,[string]$EvidenceClass,$TokenJournal=@(),$HostedJournal=@{},$FilesystemJournal=@{}) {
   $boundAudience=Get-PhaseAEvidenceAudience $BoundRecord $RunAttempt
   $items=@($Journal)
   return {
@@ -67,11 +67,12 @@ function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[b
       if ([string]::IsNullOrEmpty($boundAudience) -or (Get-PhaseAEvidenceAudience $candidate $RunAttempt) -cne $boundAudience) { return $false }
       if ($kind -ceq 'authorization') { return ($ProvenanceVerified -and $LiveAuthorized) }
       if ($kind -ceq 'workflow_provenance') { return $ProvenanceVerified }
-      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure')) { return $false }
+      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure','aclInspection','unauthorizedWrite','unauthorizedCreate')) { return $false }
       $fresh=New-PhaseAManagerVerdictInput $candidate.commit $candidate.runId
       Add-PhaseAActorEvidence $fresh $items $EvidenceClass
       Add-PhaseAPrimaryTokenEvidence $fresh $TokenJournal $items $EvidenceClass
       Add-PhaseAInnerJobEvidence $fresh $HostedJournal $items $EvidenceClass
+      Add-PhaseAStage3Evidence $fresh $FilesystemJournal $EvidenceClass $items
       $expected=$fresh.cases[$kind]
       return ($entry -is [Collections.IDictionary] -and $expected.state -cin @('PASS','FAIL') -and $entry.state -ceq $expected.state -and $entry.evidence -ceq $EvidenceClass -and $entry.reason -ceq $expected.reason -and $entry.proof -ceq $expected.proof)
     } catch { return $false }
@@ -184,6 +185,30 @@ function Add-PhaseAInnerJobEvidence($VerdictInput,$HostedJournal,$ActorJournal,[
       $sha=[Security.Cryptography.SHA256]::Create()
       try { $json=ConvertTo-Json -InputObject $canonical -Compress; $proof=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
       $VerdictInput.cases[$control]=@{state=$outcome;evidence=$EvidenceClass;reason=$reason;proof=$proof}
+    }
+  } catch { return }
+}function Add-PhaseAStage3Evidence($VerdictInput,$Evidence,[string]$EvidenceClass,$ActorJournal=@()) {
+  try {
+    if ($EvidenceClass -cnotin @('LIVE_OBSERVED','SIMULATED_PASS') -or $Evidence -isnot [hashtable] -or $Evidence.cleanupVerified -isnot [bool]) { return }
+    if ($Evidence.cleanupVerified -and $Evidence.ContainsKey('aclInspection')) {
+      $acl=$Evidence.aclInspection
+      if ($acl -is [hashtable] -and $acl.protected -is [bool] -and $acl.protected -and $acl.expected -is [string] -and $acl.expected.Length -gt 0 -and $acl.expected -ceq $acl.actual -and $VerdictInput.cases.aclInspection.state -ceq 'NOT_RUN') {
+        $sha=[Security.Cryptography.SHA256]::Create();try {$json=ConvertTo-Json -Compress -InputObject ([ordered]@{control='aclInspection';expected=$acl.expected;actual=$acl.actual;protected=$acl.protected;cleanup=$true});$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $VerdictInput.cases.aclInspection=@{state='PASS';evidence=$EvidenceClass;reason='NONE';proof=$hash}
+      }
+    }
+    $probes=@($ActorJournal | Where-Object { $_.role -ceq 'legacy' -and $_.operation -ceq 'probe' })
+    if ($probes.Count -ne 1) { return }
+    $probe=$probes[0]; $probeObs=$probe.observation
+    if ($probe.accountSid -cne $probe.tokenSid -or $probeObs.expectedSid -cne $probe.accountSid -or $probeObs.contained -isnot [bool] -or -not $probeObs.contained -or $probeObs.terminated -isnot [bool] -or -not $probeObs.terminated -or -not (Test-ActorObservation $probeObs 'legacy' 'allowed')) { return }
+    foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile'),@('unauthorizedCreate','Create','deniedFile'))) {
+      $key=$spec[0];if(-not $Evidence.ContainsKey($key)){continue};$entry=$Evidence[$key];if($entry -isnot [hashtable] -or $entry.control -cne $key -or $entry.operation -cne $spec[1] -or $entry.target -cne $spec[2] -or $entry.accountSid -cne $entry.tokenSid -or $entry.accountSid -cne $probe.accountSid -or $entry.parentExists -isnot [bool] -or -not $entry.parentExists -or $entry.beforeExists -isnot [bool] -or $entry.afterExists -isnot [bool] -or -not $entry.afterExists -or $entry.beforeInventory -cnotmatch '^[0-9a-f]{64}$' -or $entry.afterInventory -cnotmatch '^[0-9a-f]{64}$' -or $entry.beforeInventory -ceq $entry.afterInventory){continue}
+      if (($key -ceq 'unauthorizedWrite' -and -not $entry.beforeExists) -or ($key -ceq 'unauthorizedCreate' -and $entry.beforeExists)){continue}
+      $o=$entry.observation;if($o -isnot [hashtable] -or -not $o.ContainsKey('errorCategory') -or $o.errorCategory -cne 'NONE' -or -not $o.ContainsKey('errorCode') -or $o.errorCode -isnot [int] -or $o.errorCode -ne 0 -or $o.expectedSid -cne $entry.accountSid -or $o.contained -isnot [bool] -or -not $o.contained -or $o.terminated -isnot [bool] -or -not $o.terminated -or -not (Test-ActorObservation $o 'legacy' 'allowed')){continue}
+      if($VerdictInput.cases[$key].state -cne 'NOT_RUN'){continue}
+      $canonical=[ordered]@{control=$key;operation=$entry.operation;target=$entry.target;accountSid=$entry.accountSid;beforeExists=$entry.beforeExists;parentExists=$entry.parentExists;beforeInventory=$entry.beforeInventory;afterExists=$entry.afterExists;afterInventory=$entry.afterInventory;pid=$o.expectedPid;sid=$o.observedSid;createdAt=$o.observedCreatedAt;nonce=$o.expectedNonce;result=$o.outcome;error=$o.errorCategory;errorCode=$o.errorCode;cleanup=$Evidence.cleanupVerified}
+      $sha=[Security.Cryptography.SHA256]::Create();try {$json=ConvertTo-Json -Compress -InputObject $canonical;$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+      $VerdictInput.cases[$key]=@{state='FAIL';evidence=$EvidenceClass;reason='VIOLATION';proof=$hash}
     }
   } catch { return }
 }

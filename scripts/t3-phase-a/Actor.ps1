@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][ValidateSet("Create","Read","Overwrite","Delete","Rename")][string]$Operation,
   [Parameter(Mandatory=$true)][string]$Target,
@@ -17,7 +17,7 @@ while (-not [IO.File]::Exists($Gate)) {
   if ([DateTime]::UtcNow -ge $deadline) { exit 22 }
   Start-Sleep -Milliseconds 50
 }
-$outcome = "error"; $code = 21
+$outcome = "error"; $code = 21; $errorCategory="OTHER"; $errorCode=0
 try {
   if ($Operation -eq "Read") {
     $stream = [IO.File]::Open($Target, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
@@ -35,11 +35,19 @@ try {
     $stream = [IO.File]::Open($Target, $mode, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.WriteByte(65); $stream.Flush($true) } finally { $stream.Dispose() }
   }
-  $outcome = "allowed"; $code = 0
+  $outcome = "allowed"; $code = 0; $errorCategory="NONE"
 } catch {
   $inner = $_.Exception.GetBaseException()
-  if ($inner -is [UnauthorizedAccessException]) { $outcome = "denied"; $code = 20 }
+  $unsignedHresult=[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$inner.HResult),0)
+  if (($unsignedHresult -band [uint32]4294901760) -eq [uint32]2147942400) { $errorCode=[int]($unsignedHresult -band 0xffff) }
+  if ($inner -is [UnauthorizedAccessException]) { $outcome = "denied"; $code = 20; $errorCategory="ACCESS_DENIED" }
+  elseif ($inner -is [IO.FileNotFoundException]) { $errorCategory="FILE_NOT_FOUND" }
+  elseif ($inner -is [IO.DirectoryNotFoundException]) { $errorCategory="PATH_NOT_FOUND" }
+  elseif ($inner -is [ArgumentException] -or $inner -is [NotSupportedException] -or $inner -is [IO.PathTooLongException]) { $errorCategory="INVALID_PATH" }
+  elseif ($inner -is [IO.IOException]) { $errorCategory="IO_ERROR" }
 }
 $record["outcome"] = $outcome
+$record["errorCategory"] = $errorCategory
+$record["errorCode"] = $errorCode
 [IO.File]::WriteAllText($Result, ($record | ConvertTo-Json -Compress))
 exit $code

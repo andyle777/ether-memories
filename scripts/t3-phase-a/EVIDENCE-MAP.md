@@ -55,3 +55,15 @@ Inner-job protocol: the supervisor creates the unnamed non-inheritable job and s
 The provisional adapter now retains verified membership and limit failures and a bounded commanded-closure sequence with separate wait, exit and cleanup observations. A survivor remains a failure even if later cleanup is unconfirmed; incomplete authorization, provenance or cleanup still blocks a final verdict. Identity/query failures are setup failures or unverified, not invented security violations. See PROPOSED-INNER-JOB-ACCEPTANCE.md: adoption is pending, and the sequence does not establish exclusive global ownership or causation. Failure coverage and actual hosted execution remain incomplete.
 
 The supervisor now writes a bounded receipt of its actual inner-job CloseHandle attempt. The manager correlates the receipt nonce, mode, supervisor and child PID and creation times with its independent observations before retaining it. jobClosure success requires that correlated successful receipt plus the existing independent waits and cleanup. A reported close failure is setup failure; missing or mismatched receipts remain unverified. The originating receipt is supervisor-generated and is not itself independent proof of global last-handle closure. The proposed acceptance clarification remains unadopted.
+
+Stage 3 slice: aclInspection retains the expected and independently read ACL
+for success-only rechecking. unauthorizedRead, unauthorizedWrite and
+unauthorizedCreate retain actor identity, categorized result, before/after
+existence and inventory, and cleanup observations. The adapter can preserve a
+write or create violation when manager-observed protected inventory changes; it
+does not promote denial to PASS because an independent Windows denial witness
+is not yet connected. Unauthorized read remains unverified: its actor-provided
+result alone does not independently establish that access occurred. ACL failure
+records, independent denial corroboration, read violations, and full end-to-end
+cleanup proof remain incomplete. Synthetic controls do not establish hosted
+NTFS behavior.

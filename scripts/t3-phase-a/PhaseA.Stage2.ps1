@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Core.ps1"
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
@@ -54,6 +54,7 @@ function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashta
         $experiment=Invoke-PhaseAStage3 $accounts $tokens $state.fixture $state.backend
         $state.reason=$experiment.status
         $state.result['cases']=$experiment.cases
+        $state.result['evidence']=$experiment.evidence
         if ($state.reason -cne 'STAGE3_COMPLETE') { throw 'stage 3 failed' }
       }
     }
@@ -121,6 +122,8 @@ function New-PhaseAStage2Backend {
         createdAt=$final.createdAt; observedCreatedAt=$observed.createdAt; expectedNonce=$nonce;
         reportedNonce=$final.nonce; exitCode=$code; outcome=$final.outcome; contained=$true; terminated=$true }
       if ($final.PSObject.Properties.Name -contains 'digest') { $obs.digest=$final.digest }
+      if ($final.PSObject.Properties.Name -contains 'errorCategory' -and $final.errorCategory -cin @('NONE','ACCESS_DENIED','FILE_NOT_FOUND','PATH_NOT_FOUND','INVALID_PATH','IO_ERROR','OTHER')) { $obs.errorCategory=$final.errorCategory }
+      if ($final.PSObject.Properties.Name -contains 'errorCode' -and $final.errorCode -is [int] -and $final.errorCode -ge 0 -and $final.errorCode -le 65535) { $obs.errorCode=$final.errorCode }
       return $obs
     } finally {
       if ($job -ne [IntPtr]::Zero) { try { [EtherPhaseAJob]::Close($job) } catch { $cleanupFailed=$true } }
