@@ -101,3 +101,33 @@ function Test-PhaseAPins([hashtable]$Pins) {
   }
   return $true
 }
+function Invoke-PhaseAGit([string]$Repository, [string]$Arguments) {
+  $start = New-Object Diagnostics.ProcessStartInfo
+  $start.FileName = 'git.exe'; $start.Arguments = $Arguments; $start.WorkingDirectory = $Repository
+  $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+  $p = New-Object Diagnostics.Process; $p.StartInfo = $start
+  try {
+    if (-not $p.Start()) { return $null }
+    $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit(10000)) { $p.Kill(); $null = $p.WaitForExit(5000); return $null }
+    return @{ code=$p.ExitCode; output=$out.Result.Trim(); error=$err.Result }
+  } catch { return $null } finally { $p.Dispose() }
+}
+function Test-PhaseACheckout([string]$Repository, [string]$ExpectedHead, [string]$Base) {
+  if ($ExpectedHead -cnotmatch '^[0-9a-f]{40}$' -or $Base -cnotmatch '^[0-9a-f]{40}$') { return $false }
+  $head = Invoke-PhaseAGit $Repository 'rev-parse HEAD'
+  if ($null -eq $head -or $head.code -ne 0 -or $head.output -cne $ExpectedHead) { return $false }
+  $ancestor = Invoke-PhaseAGit $Repository ("merge-base --is-ancestor " + $Base + " " + $ExpectedHead)
+  if ($null -eq $ancestor -or $ancestor.code -ne 0) { return $false }
+  $clean = Invoke-PhaseAGit $Repository 'diff --quiet HEAD --'
+  if ($null -eq $clean -or $clean.code -ne 0) { return $false }
+  $pins = @{}
+  foreach ($path in @('.t3-phase2-harness/Actor.ps1','.t3-phase2-harness/Invoke-Phase2.ps1',
+    '.t3-phase2-harness/JobSupervisor.ps1','.t3-phase2-harness/Test-JobObject.ps1',
+    '.t3-phase2-harness/README.md','src/persistence/productionOperations.ts')) {
+    try { $pins[$path] = (Get-FileHash -LiteralPath (Join-Path $Repository $path) -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
+    catch { return $false }
+  }
+  return (Test-PhaseAPins $pins)
+}

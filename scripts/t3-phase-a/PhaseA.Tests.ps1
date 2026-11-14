@@ -117,4 +117,8 @@ Check (-not (Test-PhaseAPins $x)) "mismatched source pin rejected"
 $x=$pins.Clone();$x.Remove(".t3-phase2-harness/Actor.ps1")
 Check (-not (Test-PhaseAPins $x)) "missing pinned source rejected"
 Write-Output "PASS source-pin controls"
+$repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+Check (-not (Test-PhaseACheckout $repo 'not-a-sha' $config.base)) 'malformed checkout SHA rejected'
+Check (-not (Test-PhaseACheckout $repo ('0'*40) $config.base)) 'mismatched checkout SHA rejected'
+Write-Output 'PASS checkout controls'
 Write-Output "PASS: $script:passed assertions total"

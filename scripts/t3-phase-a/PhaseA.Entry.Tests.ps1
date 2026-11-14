@@ -20,7 +20,7 @@ try {
     if (-not $p.WaitForExit(15000)) { $p.Kill(); throw "Manager test timeout" }
     if ($p.ExitCode -ne 2) { throw "Incomplete manager did not fail closed" }
     $value=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
-    $expected=if ($mode -eq "missing") { "CONFIGURATION_REJECTED" } else { "IMPLEMENTATION_INCOMPLETE" }
+    $expected=if ($mode -eq "missing") { "CONFIGURATION_REJECTED" } else { "CHECKOUT_REJECTED" }
     $names=@($value.PSObject.Properties.Name)
     if ($names.Count -ne 3 -or $value.status -cne "UNVERIFIED" -or
         $value.schema -cne "ether.t3.phase-a.failure.v1" -or $value.reason -cne $expected) { throw "Invalid failure report" }

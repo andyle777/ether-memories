@@ -5,6 +5,9 @@ This is local development scaffolding based on commit
 distinct-identity enforcement experiment. Do not publish or execute the workflow
 until the implementation has been completed, reviewed, and separately authorized.
 The entrypoint intentionally reports `UNVERIFIED` and exits 2 in every case.
+After validating hosted invocation fields, it now rejects a checkout whose
+HEAD, baseline ancestry, tracked state, or reviewed source hashes do not match.
+These are preflight checks only; a passing preflight is not Phase A evidence.
 
 The scripts contain actor, process-token, job-object, validation and reporting
 building blocks, plus offline tests. The manager does not yet create accounts,

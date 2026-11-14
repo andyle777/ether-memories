@@ -14,7 +14,10 @@ $config = @{
   sha=[Environment]::GetEnvironmentVariable("GITHUB_SHA")
   base=$RequiredBase
 }
-$reason = if (Test-PhaseAConfig $config) { "IMPLEMENTATION_INCOMPLETE" } else { "CONFIGURATION_REJECTED" }
+$repository = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
+  elseif (-not (Test-PhaseACheckout $repository $config.sha $RequiredBase)) { "CHECKOUT_REJECTED" }
+  else { "IMPLEMENTATION_INCOMPLETE" }
 $report = [ordered]@{ schema="ether.t3.phase-a.failure.v1"; status="UNVERIFIED"; reason=$reason }
 try {
   $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Compress))
