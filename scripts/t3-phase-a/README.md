@@ -12,7 +12,13 @@ launch or bind alternate-credential actors, configure or inspect NTFS DACLs,
 compare protected inventories, run the required access controls, or perform
 account and resource cleanup. The observed local job-object test begins after
 assignment and does not prove safe containment between process creation and
-assignment. Tests using a single identity or test doubles are not enforcement
+assignment. A separate same-identity probe uses CreateProcessAsUserW with a
+primary token, STARTUPINFOEX, a job-list attribute and suspended start; local
+tests verify job membership before resume and child termination on supervisor
+death. The probe is not the manager's launcher and alternate-token behavior,
+privileges and hosted nested-job support remain unverified. The probe inherits
+the caller environment and is not ready for sensitive hosted execution. Tests
+using a single identity or test doubles are not enforcement
 evidence. All account, policy, hosted-image and cross-identity behavior remains
 unverified.
 

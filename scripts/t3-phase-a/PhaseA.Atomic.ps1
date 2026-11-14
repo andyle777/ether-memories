@@ -1,0 +1,66 @@
+# Local same-identity feasibility probe only. Not wired into the manager.
+if (-not ('EtherPhaseAAtomic' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public sealed class EtherPhaseAAtomic : IDisposable {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  struct StartupInfo {
+    public int cb; public string reserved, desktop, title;
+    public int x,y,xSize,ySize,xCount,yCount,fill,flags;
+    public short showWindow, reserved2; public IntPtr reservedPtr, stdIn, stdOut, stdErr;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct StartupInfoEx { public StartupInfo startup; public IntPtr attributes; }
+  [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr process, thread; public int pid, tid; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetCurrentProcess();
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
+  [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern bool CreateProcessAsUserW(IntPtr token, string app, StringBuilder command, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref StartupInfoEx startup, out ProcessInfo info);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+  readonly IntPtr job; IntPtr process, thread;
+  public int Pid { get; private set; }
+  EtherPhaseAAtomic(IntPtr j, ProcessInfo p) { job=j; process=p.process; thread=p.thread; Pid=p.pid; }
+  static void Require(bool success) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+  public static EtherPhaseAAtomic CreateCurrentUser(IntPtr job, string app, string command) {
+    IntPtr token=IntPtr.Zero;
+    try {
+      Require(OpenProcessToken(GetCurrentProcess(), 0x000b, out token));
+      return CreateWithToken(token,job,app,command);
+    } finally { if(token!=IntPtr.Zero) CloseHandle(token); }
+  }
+  public static EtherPhaseAAtomic CreateWithToken(IntPtr token, IntPtr job, string app, string command) {
+    if (token == IntPtr.Zero || job == IntPtr.Zero || String.IsNullOrEmpty(app) || String.IsNullOrEmpty(command)) throw new ArgumentException();
+    IntPtr list=IntPtr.Zero, value=IntPtr.Zero, size=IntPtr.Zero;
+    bool initialized=false;
+    try {
+      InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+      if (size == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+      list=Marshal.AllocHGlobal(size); Require(InitializeProcThreadAttributeList(list,1,0,ref size)); initialized=true;
+      value=Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(value,job);
+      Require(UpdateProcThreadAttribute(list,0,new IntPtr(0x2000d),value,new IntPtr(IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
+      StartupInfoEx start=new StartupInfoEx(); start.startup.cb=Marshal.SizeOf(typeof(StartupInfoEx)); start.attributes=list;
+      ProcessInfo info;
+      Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080004,IntPtr.Zero,null,ref start,out info));
+      return new EtherPhaseAAtomic(job,info);
+    } finally {
+      if(initialized) DeleteProcThreadAttributeList(list);
+      if(list!=IntPtr.Zero) Marshal.FreeHGlobal(list);
+      if(value!=IntPtr.Zero) Marshal.FreeHGlobal(value);
+    }
+  }
+  public bool InJob() { bool yes; Require(IsProcessInJob(process,job,out yes)); return yes; }
+  public void Resume() { if (!InJob()) throw new InvalidOperationException("Child is not in job"); if (ResumeThread(thread)==0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+  public bool Wait(uint ms) { uint r=WaitForSingleObject(process,ms); if(r==0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); return r==0; }
+  public bool Exited() { return Wait(0); }
+  public void Dispose() { if(thread!=IntPtr.Zero) { CloseHandle(thread); thread=IntPtr.Zero; } if(process!=IntPtr.Zero) { CloseHandle(process); process=IntPtr.Zero; } }
+}
+'@
+}
