@@ -1,8 +1,8 @@
 # Phase A development checkpoint: incomplete
 
 This is local development scaffolding based on commit
-`42f9b5bdf94e47c4c69c0f87127eb545dff13ed1`. It is not an executable
-distinct-identity enforcement experiment. Do not publish or execute the workflow
+`42f9b5bdf94e47c4c69c0f87127eb545dff13ed1`. It contains an experimental distinct-identity enforcement path, but the
+complete acceptance experiment is not implemented. Do not publish or execute the workflow
 until the implementation has been completed, reviewed, and separately authorized.
 The entrypoint intentionally reports `UNVERIFIED` and exits 2 in every case.
 After validating hosted invocation fields, it now rejects a checkout whose
@@ -17,9 +17,12 @@ The account lifecycle is untested with real accounts. A separate
 `-EnableActorStage` switch additionally enables the Stage 2 launch callback;
 it requires `-EnableAccountStage`, and neither switch appears in the workflow.
 The alternate-token launch and its private actor scratch-directory access have
-not been executed with real accounts. The manager does not yet configure or inspect protected-store DACLs,
-compare protected inventories, run the required access controls, or perform
-full experiment resource cleanup. The observed local job-object test begins after
+not been executed with real accounts. A further `-EnableFilesystemStage` switch
+requires both earlier switches and connects a protected NTFS fixture, access
+operations, inventory comparison, and an intentionally permissive control.
+The workflow does not enable these switches. Actual ACL and cross-identity
+behavior has not been executed. Adversarial controls and supervisor-failure
+evidence remain NOT_RUN; the manager cannot report GREEN. The observed local job-object test begins after
 assignment and does not prove safe containment between process creation and
 assignment. A separate same-identity probe uses CreateProcessAsUserW with a
 primary token, STARTUPINFOEX, a job-list attribute and suspended start; local
@@ -42,7 +45,10 @@ test compares the handshake with the Windows process object while the child is
 alive. The inventory helper hashes names, types, sizes, content and owner,
 group and DACL descriptors, and rejects reparse points. It has only been tested
 on a same-user disposable tree; it does not establish a race-free traversal or
-an adequate protected DACL. It is not wired to the incomplete manager.
+an adequate protected DACL. It is wired to the guarded Stage 3 path. Cleanup
+checks for reparse points and deletes known paths non-recursively, but is not
+proven race-free against a concurrent filesystem adversary. Delete and rename
+requirements have not been established against the frozen acceptance matrix.
 
 The experimental workflow listens only for a push to
 `test/t3-windows-enforcement-run`. A future push to that branch would also

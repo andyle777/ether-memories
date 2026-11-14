@@ -21,7 +21,11 @@ $outcome = "error"; $code = 21
 try {
   if ($Operation -eq "Read") {
     $stream = [IO.File]::Open($Target, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-    try { $null = $stream.ReadByte() } finally { $stream.Dispose() }
+    try {
+      $sha=[Security.Cryptography.SHA256]::Create()
+      try { $record['digest']=[BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
+      finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
   } else {
     $mode = if ($Operation -eq "Create") { [IO.FileMode]::CreateNew } else { [IO.FileMode]::Open }
     $stream = [IO.File]::Open($Target, $mode, [IO.FileAccess]::Write, [IO.FileShare]::None)

@@ -28,6 +28,18 @@ try {
       $record.nonce -cne "offline-test" -or -not (Test-Path -LiteralPath $target)) { throw "Actor positive control failed" }
   Write-Output "PASS actor nonprivileged create and identity record"
   Remove-Item -LiteralPath $ready, $result
+  [IO.File]::WriteAllText($target,'synthetic multi-byte payload')
+  $p = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden -PassThru -ArgumentList @(
+    '-NoProfile','-NonInteractive','-File',('"' + $actor + '"'),'-Operation','Read',
+    '-Target',('"' + $target + '"'),'-Ready',('"' + $ready + '"'),
+    '-Gate',('"' + $gate + '"'),'-Result',('"' + $result + '"'),'-Nonce','offline-test'
+  )
+  if (-not $p.WaitForExit(15000)) { $p.Kill(); throw 'Actor read timed out' }
+  $read=Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
+  $expectedHash=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($p.ExitCode -ne 0 -or $read.outcome -cne 'allowed' -or $read.digest -cne $expectedHash) { throw 'Actor read digest mismatch' }
+  Write-Output 'PASS actor reads and hashes complete file'
+  Remove-Item -LiteralPath $ready, $result
   $missing = Join-Path $root "missing.bin"
   $p = Start-Process -FilePath (Join-Path $PSHOME "powershell.exe") -WindowStyle Hidden -PassThru -ArgumentList @(
     "-NoProfile","-NonInteractive","-File",('"' + $actor + '"'),"-Operation","Read",

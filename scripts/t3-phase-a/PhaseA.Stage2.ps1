@@ -2,6 +2,16 @@ Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Core.ps1"
 . "$PSScriptRoot/PhaseA.Native.ps1"
 . "$PSScriptRoot/PhaseA.Atomic.ps1"
+function Invoke-PhaseAActorOperation($Account, $Token, [hashtable]$Backend, [string]$Operation, [string]$Target, [string]$ExpectedOutcome) {
+  if ($Operation -notin @('Create','Read','Overwrite') -or $ExpectedOutcome -notin @('allowed','denied') -or
+      $Token.sid -cne $Account.sid) { throw 'STAGE2_OBSERVATION_REJECTED' }
+  $obs=& $Backend.Run $Account $Token $Operation $Target
+  if ($obs -isnot [hashtable] -or -not $obs.ContainsKey('terminated') -or
+      $obs.terminated -isnot [bool] -or -not $obs.terminated) { throw 'STAGE2_CHILD_UNCONFIRMED' }
+  if ($obs.expectedSid -cne $Account.sid -or $obs.contained -isnot [bool] -or -not $obs.contained -or
+      -not (Test-ActorObservation $obs $Account.role $ExpectedOutcome)) { throw 'STAGE2_OBSERVATION_REJECTED' }
+  return $obs
+}
 function Invoke-PhaseAStage2($Accounts, $Tokens, [hashtable]$Backend) {
   if ($Accounts.Count -ne 2 -or $Tokens.Count -ne 2) { return 'STAGE2_OBSERVATION_REJECTED' }
   foreach ($i in 0,1) {
@@ -23,30 +33,40 @@ function Invoke-PhaseAStage2($Accounts, $Tokens, [hashtable]$Backend) {
   }
   return 'STAGE2_COMPLETE'
 }
-function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashtable]$AccountBackend, [hashtable]$ActorBackend) {
+function Invoke-PhaseAStages([bool]$AccountEnabled, [bool]$ActorEnabled, [hashtable]$AccountBackend, [hashtable]$ActorBackend, [bool]$FilesystemEnabled=$false, [hashtable]$FixtureBackend=@{}, [hashtable]$Stage3Result=@{}) {
+  if ($FilesystemEnabled -and (-not $AccountEnabled -or -not $ActorEnabled)) { return 'STAGE3_GUARD_REJECTED' }
   if ($ActorEnabled -and -not $AccountEnabled) { return 'STAGE2_GUARD_REJECTED' }
   if (-not $AccountEnabled) { return 'LIVE_DISABLED' }
-  $state=@{reason='IMPLEMENTATION_INCOMPLETE';enabled=$ActorEnabled;backend=$ActorBackend}
+  $state=@{reason='IMPLEMENTATION_INCOMPLETE';enabled=$ActorEnabled;backend=$ActorBackend;filesystem=$FilesystemEnabled;fixture=$FixtureBackend;result=$Stage3Result}
   $callback={
     param($accounts,$tokens)
     if ($state.enabled) {
       $state.reason=Invoke-PhaseAStage2 $accounts $tokens $state.backend
       if ($state.reason -cne 'STAGE2_COMPLETE') { throw 'stage 2 failed' }
+      if ($state.filesystem) {
+        $experiment=Invoke-PhaseAStage3 $accounts $tokens $state.fixture $state.backend
+        $state.reason=$experiment.status
+        $state.result['cases']=$experiment.cases
+        if ($state.reason -cne 'STAGE3_COMPLETE') { throw 'stage 3 failed' }
+      }
     }
   }.GetNewClosure()
   $stage=Invoke-PhaseAAccountGate $true $AccountBackend $callback
-  if ($stage -ceq 'STAGE1_COMPLETE') { if ($ActorEnabled) { return 'STAGE2_COMPLETE' }; return 'STAGE1_COMPLETE' }
+  if ($stage -ceq 'STAGE1_COMPLETE') { if ($FilesystemEnabled) { return 'STAGE3_COMPLETE' }; if ($ActorEnabled) { return 'STAGE2_COMPLETE' }; return 'STAGE1_COMPLETE' }
   if ($stage -ceq 'ACCOUNT_CONSUMER_FAILED') { return $state.reason }
   return $stage
 }
 function New-PhaseAStage2Backend {
-  return @{ Run={ param($account,$token)
+  return @{ Run={ param($account,$token,$operation,$operationTarget)
     $common=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
     if ([string]::IsNullOrWhiteSpace($common)) { throw 'stage directory unavailable' }
     $parent=[IO.Path]::GetFullPath($common).TrimEnd('\')
     $root=Join-Path $parent ('ether-phase-a-actor-'+[Guid]::NewGuid().ToString('N'))
     $actor=Join-Path $root 'Actor.ps1'; $ready=Join-Path $root 'ready.json'; $gate=Join-Path $root 'gate'
     $result=Join-Path $root 'result.json'; $target=Join-Path $root 'probe.bin'
+    if ([string]::IsNullOrEmpty($operation)) { $operation='Create' }
+    if ($operation -notin @('Create','Read','Overwrite')) { throw 'invalid operation' }
+    if ([string]::IsNullOrEmpty($operationTarget)) { $operationTarget=$target }
     $job=[IntPtr]::Zero; $child=$null; $process=$null; $safeToRemove=$true; $cleanupFailed=$false; $createdRoot=$false
     try {
       $null=New-Item -ItemType Directory -Path $root -ErrorAction Stop; $createdRoot=$true
@@ -62,8 +82,8 @@ function New-PhaseAStage2Backend {
       Set-Acl -LiteralPath $root -AclObject $acl -ErrorAction Stop
       Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Actor.ps1') -Destination $actor -ErrorAction Stop
       $nonce=[Guid]::NewGuid().ToString('N'); $exe=Join-Path $PSHOME 'powershell.exe'
-      foreach ($path in @($actor,$ready,$gate,$result,$target,$exe,$root)) { if ($path.Contains('"')) { throw 'unsafe path' } }
-      $cmd='"'+$exe+'" -NoProfile -NonInteractive -File "'+$actor+'" -Operation Create -Target "'+$target+'" -Ready "'+$ready+'" -Gate "'+$gate+'" -Result "'+$result+'" -Nonce '+$nonce
+      foreach ($path in @($actor,$ready,$gate,$result,$operationTarget,$exe,$root)) { if ($path.Contains('"')) { throw 'unsafe path' } }
+      $cmd='"'+$exe+'" -NoProfile -NonInteractive -File "'+$actor+'" -Operation '+$operation+' -Target "'+$operationTarget+'" -Ready "'+$ready+'" -Gate "'+$gate+'" -Result "'+$result+'" -Nonce '+$nonce
       $job=[EtherPhaseAJob]::Create()
       $child=[EtherPhaseAAtomic]::CreateWithTokenInDirectory($token.handle.DangerousGetHandle(),$job,$exe,$cmd,$root)
       $safeToRemove=$false
@@ -89,10 +109,12 @@ function New-PhaseAStage2Backend {
       $safeToRemove=$true; $code=$child.ExitCode()
       if (-not [IO.File]::Exists($result) -or (Get-Item -LiteralPath $result).Length -gt 4096) { throw 'actor result missing' }
       $final=Get-Content -LiteralPath $result -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-      return @{ role=$account.role; expectedSid=$account.sid; observedSid=$observed.sid; reportedSid=$final.sid;
+      $obs=@{ role=$account.role; expectedSid=$account.sid; observedSid=$observed.sid; reportedSid=$final.sid;
         expectedPid=$child.Pid; reportedPid=$final.pid; tokenNonAdmin=$true; tokenObserved=$true;
         createdAt=$final.createdAt; observedCreatedAt=$observed.createdAt; expectedNonce=$nonce;
         reportedNonce=$final.nonce; exitCode=$code; outcome=$final.outcome; contained=$true; terminated=$true }
+      if ($final.PSObject.Properties.Name -contains 'digest') { $obs.digest=$final.digest }
+      return $obs
     } finally {
       if ($job -ne [IntPtr]::Zero) { try { [EtherPhaseAJob]::Close($job) } catch { $cleanupFailed=$true } }
       if ($child) {

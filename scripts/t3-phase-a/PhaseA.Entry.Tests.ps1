@@ -3,6 +3,52 @@ $base=[IO.Path]::GetTempPath()
 $reports=@()
 . "$PSScriptRoot/PhaseA.Accounts.ps1"
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
+. "$PSScriptRoot/PhaseA.Stage3.ps1"
+$reportCases=@{}
+foreach ($k in @('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead','authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','inventory','insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorFailure')) { $reportCases[$k]='NOT_RUN' }
+$reportTest=@{schema='ether.t3.phase-a.observations.v1';status='UNVERIFIED';source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1';commit='unknown';reason='IMPLEMENTATION_INCOMPLETE';cases=$reportCases}
+if (-not (Test-PhaseAObservationReport $reportTest)) { throw 'Valid report rejected' }
+$badReport=$reportTest.Clone(); $badCases=$reportCases.Clone(); $badCases.Remove('inventory'); $badReport.cases=$badCases
+if (Test-PhaseAObservationReport $badReport) { throw 'Report with missing observation accepted' }
+$badReport=$reportTest.Clone(); $badReport['privatePath']='x'
+if (Test-PhaseAObservationReport $badReport) { throw 'Report with private extra field accepted' }
+$badReport=$reportTest.Clone(); $badReport.status='GREEN'
+if (Test-PhaseAObservationReport $badReport) { throw 'Premature GREEN accepted' }
+$script:stage3events=New-Object 'System.Collections.Generic.List[string]'
+$script:created3=$false
+$stage3fixture=@{ Setup={ param($a) @{protectedFile='existing';newFile='new';deniedFile='missing';controlFile='control';initialDigest=('a'*64);writeDigest=('b'*64);aclInspected=$true} }; Exists={ param($p) if ($p -eq 'new') { $script:created3 } else { $p -ne 'missing' } }; Digest={ param($p) if ($p -eq 'existing') {'a'*64} else {'b'*64} }; Inventory={ param($f) 'unchanged' }; Cleanup={ param($f) $script:stage3events.Add('cleanup') } }
+$stage3actors=@{Run={ param($a,$t,$operation,$target) $denied=($a.role -ceq 'legacy' -and -not [string]::IsNullOrEmpty($target) -and $target -ne 'control'); if ($a.role -eq 'broker' -and $operation -eq 'Create' -and $target -eq 'new') { $script:created3=$true }; $out=if ($denied) {'denied'} else {'allowed'}; $code=if ($denied) {20} else {0}; $o=@{expectedSid=$a.sid;observedSid=$a.sid;reportedSid=$a.sid;expectedPid=123;reportedPid=123;tokenNonAdmin=$true;tokenObserved=$true;createdAt='2026-01-01T00:00:00Z';observedCreatedAt='2026-01-01T00:00:00Z';expectedNonce='nonce';reportedNonce='nonce';exitCode=$code;outcome=$out;role=$a.role;contained=$true;terminated=$true}; if ($operation -eq 'Read' -and -not $denied) { $o.digest=if ($target -eq 'existing') {'a'*64} else {'b'*64} }; $o } }
+$accounts3=@(@{role='broker';sid='S-1-5-21-1'},@{role='legacy';sid='S-1-5-21-2'}); $tokens3=@(@{sid='S-1-5-21-1'},@{sid='S-1-5-21-2'})
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $stage3fixture $stage3actors
+if ($s3.status -cne 'STAGE3_COMPLETE' -or -not $script:stage3events.Contains('cleanup')) { throw 'Stage 3 simulated success or cleanup failed' }
+$script:created3=$false
+$mutated=$stage3fixture.Clone(); $script:inventoryCalls=0; $mutated.Inventory={ param($f) $script:inventoryCalls++; if ($script:inventoryCalls -gt 1) {'changed'} else {'unchanged'} }
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $mutated $stage3actors
+if ($s3.status -ceq 'STAGE3_COMPLETE') { throw 'Stage 3 accepted changed protected inventory' }
+$script:created3=$false
+$missing=$stage3fixture.Clone(); $missing.Exists={ param($p) $false }
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $missing $stage3actors
+if ($s3.status -ceq 'STAGE3_COMPLETE' -or -not $s3.cases.fixtureCleanup) { throw 'Missing source accepted or not cleaned' }
+$noAcl=$stage3fixture.Clone(); $noAcl.Setup={ param($a) @{protectedFile='existing';newFile='new';deniedFile='missing';controlFile='control';initialDigest=('a'*64);writeDigest=('b'*64);aclInspected=$false} }
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $noAcl $stage3actors
+if ($s3.status -cne 'STAGE3_ACL_REJECTED') { throw 'Unverified ACL accepted' }
+$aclError=$stage3fixture.Clone(); $aclError.Setup={ param($a) throw 'STAGE3_ACL_REJECTED' }
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $aclError $stage3actors
+if ($s3.status -cne 'STAGE3_ACL_REJECTED') { throw 'ACL setup error not classified' }
+$script:created3=$false
+$cleanup=$stage3fixture.Clone(); $cleanup.Cleanup={ param($f) throw 'synthetic cleanup failure' }
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $cleanup $stage3actors
+if ($s3.status -cne 'STAGE3_CLEANUP_FAILED') { throw 'Cleanup failure accepted' }
+$script:created3=$false
+$script:stage3Run=$stage3actors.Run
+$blockedControl=@{Run={ param($a,$t,$op,$target) $v=& $script:stage3Run $a $t $op $target; if ($target -eq 'control') { $v.outcome='denied'; $v.exitCode=20 }; $v } }
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $stage3fixture $blockedControl
+if ($s3.status -ceq 'STAGE3_COMPLETE' -or $s3.cases.insecureRejected) { throw 'Unobserved insecure control accepted' }
+$script:created3=$false
+$missingRead=@{Run={ param($a,$t,$op,$target) $v=& $script:stage3Run $a $t $op $target; if ($a.role -eq 'legacy' -and $target -eq 'existing' -and $op -eq 'Read') { $v.outcome='error'; $v.exitCode=21 }; $v } }
+$s3=Invoke-PhaseAStage3 $accounts3 $tokens3 $stage3fixture $missingRead
+if ($s3.status -ceq 'STAGE3_COMPLETE' -or $s3.cases.unauthorizedRead) { throw 'Missing-resource error accepted as denial' }
+$script:created3=$false
 $script:stage2seen=New-Object 'System.Collections.Generic.List[string]'
 $stage2fake=@{ Run={ param($account,$token) $script:stage2seen.Add("$($account.role):$($token.handle)"); @{ expectedSid=$account.sid; observedSid=$account.sid; reportedSid=$account.sid; expectedPid=123; reportedPid=123; tokenNonAdmin=$true; tokenObserved=$true; createdAt='2026-01-01T00:00:00Z'; observedCreatedAt='2026-01-01T00:00:00Z'; expectedNonce='nonce'; reportedNonce='nonce'; exitCode=0; outcome='allowed'; role=$account.role; contained=$true; terminated=$true } } }
 $ac=@(@{role='broker';sid='S-1-5-21-1'},@{role='legacy';sid='S-1-5-21-2'})
@@ -10,6 +56,10 @@ $tk=@(@{handle='broker';sid='S-1-5-21-1'},@{handle='legacy';sid='S-1-5-21-2'})
 if ((Invoke-PhaseAStage2 $ac $tk $stage2fake) -cne 'STAGE2_COMPLETE' -or ($script:stage2seen -join ',') -cne 'broker:broker,legacy:legacy') { throw 'Stage 2 token binding failed' }
 $wrong=$stage2fake.Clone(); $wrong.Run={ param($account,$token) @{ role=$account.role; expectedSid=$account.sid; observedSid='S-1-5-21-9'; reportedSid=$account.sid; expectedPid=123; reportedPid=123; tokenNonAdmin=$true; tokenObserved=$true; createdAt='2026-01-01T00:00:00Z'; observedCreatedAt='2026-01-01T00:00:00Z'; expectedNonce='nonce'; reportedNonce='nonce'; exitCode=0; outcome='allowed'; contained=$true; terminated=$true } }
 if ((Invoke-PhaseAStage2 $ac $tk $wrong) -cne 'STAGE2_OBSERVATION_REJECTED') { throw 'Stage 2 wrong SID accepted' }
+$denied=$stage2fake.Clone()
+$denied.Run={ param($account,$token,$operation,$target) @{ expectedSid=$account.sid; observedSid=$account.sid; reportedSid=$account.sid; expectedPid=123; reportedPid=123; tokenNonAdmin=$true; tokenObserved=$true; createdAt='2026-01-01T00:00:00Z'; observedCreatedAt='2026-01-01T00:00:00Z'; expectedNonce='nonce'; reportedNonce='nonce'; exitCode=20; outcome='denied'; role=$account.role; contained=$true; terminated=$true } }
+$op=Invoke-PhaseAActorOperation $ac[1] $tk[1] $denied 'Read' 'synthetic-target' 'denied'
+if ($op.outcome -cne 'denied' -or $op.exitCode -ne 20) { throw 'Validated denied operation was not returned' }
 $script:stage2mutation=''
 foreach ($field in @('reportedPid','reportedSid','createdAt','contained')) {
   $script:stage2mutation=$field
@@ -26,6 +76,11 @@ $fake=@{
  Close={ param($token) $script:events.Add("close:$($token.handle)") }
  Remove={ param($account) $script:events.Add("remove:$($account.role)") }
 }
+$script:events.Clear(); $script:seq=0; $script:created3=$false; $result3=@{}
+$r=Invoke-PhaseAStages $true $true $fake $stage3actors $true $stage3fixture $result3
+if ($r -cne 'STAGE3_COMPLETE' -or -not $result3.cases.inventory -or -not $script:events.Contains('remove:broker')) { throw 'Stage 3 manager callback dispatch failed' }
+$script:events.Clear(); $script:seq=0; $script:created3=$false
+if ((Invoke-PhaseAStages $true $false $fake $stage3actors $true $stage3fixture @{}) -cne 'STAGE3_GUARD_REJECTED' -or $script:events.Count -ne 0) { throw 'Stage 3 guard failed' }
 $script:events.Clear(); $script:seq=0; $script:stage2seen.Clear()
 $r=Invoke-PhaseAStages $true $true $fake $stage2fake
 if ($r -cne 'STAGE2_COMPLETE' -or ($script:stage2seen -join ',') -cne 'broker:broker,legacy:legacy' -or -not $script:events.Contains('close:legacy')) { throw 'Stage 1 to Stage 2 integration failed' }
@@ -129,8 +184,10 @@ try {
     $value=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
     $expected=if ($mode -eq "valid-looking") { "CHECKOUT_REJECTED" } else { "CONFIGURATION_REJECTED" }
     $names=@($value.PSObject.Properties.Name)
-    if ($names.Count -ne 3 -or $value.status -cne "UNVERIFIED" -or
-        $value.schema -cne "ether.t3.phase-a.failure.v1" -or $value.reason -cne $expected) { throw "Invalid failure report" }
+    if ($names.Count -ne 6 -or $value.status -cne "UNVERIFIED" -or
+        $value.schema -cne "ether.t3.phase-a.observations.v1" -or $value.reason -cne $expected -or
+        @($value.cases.PSObject.Properties.Name).Count -ne 19 -or $value.cases.adversarialControls -cne 'NOT_RUN' -or
+        $value.cases.supervisorFailure -cne 'NOT_RUN') { throw "Invalid failure report" }
   }
   Write-Output "PASS invalid and valid-looking context remain UNVERIFIED with sanitized report"
 } finally {

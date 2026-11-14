@@ -75,6 +75,28 @@ function Test-PhaseAReport([hashtable]$Report) {
       $Report.cases -isnot [hashtable]) { return $false }
   return (Test-RequiredCases $Report.cases)
 }
+function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
+  $fields=@('schema','status','source','commit','reason','cases')
+  if ($Report.Count -ne $fields.Count) { return $false }
+  foreach ($field in $fields) { if (-not $Report.Contains($field)) { return $false } }
+  if ($Report.schema -cne 'ether.t3.phase-a.observations.v1' -or $Report.status -cne 'UNVERIFIED' -or
+      $Report.source -cne '42f9b5bdf94e47c4c69c0f87127eb545dff13ed1' -or
+      ($Report.commit -cne 'unknown' -and $Report.commit -cnotmatch '^[0-9a-f]{40}$')) { return $false }
+  $reasons=@('CONFIGURATION_REJECTED','CHECKOUT_REJECTED','STAGE2_GUARD_REJECTED','STAGE3_GUARD_REJECTED',
+    'IMPLEMENTATION_INCOMPLETE','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
+    'ACCOUNT_AUTHENTICATION_FAILED','ACCOUNT_PRIVILEGE_UNAVAILABLE','ACCOUNT_LOGON_RIGHT_UNAVAILABLE','ACCOUNT_CONSUMER_FAILED',
+    'ACCOUNT_CLEANUP_FAILED','STAGE2_OBSERVATION_REJECTED','STAGE2_LAUNCH_FAILED','STAGE2_TIMEOUT','STAGE2_CLEANUP_FAILED',
+    'STAGE3_SETUP_FAILED','STAGE3_ACL_REJECTED','STAGE3_CASE_FAILED','STAGE3_CLEANUP_FAILED')
+  if ($Report.reason -cnotin $reasons -or $Report.cases -isnot [Collections.IDictionary]) { return $false }
+  $required=@('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead',
+    'authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','inventory',
+    'insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorFailure')
+  if ($Report.cases.Count -ne $required.Count) { return $false }
+  foreach ($case in $required) {
+    if (-not $Report.cases.Contains($case) -or $Report.cases[$case] -cnotin @('PASS','FAIL','NOT_RUN')) { return $false }
+  }
+  return $true
+}
 function Test-PhaseAConfig([hashtable]$Config) {
   $keys = @("repository","event","ref","runner","sha","base")
   if ($Config.Count -ne $keys.Count) { return $false }
