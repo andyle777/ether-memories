@@ -5,7 +5,7 @@ function Check([bool]$value, [string]$name) { if (-not $value) { throw "FAIL: $n
 $good = @{
   role="broker"; expectedSid="S-1-5-21-1"; observedSid="S-1-5-21-1"; reportedSid="S-1-5-21-1"
   expectedPid=123; reportedPid=123; tokenNonAdmin=$true; tokenObserved=$true
-  createdAt="2026-01-01T00:00:00Z"; reportedNonce="fresh"; expectedNonce="fresh"; exitCode=0; outcome="allowed"
+  createdAt="2026-01-01T00:00:00Z"; observedCreatedAt="2026-01-01T00:00:00Z"; reportedNonce="fresh"; expectedNonce="fresh"; exitCode=0; outcome="allowed"
 }
 Check (Test-ActorObservation $good "broker" "allowed") "valid independent token identity"
 foreach ($case in @(
@@ -17,11 +17,15 @@ foreach ($case in @(
   @{key="reportedNonce";value="spoofed"},
   @{key="exitCode";value=1},
   @{key="outcome";value="denied"},
-  @{key="createdAt";value=""}
+  @{key="createdAt";value=""},
+  @{key="observedCreatedAt";value="2026-01-01T00:00:01Z"},
+  @{key="observedCreatedAt";value="not-a-time"}
 )) {
   $x = $good.Clone(); $x[$case.key] = $case.value
   Check (-not (Test-ActorObservation $x "broker" "allowed")) ("reject invalid " + $case.key)
 }
+$x = $good.Clone(); $x.expectedPid = 'not-a-pid'
+Check (-not (Test-ActorObservation $x "broker" "allowed")) "reject malformed PID without throwing"
 Check (-not (Test-ActorObservation @{} "broker" "allowed")) "reject missing observation"
 Check (-not (Test-DistinctActorSids "S-1-5-21-1" "S-1-5-21-1")) "reject same SID"
 Check (Test-DistinctActorSids "S-1-5-21-1" "S-1-5-21-2") "accept distinct SID"

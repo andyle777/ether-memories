@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$record = [ordered]@{ pid=$PID; sid=$identity.User.Value; nonce=$Nonce }
+$record = [ordered]@{ pid=$PID; sid=$identity.User.Value; nonce=$Nonce; createdAt=[Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().ToString('o') }
 [IO.File]::WriteAllText($Ready, ($record | ConvertTo-Json -Compress))
 $deadline = [DateTime]::UtcNow.AddSeconds(45)
 while (-not [IO.File]::Exists($Gate)) {

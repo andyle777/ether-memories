@@ -16,6 +16,14 @@ assignment. Tests using a single identity or test doubles are not enforcement
 evidence. All account, policy, hosted-image and cross-identity behavior remains
 unverified.
 
+The actor handshake now records its process creation time, and the observation
+evaluator requires it to match a separately supplied observation. The local
+test compares the handshake with the Windows process object while the child is
+alive. The inventory helper hashes names, types, sizes, content and owner,
+group and DACL descriptors, and rejects reparse points. It has only been tested
+on a same-user disposable tree; it does not establish a race-free traversal or
+an adequate protected DACL. It is not wired to the incomplete manager.
+
 The experimental workflow listens only for a push to
 `test/t3-windows-enforcement-run`. A future push to that branch would also
 trigger the existing four-job CI workflow, for five jobs in total. A push to

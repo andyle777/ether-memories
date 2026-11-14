@@ -1,17 +1,22 @@
 ﻿Set-StrictMode -Version Latest
 function Test-ActorObservation([hashtable]$Observation, [string]$Role, [string]$ExpectedOutcome) {
-  $keys = @("role","expectedSid","observedSid","reportedSid","expectedPid","reportedPid","tokenNonAdmin","tokenObserved","createdAt","reportedNonce","expectedNonce","exitCode","outcome")
+  $keys = @("role","expectedSid","observedSid","reportedSid","expectedPid","reportedPid","tokenNonAdmin","tokenObserved","createdAt","observedCreatedAt","reportedNonce","expectedNonce","exitCode","outcome")
   foreach ($key in $keys) { if (-not $Observation.ContainsKey($key) -or $null -eq $Observation[$key]) { return $false } }
   if ($Role -notin @("broker","legacy") -or $ExpectedOutcome -notin @("allowed","denied")) { return $false }
   if ($Observation.role -cne $Role -or $Observation.outcome -cne $ExpectedOutcome) { return $false }
   if ([string]::IsNullOrWhiteSpace([string]$Observation.expectedSid) -or
       $Observation.expectedSid -cne $Observation.observedSid -or
       $Observation.expectedSid -cne $Observation.reportedSid) { return $false }
-  if ([int]$Observation.expectedPid -le 0 -or $Observation.expectedPid -ne $Observation.reportedPid) { return $false }
+  $expectedPid = 0; $reportedPid = 0
+  if (-not [int]::TryParse([string]$Observation.expectedPid, [ref]$expectedPid) -or
+      -not [int]::TryParse([string]$Observation.reportedPid, [ref]$reportedPid) -or
+      $expectedPid -le 0 -or $expectedPid -ne $reportedPid) { return $false }
   if ($Observation.tokenNonAdmin -isnot [bool] -or -not $Observation.tokenNonAdmin -or
       $Observation.tokenObserved -isnot [bool] -or -not $Observation.tokenObserved) { return $false }
   $time = [DateTimeOffset]::MinValue
   if (-not [DateTimeOffset]::TryParse([string]$Observation.createdAt, [ref]$time)) { return $false }
+  $observedTime = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse([string]$Observation.observedCreatedAt, [ref]$observedTime) -or $time -ne $observedTime) { return $false }
   if ([string]::IsNullOrWhiteSpace([string]$Observation.expectedNonce) -or
       $Observation.expectedNonce -cne $Observation.reportedNonce) { return $false }
   $expectedExit = if ($ExpectedOutcome -eq "allowed") { 0 } else { 20 }
