@@ -7,6 +7,7 @@ permissions:
   contents: read
 jobs:
   phase-a:
+    if: ${{ github.repository == 'andyle777/Ether-Memories' && github.event_name == 'push' && github.ref == 'refs/heads/test/t3-windows-enforcement-run' }}
     runs-on: windows-2025
     timeout-minutes: 20
     defaults:

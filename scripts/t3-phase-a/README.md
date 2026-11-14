@@ -10,10 +10,13 @@ HEAD, baseline ancestry, tracked state, or reviewed source hashes do not match.
 These are preflight checks only; a passing preflight is not Phase A evidence.
 
 The scripts contain actor, process-token, job-object, validation and reporting
-building blocks, plus offline tests. The manager does not yet create accounts,
+building blocks, plus offline tests. After preflight, the manager can explicitly
+opt into the Stage 1 account lifecycle with `-EnableAccountStage`; the workflow
+does not enable it. This switch is an operational guard, not machine attestation.
+The account lifecycle is untested with real accounts. The manager does not yet
 launch or bind alternate-credential actors, configure or inspect NTFS DACLs,
 compare protected inventories, run the required access controls, or perform
-account and resource cleanup. The observed local job-object test begins after
+full experiment resource cleanup. The observed local job-object test begins after
 assignment and does not prove safe containment between process creation and
 assignment. A separate same-identity probe uses CreateProcessAsUserW with a
 primary token, STARTUPINFOEX, a job-list attribute and suspended start; local
@@ -24,6 +27,11 @@ minimal explicit environment; it is not ready for hosted execution. Tests
 using a single identity or test doubles are not enforcement
 evidence. All account, policy, hosted-image and cross-identity behavior remains
 unverified.
+
+The lifecycle closes acquired token handles and removes owned accounts in reverse
+order during normal completion and handled failures. A process crash, forced
+termination, stuck system call or VM loss can bypass cleanup. Only a separately
+authorized disposable hosted runner may execute the live account path.
 
 The actor handshake now records its process creation time, and the observation
 evaluator requires it to match a separately supplied observation. The local
