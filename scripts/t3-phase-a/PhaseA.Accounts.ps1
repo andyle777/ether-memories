@@ -6,7 +6,7 @@ function Invoke-PhaseAAccountGate([bool]$Enabled, [hashtable]$Backend, [scriptbl
   if (-not $Enabled) { return 'LIVE_DISABLED' }
   $accounts=New-Object 'System.Collections.Generic.List[object]'
   $tokens=New-Object 'System.Collections.Generic.List[object]'
-  $reason='ACCOUNT_CREATION_FAILED'; $cleanupFailed=$false
+  $reason='ACCOUNT_CREATION_FAILED'; $cleanupFailed=$false; $childUnconfirmed=$false
   try {
     foreach ($role in @('broker','legacy')) {
       $account=& $Backend.Create $role
@@ -35,9 +35,13 @@ function Invoke-PhaseAAccountGate([bool]$Enabled, [hashtable]$Backend, [scriptbl
         $base -is [UnauthorizedAccessException] -or $_.CategoryInfo.Category -eq 'PermissionDenied') { $reason='ACCOUNT_PRIVILEGE_UNAVAILABLE' }
     if ($base -is [ComponentModel.Win32Exception] -and $base.NativeErrorCode -eq 1385) { $reason='ACCOUNT_LOGON_RIGHT_UNAVAILABLE' }
     if ($base.Message -ceq 'ACCOUNT_CLEANUP_FAILED') { $reason='ACCOUNT_CLEANUP_FAILED' }
+    if ($base.Message -ceq 'STAGE2_CHILD_UNCONFIRMED') { $childUnconfirmed=$true; $cleanupFailed=$true }
   } finally {
-    for ($i=$tokens.Count-1; $i -ge 0; $i--) { try { $null=& $Backend.Close $tokens[$i] } catch { $cleanupFailed=$true } }
-    for ($i=$accounts.Count-1; $i -ge 0; $i--) { try { $null=& $Backend.Remove $accounts[$i] } catch { $cleanupFailed=$true } }
+    if ($childUnconfirmed) { $script:PhaseAUnconfirmedResources=@{ tokens=$tokens; accounts=$accounts } }
+    if (-not $childUnconfirmed) {
+      for ($i=$tokens.Count-1; $i -ge 0; $i--) { try { $null=& $Backend.Close $tokens[$i] } catch { $cleanupFailed=$true } }
+      for ($i=$accounts.Count-1; $i -ge 0; $i--) { try { $null=& $Backend.Remove $accounts[$i] } catch { $cleanupFailed=$true } }
+    }
   }
   if ($cleanupFailed) { return 'ACCOUNT_CLEANUP_FAILED' }
   return $reason

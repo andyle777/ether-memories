@@ -24,6 +24,8 @@ public sealed class EtherPhaseAAtomic : IDisposable {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr process, uint code);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
   readonly IntPtr job; IntPtr process, thread;
   public int Pid { get; private set; }
@@ -37,7 +39,11 @@ public sealed class EtherPhaseAAtomic : IDisposable {
     } finally { if(token!=IntPtr.Zero) CloseHandle(token); }
   }
   public static EtherPhaseAAtomic CreateWithToken(IntPtr token, IntPtr job, string app, string command) {
+    return CreateWithTokenInDirectory(token,job,app,command,System.IO.Path.GetTempPath());
+  }
+  public static EtherPhaseAAtomic CreateWithTokenInDirectory(IntPtr token, IntPtr job, string app, string command, string tempPath) {
     if (token == IntPtr.Zero || job == IntPtr.Zero || String.IsNullOrEmpty(app) || String.IsNullOrEmpty(command)) throw new ArgumentException();
+    if (String.IsNullOrWhiteSpace(tempPath) || tempPath.IndexOf('\0')>=0 || tempPath.IndexOf('=')>=0) throw new ArgumentException();
     IntPtr list=IntPtr.Zero, value=IntPtr.Zero, env=IntPtr.Zero, size=IntPtr.Zero;
     bool initialized=false;
     try {
@@ -50,12 +56,12 @@ public sealed class EtherPhaseAAtomic : IDisposable {
       string windows=Environment.GetFolderPath(Environment.SpecialFolder.Windows);
       if (String.IsNullOrEmpty(windows)) throw new InvalidOperationException("Windows directory unavailable");
       string system=System.IO.Path.Combine(windows,"System32");
-      string temp=System.IO.Path.GetTempPath().TrimEnd('\\');
+      string temp=System.IO.Path.GetFullPath(tempPath).TrimEnd('\\');
       string environment="PATH=" + system + "\0SystemRoot=" + windows + "\0TEMP=" + temp + "\0TMP=" + temp + "\0WINDIR=" + windows + "\0\0";
       byte[] envBytes=Encoding.Unicode.GetBytes(environment);
       env=Marshal.AllocHGlobal(envBytes.Length); Marshal.Copy(envBytes,0,env,envBytes.Length);
       ProcessInfo info;
-      Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,null,ref start,out info));
+      Require(CreateProcessAsUserW(token,app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x00080404,env,temp,ref start,out info));
       return new EtherPhaseAAtomic(job,info);
     } finally {
       if(initialized) DeleteProcThreadAttributeList(list);
@@ -68,7 +74,14 @@ public sealed class EtherPhaseAAtomic : IDisposable {
   public void Resume() { if (!InJob()) throw new InvalidOperationException("Child is not in job"); if (ResumeThread(thread)==0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); }
   public bool Wait(uint ms) { uint r=WaitForSingleObject(process,ms); if(r==0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); return r==0; }
   public bool Exited() { return Wait(0); }
-  public void Dispose() { if(thread!=IntPtr.Zero) { CloseHandle(thread); thread=IntPtr.Zero; } if(process!=IntPtr.Zero) { CloseHandle(process); process=IntPtr.Zero; } }
+  public int ExitCode() { uint code; Require(GetExitCodeProcess(process,out code)); if (code==259) throw new InvalidOperationException("Process is still active"); return unchecked((int)code); }
+  public void Terminate() { Require(TerminateProcess(process,1)); }
+  public void Dispose() {
+    int error=0;
+    if(thread!=IntPtr.Zero) { if(!CloseHandle(thread)) error=Marshal.GetLastWin32Error(); thread=IntPtr.Zero; }
+    if(process!=IntPtr.Zero) { if(!CloseHandle(process) && error==0) error=Marshal.GetLastWin32Error(); process=IntPtr.Zero; }
+    if(error!=0) throw new Win32Exception(error);
+  }
 }
 '@
 }

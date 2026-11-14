@@ -13,15 +13,18 @@ The scripts contain actor, process-token, job-object, validation and reporting
 building blocks, plus offline tests. After preflight, the manager can explicitly
 opt into the Stage 1 account lifecycle with `-EnableAccountStage`; the workflow
 does not enable it. This switch is an operational guard, not machine attestation.
-The account lifecycle is untested with real accounts. The manager does not yet
-launch or bind alternate-credential actors, configure or inspect NTFS DACLs,
+The account lifecycle is untested with real accounts. A separate
+`-EnableActorStage` switch additionally enables the Stage 2 launch callback;
+it requires `-EnableAccountStage`, and neither switch appears in the workflow.
+The alternate-token launch and its private actor scratch-directory access have
+not been executed with real accounts. The manager does not yet configure or inspect protected-store DACLs,
 compare protected inventories, run the required access controls, or perform
 full experiment resource cleanup. The observed local job-object test begins after
 assignment and does not prove safe containment between process creation and
 assignment. A separate same-identity probe uses CreateProcessAsUserW with a
 primary token, STARTUPINFOEX, a job-list attribute and suspended start; local
 tests verify job membership before resume and child termination on supervisor
-death. The probe is not the manager's launcher and alternate-token behavior,
+death. The manager reuses that launcher; alternate-token behavior,
 privileges and hosted nested-job support remain unverified. The probe passes a
 minimal explicit environment; it is not ready for hosted execution. Tests
 using a single identity or test doubles are not enforcement
@@ -56,6 +59,13 @@ powershell.exe -NoProfile -NonInteractive -File scripts/t3-phase-a/PhaseA.Job.Te
 powershell.exe -NoProfile -NonInteractive -File scripts/t3-phase-a/PhaseA.Supervisor.Tests.ps1
 powershell.exe -NoProfile -NonInteractive -File scripts/t3-phase-a/PhaseA.Entry.Tests.ps1
 ```
+
+Stage 2 uses temporary per-actor scratch directories for handshake files. Their
+ACLs are process plumbing, not protected-store enforcement evidence. If the
+manager cannot confirm child termination, it avoids explicitly closing the
+account tokens or removing the accounts and reports a cleanup failure. Forced
+termination may still close process handles and leave accounts behind on the
+disposable VM. Stage 2 never makes the overall Phase A status GREEN.
 
 The hosted experiment cannot establish production integration, old-writer
 exclusion, HEAD v2, read authorization, pending-data visibility, delayed I/O

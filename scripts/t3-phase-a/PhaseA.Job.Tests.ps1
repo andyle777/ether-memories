@@ -12,6 +12,9 @@ try {
   $exe = Join-Path $PSHOME 'powershell.exe'
   $atomic = [EtherPhaseAAtomic]::CreateCurrentUser($atomicJob, $exe, ('"' + $exe + '" -NoProfile -NonInteractive -EncodedCommand ' + $encoded))
   if (-not $atomic.InJob()) { throw 'Atomic child was not assigned during creation' }
+  $runningRejected=$false
+  try { $null=$atomic.ExitCode() } catch { $runningRejected=$true }
+  if (-not $runningRejected) { throw 'Running child exit code was accepted' }
   $osObservation = Get-PhaseAProcessToken (Get-Process -Id $atomic.Pid -ErrorAction Stop)
   if ($osObservation.pid -ne $atomic.Pid -or $osObservation.sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -or
       [string]::IsNullOrWhiteSpace($osObservation.createdAt)) { throw 'Atomic child OS token observation failed' }
@@ -32,6 +35,7 @@ try {
   if ([IO.File]::ReadAllText($marker) -cne 'clean') { throw 'Parent environment leaked into child' }
   [EtherPhaseAJob]::Close($atomicJob); $atomicJob = [IntPtr]::Zero
   if (-not $atomic.Wait(10000)) { throw 'Atomic job child survived job close' }
+  if ($atomic.ExitCode() -eq 259) { throw 'Terminated child reported as active' }
   Write-Output 'PASS atomic job assignment, suspended start, resume and kill-on-close'
 } finally {
   [Environment]::SetEnvironmentVariable('PHASE_A_PRIVATE_SENTINEL', $previousSentinel, 'Process')

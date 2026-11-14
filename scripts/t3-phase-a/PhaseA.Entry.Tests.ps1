@@ -2,6 +2,22 @@
 $base=[IO.Path]::GetTempPath()
 $reports=@()
 . "$PSScriptRoot/PhaseA.Accounts.ps1"
+. "$PSScriptRoot/PhaseA.Stage2.ps1"
+$script:stage2seen=New-Object 'System.Collections.Generic.List[string]'
+$stage2fake=@{ Run={ param($account,$token) $script:stage2seen.Add("$($account.role):$($token.handle)"); @{ expectedSid=$account.sid; observedSid=$account.sid; reportedSid=$account.sid; expectedPid=123; reportedPid=123; tokenNonAdmin=$true; tokenObserved=$true; createdAt='2026-01-01T00:00:00Z'; observedCreatedAt='2026-01-01T00:00:00Z'; expectedNonce='nonce'; reportedNonce='nonce'; exitCode=0; outcome='allowed'; role=$account.role; contained=$true; terminated=$true } } }
+$ac=@(@{role='broker';sid='S-1-5-21-1'},@{role='legacy';sid='S-1-5-21-2'})
+$tk=@(@{handle='broker';sid='S-1-5-21-1'},@{handle='legacy';sid='S-1-5-21-2'})
+if ((Invoke-PhaseAStage2 $ac $tk $stage2fake) -cne 'STAGE2_COMPLETE' -or ($script:stage2seen -join ',') -cne 'broker:broker,legacy:legacy') { throw 'Stage 2 token binding failed' }
+$wrong=$stage2fake.Clone(); $wrong.Run={ param($account,$token) @{ role=$account.role; expectedSid=$account.sid; observedSid='S-1-5-21-9'; reportedSid=$account.sid; expectedPid=123; reportedPid=123; tokenNonAdmin=$true; tokenObserved=$true; createdAt='2026-01-01T00:00:00Z'; observedCreatedAt='2026-01-01T00:00:00Z'; expectedNonce='nonce'; reportedNonce='nonce'; exitCode=0; outcome='allowed'; contained=$true; terminated=$true } }
+if ((Invoke-PhaseAStage2 $ac $tk $wrong) -cne 'STAGE2_OBSERVATION_REJECTED') { throw 'Stage 2 wrong SID accepted' }
+$script:stage2mutation=''
+foreach ($field in @('reportedPid','reportedSid','createdAt','contained')) {
+  $script:stage2mutation=$field
+  $badStage=$stage2fake.Clone()
+  $badStage.Run={ param($a,$t) $v=@{ expectedSid=$a.sid; observedSid=$a.sid; reportedSid=$a.sid; expectedPid=123; reportedPid=123; tokenNonAdmin=$true; tokenObserved=$true; createdAt='2026-01-01T00:00:00Z'; observedCreatedAt='2026-01-01T00:00:00Z'; expectedNonce='nonce'; reportedNonce='nonce'; exitCode=0; outcome='allowed'; role=$a.role; contained=$true; terminated=$true }; switch ($script:stage2mutation) { 'reportedPid' { $v.reportedPid=124 } 'reportedSid' { $v.reportedSid='S-1-5-21-9' } 'createdAt' { $v.createdAt='2026-01-01T00:00:01Z' } 'contained' { $v.contained=$false } 'terminated' { $v.terminated=$false } }; $v }
+  if ((Invoke-PhaseAStage2 $ac $tk $badStage) -cne 'STAGE2_OBSERVATION_REJECTED') { throw "Stage 2 accepted invalid $field" }
+}
+Write-Output 'PASS injected Stage 2 token binding and SID rejection'
 $script:events=New-Object 'System.Collections.Generic.List[string]'
 $script:seq=0
 $fake=@{
@@ -10,6 +26,35 @@ $fake=@{
  Close={ param($token) $script:events.Add("close:$($token.handle)") }
  Remove={ param($account) $script:events.Add("remove:$($account.role)") }
 }
+$script:events.Clear(); $script:seq=0; $script:stage2seen.Clear()
+$r=Invoke-PhaseAStages $true $true $fake $stage2fake
+if ($r -cne 'STAGE2_COMPLETE' -or ($script:stage2seen -join ',') -cne 'broker:broker,legacy:legacy' -or -not $script:events.Contains('close:legacy')) { throw 'Stage 1 to Stage 2 integration failed' }
+$script:events.Clear(); $script:seq=0
+$badLaunch=@{Run={ param($a,$t) throw 'STAGE2_TIMEOUT' }}
+$r=Invoke-PhaseAStages $true $true $fake $badLaunch
+if ($r -cne 'STAGE2_TIMEOUT' -or -not $script:events.Contains('close:legacy') -or -not $script:events.Contains('remove:broker')) { throw 'Stage 2 timeout cleanup failed' }
+$script:events.Clear(); $script:seq=0
+$badLaunch=@{Run={ param($a,$t) throw 'synthetic exited process' }}
+$r=Invoke-PhaseAStages $true $true $fake $badLaunch
+if ($r -cne 'STAGE2_LAUNCH_FAILED' -or -not $script:events.Contains('remove:broker')) { throw 'Exited process failure was not handled' }
+$script:events.Clear(); $script:seq=0
+$badLaunch=@{Run={ param($a,$t) return $null }}
+$r=Invoke-PhaseAStages $true $true $fake $badLaunch
+if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('remove:broker')) { throw 'Missing observation did not fail closed' }
+$script:events.Clear(); $script:seq=0
+$badLaunch=@{Run={ param($a,$t) throw 'STAGE2_CLEANUP_FAILED' }}
+$r=Invoke-PhaseAStages $true $true $fake $badLaunch
+if ($r -cne 'STAGE2_CLEANUP_FAILED' -or -not $script:events.Contains('remove:broker')) { throw 'Stage 2 cleanup failure was not reported' }
+$script:events.Clear(); $script:seq=0
+$badLaunch=@{Run={ param($a,$t) throw 'STAGE2_CHILD_UNCONFIRMED' }}
+$r=Invoke-PhaseAStages $true $true $fake $badLaunch
+if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('close:broker') -or $script:events.Contains('remove:broker')) { throw 'Stage 2 unconfirmed child cleanup policy failed' }
+$script:events.Clear(); $script:seq=0
+if ((Invoke-PhaseAStages $false $true $fake $stage2fake) -cne 'STAGE2_GUARD_REJECTED' -or $script:events.Count -ne 0) { throw 'Stage 2 guard failed' }
+$script:events.Clear(); $script:seq=0
+$r=Invoke-PhaseAAccountGate $true $fake { throw 'STAGE2_CHILD_UNCONFIRMED' }
+if ($r -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('close:broker') -or $script:events.Contains('remove:broker')) { throw 'Unconfirmed child triggered unsafe cleanup' }
+$script:events.Clear(); $script:seq=0
 $r=Invoke-PhaseAAccountGate $false $fake { throw 'should not be invoked' }
 if ($r -cne 'LIVE_DISABLED' -or $script:events.Count -ne 0) { throw 'Disabled gate invoked backend' }
 $r=Invoke-PhaseAAccountGate $true $fake { param($accounts,$tokens) if ($accounts.Count -ne 2 -or $tokens.Count -ne 2) { throw 'missing accounts' } }

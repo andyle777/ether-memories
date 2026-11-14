@@ -17,6 +17,7 @@ public static class EtherPhaseANative {
         public string sid;
         public bool admin;
         public bool elevated;
+        public bool standard;
         public string createdAt;
     }
     public static TokenRecord Inspect(Process process) {
@@ -27,13 +28,14 @@ public static class EtherPhaseANative {
             int elevation, size;
             if (!GetTokenInformation(token, 20, out elevation, sizeof(int), out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
             using (WindowsIdentity identity = new WindowsIdentity(token)) {
-                bool admin = false;
+                bool admin = false, standard = false;
                 foreach (IdentityReference group in identity.Groups) {
                     if (String.Equals(group.Value, "S-1-5-32-544", StringComparison.Ordinal)) admin = true;
+                    if (String.Equals(group.Value, "S-1-5-32-545", StringComparison.Ordinal)) standard = true;
                 }
                 if (process.HasExited) throw new InvalidOperationException("Process exited");
                 return new TokenRecord { pid=process.Id, sid=identity.User.Value, admin=admin,
-                    elevated=elevation != 0, createdAt=process.StartTime.ToUniversalTime().ToString("o") };
+                    elevated=elevation != 0, standard=standard, createdAt=process.StartTime.ToUniversalTime().ToString("o") };
             }
         } finally { CloseHandle(token); }
     }
