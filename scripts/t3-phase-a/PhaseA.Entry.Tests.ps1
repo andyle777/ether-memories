@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 $base=[IO.Path]::GetTempPath()
 $reports=@()
 . "$PSScriptRoot/PhaseA.Verdict.ps1"
@@ -361,3 +361,44 @@ if($stage -cne 'STAGE3_CASE_FAILED' -or -not $stageResult.ContainsKey('evidence'
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $stageResult.evidence 'SIMULATED_PASS' $operationJournal.ToArray()
 if($v.cases.unauthorizedWrite.state -cne 'FAIL'){throw 'Manager-connected violation did not reach provisional adapter'}
 Write-Output 'PASS Stage 3 manager retains and maps injected write violation'
+if (-not (Get-Command Invoke-PhaseATrustedAccess -ErrorAction SilentlyContinue)) { throw 'Trusted access witness is missing' }
+$wfixture=@{protectedFile='existing';protectedDir='protected';deniedFile='missing';controlFile='control'}
+$wtoken=@{sid='S-1-5-21-2'}
+$wbackend=@{Probe={param($t,$sid,$op,$target) @{impersonated=$true;sid=$sid;operation=$op;attempted=$true;allowed=$false;error=5;reverted=$true;handlesClosed=$true} };Exists={param($p) $p -ceq 'existing' -or $p -ceq 'control'};DirectoryExists={param($p) $true}}
+$w=Invoke-PhaseATrustedAccess $wbackend $wfixture $wtoken 'S-1-5-21-2' 'Read' 'protectedFile' 'INJECTED'
+if ($w.status -cne 'OBSERVED' -or $w.outcome -cne 'ACCESS_DENIED') { throw 'Valid injected witness denied observation rejected' }
+foreach($field in @('sid','impersonated','reverted','handlesClosed','error')) {
+ $script:wfield=$field;$bad=$wbackend.Clone();$bad.Probe={param($t,$sid,$op,$target) $v=@{impersonated=$true;sid=$sid;operation=$op;attempted=$true;allowed=$false;error=5;reverted=$true;handlesClosed=$true};switch($script:wfield){'sid'{$v.sid='S-1-5-21-9'} 'impersonated'{$v.impersonated=$false} 'reverted'{$v.reverted=$false} 'handlesClosed'{$v.handlesClosed=$false} 'error'{$v.error=2}};$v}
+ $v=Invoke-PhaseATrustedAccess $bad $wfixture $wtoken 'S-1-5-21-2' 'Read' 'protectedFile' 'INJECTED'
+ if($v.status -ceq 'OBSERVED'){throw "Invalid witness promoted: $field"}
+}
+Write-Output 'PASS injected trusted witness controls (6)'
+if (-not ('EtherPhaseAAccessWitness' -as [type])) { throw 'Native access witness type is missing' }
+Write-Output 'PASS native witness type compiled without privileged access'
+$script:created3=$false;$script:witnessCalls=0
+$wFixture=$evidenceFixture.Clone()
+$script:probeAuthorized=$false;$script:probeControl=$false
+$wFixture.Setup={param($a) @{protectedFile='existing';protectedDir='protected';controlDir='control-dir';authorizedProbeFile='authorized-probe';controlProbeFile='control-probe';newFile='new';deniedFile='missing';controlFile='control';initialDigest=('a'*64);writeDigest=('b'*64);aclInspected=$true;aclEvidence=@{expected='test';actual='test';protected=$true}}}
+$wFixture.Exists={param($p) if($p -ceq 'authorized-probe'){$script:probeAuthorized}elseif($p -ceq 'control-probe'){$script:probeControl}elseif($p -ceq 'new'){$script:created3}else{$p -ne 'missing' -and -not $p.EndsWith('.renamed')}}
+$wFixture.RemoveProbe={param($f,$id) if($id -ceq 'authorizedProbeFile'){$script:probeAuthorized=$false}else{$script:probeControl=$false}}
+$wFixture.Probe={param($token,$sid,$op,$path,$root) $script:witnessCalls++;$allow=($sid -ceq 'S-1-5-21-1' -or $path -cin @('control','control-probe'));if($allow -and $op -ceq 'Create'){if($path -ceq 'authorized-probe'){$script:probeAuthorized=$true}else{$script:probeControl=$true}};@{impersonated=$true;sid=$sid;operation=$op;attempted=$true;allowed=$allow;error=$(if($allow){0}else{5});reverted=$true;handlesClosed=$true}}
+$wResult=Invoke-PhaseAStage3 $accounts3 $tokens3 $wFixture $evidenceActors
+if(-not $wResult.evidence.ContainsKey('witnessControls') -or -not $wResult.evidence.unauthorizedRead.ContainsKey('witness') -or $script:witnessCalls -lt 5){throw 'Manager did not run trusted access controls and witnesses'}
+Write-Output 'PASS manager-connected injected witness sequence'
+if (-not $wResult.evidence.witnessControls.ContainsKey('authorizedWrite') -or -not $wResult.evidence.witnessControls.ContainsKey('permissiveCreate')) { throw 'Operation-specific witness controls are missing' }
+Write-Output 'PASS operation-specific trusted witness controls present'
+
+$badNative=$wbackend.Clone();$badNative.Probe={param($t,$s,$o,$p,$r) @{impersonated=$true;sid=$s;operation=$o;attempted=$true;allowed=$false;error=2;reverted=$true;handlesClosed=$true}}
+$nativeFixture=@{protectedFile='existing';protectedDir='protected'}
+$nativeResult=Invoke-PhaseATrustedAccess $badNative $nativeFixture $wtoken 'S-1-5-21-2' 'Read' 'protectedFile' 'INJECTED'
+if($nativeResult.status -cne 'UNVERIFIED' -or $nativeResult.reason -cne 'NATIVE_ERROR' -or $nativeResult.nativeError -ne 2){throw 'File-not-found witness result was not retained as unverified'}
+Write-Output 'PASS native file-not-found preserved as UNVERIFIED'
+$script:seq=0;$script:created3=$false;$script:probeAuthorized=$false;$script:probeControl=$false
+$wFixture.Inventory={param($f) 'b'*64}
+$wActors=$stage3actors.Clone();$script:baseWitnessRun=$stage3actors.Run
+$wActors.Run={param($a,$t,$op,$target) $v=& $script:baseWitnessRun $a $t $op $target;$v.errorCategory=if($v.outcome -ceq 'denied'){'ACCESS_DENIED'}else{'NONE'};$v.errorCode=if($v.outcome -ceq 'denied'){5}else{0};$v}
+$wJournal=New-Object 'System.Collections.Generic.List[object]';$wWrapped=New-PhaseAActorJournalBackend $wActors $wJournal;$wStage=@{}
+$wStatus=Invoke-PhaseAStages $true $true $fake $wWrapped $true $wFixture $wStage
+$wVerdict=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $wVerdict $wStage.evidence 'SIMULATED_PASS' $wJournal.ToArray()
+foreach($key in @('unauthorizedRead','unauthorizedWrite','unauthorizedCreate')) {if($wVerdict.cases[$key].state -cne 'PASS'){throw "Manager witness was not mapped: $key ($wStatus)"}}
+Write-Output 'PASS manager-to-verdict injected witness path (3)'

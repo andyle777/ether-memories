@@ -22,18 +22,18 @@ on trusted run provenance and owner authorization for a final verdict.
 | actorSidBinding | Stage 2 journal compares account, process-token and actor SIDs. | Connected |
 | jobContainment | The manager duplicates the supervisor-owned reported job with query access, independently inspects child membership and excludes a job containing the supervisor, checks limits and releases the duplicate. Success records are rechecked by the verdict adapter; verified failure mapping is incomplete. | Partial |
 | supervisorTermination | Hosted supervisor tests termination; independent per-control proof is not retained. | Missing |
-| jobClosure | Hosted supervisor tests closure; independent per-control proof is not retained. | Missing |
+| jobClosure | Correlated supervisor receipt and independently observed process outcomes; bounded ownership acceptance and failure coverage remain incomplete. | Partial |
 | childTermination | Hosted supervisor observes the child; independent per-control proof is not retained. | Missing |
 | alternateTimeout | Hosted supervisor tests timeout; independent per-control proof is not retained. | Missing |
 | ntfsVolume | Stage 3 setup checks volume type; independent proof is not retained. | Missing |
 | aclEstablishment | Stage 3 fixture ACL setup; independently checkable ACL record is not retained. | Missing |
-| aclInspection | Stage 3 inspects the fixture ACL; independently checkable inspection is not retained. | Missing |
+| aclInspection | Manager reads and rechecks the fixture ACL; failure proof remains incomplete. | Partial |
 | authorizedRead | Stage 3 executes actor read; file identity and independent content proof are not retained. | Missing |
 | authorizedCreate | Stage 3 executes actor create; independent target/inventory proof is not retained. | Missing |
 | authorizedReadback | Stage 3 checks actor readback; independent content proof is not retained. | Missing |
-| unauthorizedRead | Stage 3 checks denial; native error classification and independent target proof are not retained. | Missing |
-| unauthorizedWrite | Stage 3 checks denial; native error classification and independent target proof are not retained. | Missing |
-| unauthorizedCreate | Stage 3 checks denial and target; native error and independent inventory proof are not retained. | Missing |
+| unauthorizedRead | Actor report plus separate trusted read-open, positive controls, ACL and inventory; direct proof of actor request remains unresolved. | Partial |
+| unauthorizedWrite | Actor report plus separate trusted write-open, positive controls, ACL and content inventory; direct proof of actor request remains unresolved. | Partial |
+| unauthorizedCreate | Actor report plus separate trusted create, positive controls, ACL and inventory; direct proof of actor request remains unresolved. | Partial |
 | protectedInventory | Stage 3 compares inventory; independently checkable before/after records are not retained. | Missing |
 | insecureAclControl | Stage 3 checks an intentionally permissive fixture; independent ACL and operation proofs are not retained. | Missing |
 | processCleanup | Launcher and supervisor close jobs and handles; complete independent cleanup proof is not retained. | Missing |
@@ -56,7 +56,7 @@ The provisional adapter now retains verified membership and limit failures and a
 
 The supervisor now writes a bounded receipt of its actual inner-job CloseHandle attempt. The manager correlates the receipt nonce, mode, supervisor and child PID and creation times with its independent observations before retaining it. jobClosure success requires that correlated successful receipt plus the existing independent waits and cleanup. A reported close failure is setup failure; missing or mismatched receipts remain unverified. The originating receipt is supervisor-generated and is not itself independent proof of global last-handle closure. The proposed acceptance clarification remains unadopted.
 
-Stage 3 slice: aclInspection retains the expected and independently read ACL
+Earlier Stage 3 slice (superseded by the witness update below): aclInspection retains the expected and independently read ACL
 for success-only rechecking. unauthorizedRead, unauthorizedWrite and
 unauthorizedCreate retain actor identity, categorized result, before/after
 existence and inventory, and cleanup observations. The adapter can preserve a
@@ -67,3 +67,26 @@ result alone does not independently establish that access occurred. ACL failure
 records, independent denial corroboration, read violations, and full end-to-end
 cleanup proof remain incomplete. Synthetic controls do not establish hosted
 NTFS behavior.
+
+
+Independent access witness (provisional): `unauthorizedRead`,
+`unauthorizedWrite` and `unauthorizedCreate` use a manager-owned, separate
+`CreateFileW` attempt while the dedicated native thread impersonates the
+existing legacy token. The thread verifies the effective SID, captures the
+Win32 result, closes its handles, reverts, and verifies the thread token is
+absent. Authorized and permissive fixtures are checked for each access type;
+create probes are removed and their absence checked. The manager checks the
+protected ACL and before/after inventory. Write probes request write access
+without writing to the original file. File sharing is enabled, and the
+authorized write-open control helps detect read-only or sharing interference.
+
+This is independent OS evidence of a separate access attempt, not proof
+that the actor performed its reported request. If direct proof of the actor's
+denied attempt is mandatory, an independently correlated Windows security
+audit event could supply it, subject to separately authorized audit settings,
+event availability and correlation design. This contract question remains
+unresolved. Injected controls are SIMULATED_PASS only. Cross-identity NTFS
+behavior and real impersonation are UNVERIFIED until authorized hosted runs.
+Setup, context restoration, unrelated native errors and cleanup failures fail
+closed. The worker join has no timeout; an indefinitely stalled filesystem
+operation can block the manager and is a remaining source limitation.

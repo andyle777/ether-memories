@@ -67,7 +67,7 @@ function New-PhaseAEvidenceVerifier($Journal,$BoundRecord,[string]$RunAttempt,[b
       if ([string]::IsNullOrEmpty($boundAudience) -or (Get-PhaseAEvidenceAudience $candidate $RunAttempt) -cne $boundAudience) { return $false }
       if ($kind -ceq 'authorization') { return ($ProvenanceVerified -and $LiveAuthorized) }
       if ($kind -ceq 'workflow_provenance') { return $ProvenanceVerified }
-      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure','aclInspection','unauthorizedWrite','unauthorizedCreate')) { return $false }
+      if ($kind -cnotin @('identityDistinct','brokerNonAdmin','legacyNonAdmin','brokerActorBinding','legacyActorBinding','actorPidBinding','actorCreationTimeBinding','actorSidBinding','brokerPrimaryToken','legacyPrimaryToken','jobContainment','jobClosure','aclInspection','unauthorizedRead','unauthorizedWrite','unauthorizedCreate')) { return $false }
       $fresh=New-PhaseAManagerVerdictInput $candidate.commit $candidate.runId
       Add-PhaseAActorEvidence $fresh $items $EvidenceClass
       Add-PhaseAPrimaryTokenEvidence $fresh $TokenJournal $items $EvidenceClass
@@ -201,6 +201,63 @@ function Add-PhaseAInnerJobEvidence($VerdictInput,$HostedJournal,$ActorJournal,[
     if ($probes.Count -ne 1) { return }
     $probe=$probes[0]; $probeObs=$probe.observation
     if ($probe.accountSid -cne $probe.tokenSid -or $probeObs.expectedSid -cne $probe.accountSid -or $probeObs.contained -isnot [bool] -or -not $probeObs.contained -or $probeObs.terminated -isnot [bool] -or -not $probeObs.terminated -or -not (Test-ActorObservation $probeObs 'legacy' 'allowed')) { return }
+    if ($Evidence.ContainsKey('unauthorizedRead') -and $Evidence.ContainsKey('witnessControls') -and $Evidence.ContainsKey('aclInspection')) {
+      $entry=$Evidence.unauthorizedRead; $controls=$Evidence.witnessControls; $acl=$Evidence.aclInspection
+      $brokers=@($ActorJournal | Where-Object { $_.role -ceq 'broker' -and $_.operation -ceq 'probe' })
+      if ($entry -is [hashtable] -and $controls -is [hashtable] -and $acl -is [hashtable] -and $brokers.Count -eq 1) {
+        $broker=$brokers[0]; $bo=$broker.observation; $o=$entry.observation; $w=$entry.witness
+        $source=if ($EvidenceClass -ceq 'LIVE_OBSERVED') {'LIVE'} else {'INJECTED'}
+        $validBroker=($broker.accountSid -ceq $broker.tokenSid -and $broker.accountSid -cne $probe.accountSid -and $bo.expectedSid -ceq $broker.accountSid -and $bo.contained -is [bool] -and $bo.contained -and $bo.terminated -is [bool] -and $bo.terminated -and (Test-ActorObservation $bo 'broker' 'allowed'))
+        $validAcl=($acl.protected -is [bool] -and $acl.protected -and $acl.expected -is [string] -and $acl.expected.Length -gt 0 -and $acl.expected -ceq $acl.actual)
+        $goodControls=$true
+        foreach ($spec in @(@('authorizedRead',$broker.accountSid,'protectedFile'),@('permissiveRead',$probe.accountSid,'controlFile'))) {
+          if (-not $controls.ContainsKey($spec[0])) { $goodControls=$false; break }
+          $c=$controls[$spec[0]]
+          if ($c -isnot [hashtable] -or $c.status -cne 'OBSERVED' -or $c.reason -cne 'NONE' -or $c.evidence -cne $source -or $c.sid -cne $spec[1] -or $c.operation -cne 'Read' -or $c.target -cne $spec[2] -or $c.outcome -cne 'ALLOWED' -or $c.nativeError -isnot [int] -or $c.nativeError -ne 0 -or $c.reverted -isnot [bool] -or -not $c.reverted -or $c.handlesClosed -isnot [bool] -or -not $c.handlesClosed) { $goodControls=$false; break }
+        }
+        $goodWitness=($w -is [hashtable] -and $w.status -ceq 'OBSERVED' -and $w.reason -ceq 'NONE' -and $w.evidence -ceq $source -and $w.sid -ceq $probe.accountSid -and $w.operation -ceq 'Read' -and $w.target -ceq 'protectedFile' -and $w.nativeError -is [int] -and (($w.outcome -ceq 'ACCESS_DENIED' -and $w.nativeError -eq 5) -or ($w.outcome -ceq 'ALLOWED' -and $w.nativeError -eq 0)) -and $w.reverted -is [bool] -and $w.reverted -and $w.handlesClosed -is [bool] -and $w.handlesClosed)
+        $goodActor=($o -is [hashtable] -and $o.errorCategory -ceq 'ACCESS_DENIED' -and $o.errorCode -is [int] -and $o.errorCode -eq 5 -and $o.expectedSid -ceq $probe.accountSid -and $o.contained -is [bool] -and $o.contained -and $o.terminated -is [bool] -and $o.terminated -and (Test-ActorObservation $o 'legacy' 'denied'))
+        $goodResource=($entry.control -ceq 'unauthorizedRead' -and $entry.operation -ceq 'Read' -and $entry.target -ceq 'protectedFile' -and $entry.accountSid -ceq $probe.accountSid -and $entry.tokenSid -ceq $probe.accountSid -and $entry.beforeExists -is [bool] -and $entry.beforeExists -and $entry.parentExists -is [bool] -and $entry.parentExists -and $entry.afterExists -is [bool] -and $entry.afterExists -and $entry.beforeInventory -cmatch '^[0-9a-f]{64}$' -and $entry.beforeInventory -ceq $entry.afterInventory -and $entry.beforeDigest -cmatch '^[0-9a-f]{64}$')
+        if ($validBroker -and $validAcl -and $goodControls -and $goodWitness -and $goodActor -and $goodResource -and $VerdictInput.cases.unauthorizedRead.state -ceq 'NOT_RUN') {
+          $state=if($w.outcome -ceq 'ALLOWED'){'FAIL'}elseif($Evidence.cleanupVerified){'PASS'}else{'NOT_RUN'}
+          if ($state -cne 'NOT_RUN') {
+            $reason=if($state -ceq 'FAIL'){'VIOLATION'}else{'NONE'}
+            $canonical=[ordered]@{control='unauthorizedRead';brokerSid=$broker.accountSid;legacySid=$probe.accountSid;pid=$o.expectedPid;createdAt=$o.observedCreatedAt;nonce=$o.expectedNonce;actorOutcome=$o.outcome;actorError=$o.errorCode;witnessOutcome=$w.outcome;witnessError=$w.nativeError;authorized=$controls.authorizedRead.outcome;permissive=$controls.permissiveRead.outcome;inventory=$entry.beforeInventory;digest=$entry.beforeDigest;acl=$acl.actual;cleanup=$Evidence.cleanupVerified;state=$state}
+            $sha=[Security.Cryptography.SHA256]::Create(); try {$json=ConvertTo-Json -Compress -InputObject $canonical;$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()} finally {$sha.Dispose()}
+            $VerdictInput.cases.unauthorizedRead=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$hash}
+          }
+        }
+      }
+    }
+    if ($Evidence.ContainsKey('witnessControls') -and $Evidence.ContainsKey('aclInspection')) {
+      $controls=$Evidence.witnessControls; $acl=$Evidence.aclInspection
+      $brokers=@($ActorJournal | Where-Object { $_.role -ceq 'broker' -and $_.operation -ceq 'probe' })
+      if ($controls -is [hashtable] -and $acl -is [hashtable] -and $brokers.Count -eq 1) {
+        $broker=$brokers[0];$bo=$broker.observation;$source=if($EvidenceClass -ceq 'LIVE_OBSERVED'){'LIVE'}else{'INJECTED'}
+        $baseOk=($acl.protected -is [bool] -and $acl.protected -and $acl.expected -is [string] -and $acl.expected.Length -gt 0 -and $acl.expected -ceq $acl.actual -and $broker.accountSid -ceq $broker.tokenSid -and $broker.accountSid -cne $probe.accountSid -and $bo.expectedSid -ceq $broker.accountSid -and $bo.contained -is [bool] -and $bo.contained -and $bo.terminated -is [bool] -and $bo.terminated -and (Test-ActorObservation $bo 'broker' 'allowed'))
+        foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile','authorizedWrite','permissiveWrite','protectedFile','controlFile'),@('unauthorizedCreate','Create','deniedFile','authorizedCreate','permissiveCreate','authorizedProbeFile','controlProbeFile'))) {
+          $key=$spec[0];if(-not $baseOk -or -not $Evidence.ContainsKey($key) -or -not $controls.ContainsKey($spec[3]) -or -not $controls.ContainsKey($spec[4])){continue}
+          $entry=$Evidence[$key];if($entry -isnot [hashtable] -or $entry.control -cne $key -or $entry.operation -cne $spec[1] -or $entry.target -cne $spec[2] -or $entry.accountSid -cne $probe.accountSid -or $entry.tokenSid -cne $probe.accountSid -or $entry.beforeExists -isnot [bool] -or $entry.parentExists -isnot [bool] -or -not $entry.parentExists -or $entry.afterExists -isnot [bool] -or $entry.beforeInventory -cnotmatch '^[0-9a-f]{64}$' -or $entry.afterInventory -cnotmatch '^[0-9a-f]{64}$'){continue}
+          if (($key -ceq 'unauthorizedWrite' -and -not $entry.beforeExists) -or ($key -ceq 'unauthorizedCreate' -and $entry.beforeExists)){continue}
+          $controlsOk=$true
+          foreach($cs in @(@($spec[3],$broker.accountSid,$spec[5]),@($spec[4],$probe.accountSid,$spec[6]))) {
+            $c=$controls[$cs[0]]
+            if($c -isnot [hashtable] -or $c.status -cne 'OBSERVED' -or $c.reason -cne 'NONE' -or $c.evidence -cne $source -or $c.sid -cne $cs[1] -or $c.operation -cne $spec[1] -or $c.target -cne $cs[2] -or $c.outcome -cne 'ALLOWED' -or $c.nativeError -isnot [int] -or $c.nativeError -ne 0 -or $c.reverted -isnot [bool] -or -not $c.reverted -or $c.handlesClosed -isnot [bool] -or -not $c.handlesClosed -or ($spec[1] -ceq 'Create' -and ($c.removed -isnot [bool] -or -not $c.removed))) {$controlsOk=$false;break}
+          }
+          if(-not $controlsOk){continue}
+          $o=$entry.observation;$w=$entry.witness
+          if($o -isnot [hashtable] -or $o.expectedSid -cne $probe.accountSid -or $o.errorCategory -cne 'ACCESS_DENIED' -or $o.errorCode -isnot [int] -or $o.errorCode -ne 5 -or $o.contained -isnot [bool] -or -not $o.contained -or $o.terminated -isnot [bool] -or -not $o.terminated -or -not (Test-ActorObservation $o 'legacy' 'denied')){continue}
+          if($w -isnot [hashtable] -or $w.status -cne 'OBSERVED' -or $w.reason -cne 'NONE' -or $w.evidence -cne $source -or $w.sid -cne $probe.accountSid -or $w.operation -cne $spec[1] -or $w.target -cne $spec[2] -or $w.reverted -isnot [bool] -or -not $w.reverted -or $w.handlesClosed -isnot [bool] -or -not $w.handlesClosed -or $w.nativeError -isnot [int]){continue}
+          $state='NOT_RUN';$reason='NOT_RUN'
+          if($w.outcome -ceq 'ACCESS_DENIED' -and $w.nativeError -eq 5 -and $Evidence.cleanupVerified -and $entry.beforeInventory -ceq $entry.afterInventory -and $entry.afterExists -eq $entry.beforeExists){$state='PASS';$reason='NONE'}
+          elseif($w.outcome -ceq 'ALLOWED' -and $w.nativeError -eq 0 -and ($key -cne 'unauthorizedCreate' -or ($entry.afterExists -and $entry.beforeInventory -cne $entry.afterInventory))){$state='FAIL';$reason='VIOLATION'}
+          if($state -ceq 'NOT_RUN' -or $VerdictInput.cases[$key].state -cne 'NOT_RUN'){continue}
+          $canonical=[ordered]@{control=$key;operation=$entry.operation;target=$entry.target;brokerSid=$broker.accountSid;legacySid=$probe.accountSid;pid=$o.expectedPid;createdAt=$o.observedCreatedAt;nonce=$o.expectedNonce;actorOutcome=$o.outcome;actorError=$o.errorCode;witnessOutcome=$w.outcome;witnessError=$w.nativeError;beforeExists=$entry.beforeExists;afterExists=$entry.afterExists;beforeInventory=$entry.beforeInventory;afterInventory=$entry.afterInventory;acl=$acl.actual;cleanup=$Evidence.cleanupVerified;state=$state}
+          $sha=[Security.Cryptography.SHA256]::Create();try{$json=ConvertTo-Json -Compress -InputObject $canonical;$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+          $VerdictInput.cases[$key]=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$hash}
+        }
+      }
+    }
     foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile'),@('unauthorizedCreate','Create','deniedFile'))) {
       $key=$spec[0];if(-not $Evidence.ContainsKey($key)){continue};$entry=$Evidence[$key];if($entry -isnot [hashtable] -or $entry.control -cne $key -or $entry.operation -cne $spec[1] -or $entry.target -cne $spec[2] -or $entry.accountSid -cne $entry.tokenSid -or $entry.accountSid -cne $probe.accountSid -or $entry.parentExists -isnot [bool] -or -not $entry.parentExists -or $entry.beforeExists -isnot [bool] -or $entry.afterExists -isnot [bool] -or -not $entry.afterExists -or $entry.beforeInventory -cnotmatch '^[0-9a-f]{64}$' -or $entry.afterInventory -cnotmatch '^[0-9a-f]{64}$' -or $entry.beforeInventory -ceq $entry.afterInventory){continue}
       if (($key -ceq 'unauthorizedWrite' -and -not $entry.beforeExists) -or ($key -ceq 'unauthorizedCreate' -and $entry.beforeExists)){continue}

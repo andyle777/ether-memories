@@ -467,3 +467,49 @@ foreach($field in @('parentExists','beforeExists','afterExists','afterInventory'
  if($v.cases.unauthorizedWrite.state -cne 'NOT_RUN'){throw "Incomplete Stage 3 observation accepted: $field"}
 }
 Write-Output 'PASS Stage 3 missing resource, inventory and error-category controls (5)'
+$readRecord=$denied.Clone();$readRecord.beforeInventory=('b'*64);$readRecord.afterInventory=('b'*64);$readRecord.observation=$denied.observation.Clone();$readRecord.observation.errorCode=5
+$readRecord.witness=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid='S-1-5-21-2';operation='Read';target='protectedFile';outcome='ACCESS_DENIED';nativeError=5;reverted=$true;handlesClosed=$true}
+$wControls=@{authorizedRead=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid='S-1-5-21-1';operation='Read';target='protectedFile';outcome='ALLOWED';nativeError=0;reverted=$true;handlesClosed=$true};permissiveRead=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid='S-1-5-21-2';operation='Read';target='controlFile';outcome='ALLOWED';nativeError=0;reverted=$true;handlesClosed=$true}}
+$readEvidence=@{cleanupVerified=$true;aclInspection=@{expected='D:P(A;;FA;;;SY)';actual='D:P(A;;FA;;;SY)';protected=$true};witnessControls=$wControls;unauthorizedRead=$readRecord}
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $readEvidence 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'PASS'){throw 'Corroborated read witness not mapped'}
+$bad=$readEvidence.Clone();$bad.witnessControls=$wControls.Clone();$bad.witnessControls.permissiveRead=$wControls.permissiveRead.Clone();$bad.witnessControls.permissiveRead.outcome='ACCESS_DENIED'
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $bad 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'Failed permissive control promoted'}
+Write-Output 'PASS trusted read witness adapter and permissive negative control'
+$moreControls=$wControls.Clone()
+foreach($spec in @(@('authorizedWrite','S-1-5-21-1','Overwrite','protectedFile'),@('permissiveWrite','S-1-5-21-2','Overwrite','controlFile'),@('authorizedCreate','S-1-5-21-1','Create','authorizedProbeFile'),@('permissiveCreate','S-1-5-21-2','Create','controlProbeFile'))) {
+ $c=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid=$spec[1];operation=$spec[2];target=$spec[3];outcome='ALLOWED';nativeError=0;reverted=$true;handlesClosed=$true};if($spec[2] -ceq 'Create'){$c.removed=$true};$moreControls[$spec[0]]=$c
+}
+foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile',6,$true),@('unauthorizedCreate','Create','deniedFile',7,$false))) {
+ $record=$entry.Clone();$record.control=$spec[0];$record.operation=$spec[1];$record.target=$spec[2];$record.beforeExists=$spec[4];$record.afterExists=$spec[4];$record.afterInventory=$record.beforeInventory;$record.observation=$journal[$spec[3]].observation.Clone();$record.observation.errorCategory='ACCESS_DENIED';$record.observation.errorCode=5
+ $record.witness=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid='S-1-5-21-2';operation=$spec[1];target=$spec[2];outcome='ACCESS_DENIED';nativeError=5;reverted=$true;handlesClosed=$true}
+ $fsCase=@{cleanupVerified=$true;aclInspection=$readEvidence.aclInspection;witnessControls=$moreControls};$fsCase[$spec[0]]=$record
+ $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $fsCase 'SIMULATED_PASS' $journal.ToArray()
+ if($v.cases[$spec[0]].state -cne 'PASS'){throw "Trusted denial was not mapped: $($spec[0])"}
+}
+Write-Output 'PASS independent write and create witness mapping (2)'
+$granted=$readEvidence.Clone();$granted.unauthorizedRead=$readEvidence.unauthorizedRead.Clone();$granted.unauthorizedRead.witness=$readEvidence.unauthorizedRead.witness.Clone();$granted.unauthorizedRead.witness.outcome='ALLOWED';$granted.unauthorizedRead.witness.nativeError=0;$granted.cleanupVerified=$false
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $granted 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'FAIL' -or $v.cases.unauthorizedRead.reason -cne 'VIOLATION'){throw 'Trusted unexpected read grant was lost'}
+Write-Output 'PASS trusted read grant retained despite unconfirmed cleanup'
+$fsBound=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $fsBound $readEvidence 'SIMULATED_PASS' $journal.ToArray()
+$wVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $fsBound '1' $true $true 'SIMULATED_PASS' @() @{} $readEvidence
+if(-not (& $wVerifier 'unauthorizedRead' $fsBound.cases.unauthorizedRead $fsBound)){throw 'Trusted read proof was not independently rechecked'}
+$badLive=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $badLive $readEvidence 'LIVE_OBSERVED' $journal.ToArray()
+if($badLive.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'Injected witness was promoted to live'}
+foreach($field in @('sid','nativeError','reverted','handlesClosed','inventory','acl')) {
+ $bad=$readEvidence.Clone();$bad.unauthorizedRead=$readEvidence.unauthorizedRead.Clone();$bad.unauthorizedRead.witness=$readEvidence.unauthorizedRead.witness.Clone();$bad.aclInspection=$readEvidence.aclInspection.Clone()
+ switch($field){'sid' {$bad.unauthorizedRead.witness.sid='S-1-5-21-9'} 'nativeError' {$bad.unauthorizedRead.witness.nativeError=2} 'reverted' {$bad.unauthorizedRead.witness.reverted=$false} 'handlesClosed' {$bad.unauthorizedRead.witness.handlesClosed=$false} 'inventory' {$bad.unauthorizedRead.afterInventory=('c'*64)} 'acl' {$bad.aclInspection.actual='different'}}
+ $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $bad 'SIMULATED_PASS' $journal.ToArray();if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw "Invalid read witness promoted: $field"}
+}
+Write-Output 'PASS read witness recheck, live separation and negative controls (8)'
+
+foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile',6,$true),@('unauthorizedCreate','Create','deniedFile',7,$false))) {
+ $record=$entry.Clone();$record.control=$spec[0];$record.operation=$spec[1];$record.target=$spec[2];$record.beforeExists=$spec[4];$record.afterExists=$true;$record.afterInventory=if($spec[0] -ceq 'unauthorizedCreate'){('c'*64)}else{$record.beforeInventory};$record.observation=$journal[$spec[3]].observation.Clone();$record.observation.errorCategory='ACCESS_DENIED';$record.observation.errorCode=5
+ $record.witness=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid='S-1-5-21-2';operation=$spec[1];target=$spec[2];outcome='ALLOWED';nativeError=0;reverted=$true;handlesClosed=$true}
+ $fsCase=@{cleanupVerified=$false;aclInspection=$readEvidence.aclInspection;witnessControls=$moreControls};$fsCase[$spec[0]]=$record
+ $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $fsCase 'SIMULATED_PASS' $journal.ToArray()
+ if($v.cases[$spec[0]].state -cne 'FAIL' -or $v.cases[$spec[0]].reason -cne 'VIOLATION'){throw "Trusted unexpected grant was lost: $($spec[0])"}
+}
+Write-Output 'PASS trusted write and create grants survive unconfirmed cleanup (2)'

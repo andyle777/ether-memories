@@ -1,8 +1,24 @@
 Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Inventory.ps1"
+. "$PSScriptRoot/PhaseA.AccessWitness.ps1"
+function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Token,[string]$ExpectedSid,[string]$Operation,[string]$TargetId,[string]$EvidenceClass) {
+  $failure=@{status='UNVERIFIED';reason='WITNESS_UNAVAILABLE';evidence=$EvidenceClass}
+  try {
+    if ($EvidenceClass -cnotin @('LIVE','INJECTED') -or $Token.sid -cne $ExpectedSid -or [string]::IsNullOrWhiteSpace($ExpectedSid) -or $Operation -cnotin @('Read','Overwrite','Create') -or $TargetId -cnotin @('protectedFile','deniedFile','controlFile','authorizedProbeFile','controlProbeFile')) { return $failure }
+    if (($Operation -ceq 'Create' -and $TargetId -cnotin @('deniedFile','authorizedProbeFile','controlProbeFile')) -or ($Operation -ceq 'Overwrite' -and $TargetId -cnotin @('protectedFile','controlFile')) -or ($Operation -ceq 'Read' -and $TargetId -cnotin @('protectedFile','controlFile'))) { return $failure }
+    $path=$Fixture[$TargetId]; if ([string]::IsNullOrWhiteSpace([string]$path)) { return $failure }
+    if ($Operation -ceq 'Create') { $parent=if ($TargetId -ceq 'controlProbeFile') { $Fixture.controlDir } else { $Fixture.protectedDir }; if (-not (& $Backend.DirectoryExists $parent) -or (& $Backend.Exists $path)) { return $failure } }
+    elseif (-not (& $Backend.Exists $path)) { return $failure }
+    $root=if ($Fixture.ContainsKey('root')) { $Fixture.root } else { '' }
+    $raw=& $Backend.Probe $Token $ExpectedSid $Operation $path $root
+    if ($raw -isnot [hashtable] -or $raw.impersonated -isnot [bool] -or -not $raw.impersonated -or $raw.sid -cne $ExpectedSid -or $raw.operation -cne $Operation -or $raw.attempted -isnot [bool] -or -not $raw.attempted -or $raw.allowed -isnot [bool] -or $raw.error -isnot [int] -or $raw.reverted -isnot [bool] -or -not $raw.reverted -or $raw.handlesClosed -isnot [bool] -or -not $raw.handlesClosed) { return $failure }
+    $outcome=if ($raw.allowed -and $raw.error -eq 0) {'ALLOWED'} elseif (-not $raw.allowed -and $raw.error -eq 5) {'ACCESS_DENIED'} elseif (-not $raw.allowed -and $raw.error -in @(2,3,6,32,87,123)) { return @{status='UNVERIFIED';reason='NATIVE_ERROR';evidence=$EvidenceClass;operation=$Operation;target=$TargetId;nativeError=$raw.error} } else { return $failure }
+    return @{status='OBSERVED';reason='NONE';evidence=$EvidenceClass;sid=$raw.sid;operation=$Operation;target=$TargetId;outcome=$outcome;nativeError=$raw.error;reverted=$raw.reverted;handlesClosed=$raw.handlesClosed}
+  } catch { return $failure }
+}
 function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBackend,[hashtable]$FixtureBackend,$Fixture,[hashtable]$Journal,[string]$Control,[string]$Operation,[string]$Target,[string]$TargetId) {
-  $entry=@{control=$Control;operation=$Operation;target=$TargetId;accountSid=$Account.sid;tokenSid=$Token.sid;beforeExists=$null;parentExists=$null;beforeInventory=$null;beforeDigest=$null;afterExists=$null;afterInventory=$null;observation=$null}
+  $entry=@{control=$Control;operation=$Operation;target=$TargetId;accountSid=$Account.sid;tokenSid=$Token.sid;beforeExists=$null;parentExists=$null;beforeInventory=$null;beforeDigest=$null;afterExists=$null;afterInventory=$null;observation=$null;witness=$null}
   $Journal[$Control]=$entry
   $entry.beforeExists=& $FixtureBackend.Exists $Target
   if ($FixtureBackend.ContainsKey('DirectoryExists') -and $Fixture.ContainsKey('protectedDir')) { $entry.parentExists=& $FixtureBackend.DirectoryExists $Fixture.protectedDir }
@@ -10,7 +26,15 @@ function Invoke-PhaseATrackedDeniedOperation($Account,$Token,[hashtable]$ActorBa
   if ($Operation -ceq 'Read' -and $entry.beforeExists -ceq $true) { $entry.beforeDigest=& $FixtureBackend.Digest $Target }
   $original=$ActorBackend.Run
   $capture={param($a,$t,$op,$path) $value=& $original $a $t $op $path; if($value -is [hashtable]){$entry.observation=$value}; return $value}.GetNewClosure()
-  try { return (Invoke-PhaseAActorOperation $Account $Token @{Run=$capture} $Operation $Target 'denied') }
+  try {
+    $value=Invoke-PhaseAActorOperation $Account $Token @{Run=$capture} $Operation $Target 'denied'
+    if ($FixtureBackend.ContainsKey('Probe')) {
+      $class=if ($FixtureBackend.ContainsKey('WitnessEvidence') -and $FixtureBackend.WitnessEvidence -ceq 'LIVE') {'LIVE'} else {'INJECTED'}
+      $entry.witness=Invoke-PhaseATrustedAccess $FixtureBackend $Fixture $Token $Account.sid $Operation $TargetId $class
+      if ($entry.witness.status -cne 'OBSERVED' -or $entry.witness.outcome -cne 'ACCESS_DENIED') { throw 'STAGE3_WITNESS_UNVERIFIED' }
+    }
+    return $value
+  }
   finally {
     try { $entry.afterExists=& $FixtureBackend.Exists $Target; $entry.afterInventory=& $FixtureBackend.Inventory $Fixture } catch { }
   }
@@ -27,6 +51,22 @@ function Invoke-PhaseAStage3($Accounts,$Tokens,[hashtable]$FixtureBackend,[hasht
     if (-not (& $FixtureBackend.Exists $fixture.protectedFile) -or -not (& $FixtureBackend.Exists $fixture.controlFile) -or
         (& $FixtureBackend.Exists $fixture.newFile)) { throw 'fixture paths invalid' }
     if ((& $FixtureBackend.Digest $fixture.protectedFile) -cne $fixture.initialDigest) { throw 'initial digest mismatch' }
+    if ($FixtureBackend.ContainsKey('Probe')) {
+      $class=if ($FixtureBackend.ContainsKey('WitnessEvidence') -and $FixtureBackend.WitnessEvidence -ceq 'LIVE') {'LIVE'} else {'INJECTED'}
+      $controls=@{}; $evidence['witnessControls']=$controls
+      foreach ($spec in @(@('authorizedRead',0,'Read','protectedFile'),@('permissiveRead',1,'Read','controlFile'),@('authorizedWrite',0,'Overwrite','protectedFile'),@('permissiveWrite',1,'Overwrite','controlFile'),@('authorizedCreate',0,'Create','authorizedProbeFile'),@('permissiveCreate',1,'Create','controlProbeFile'))) {
+        $name=$spec[0];$index=[int]$spec[1];$op=$spec[2];$targetId=$spec[3]
+        $control=Invoke-PhaseATrustedAccess $FixtureBackend $fixture $Tokens[$index] $Accounts[$index].sid $op $targetId $class
+        $controls[$name]=$control
+        if ($control.status -cne 'OBSERVED' -or $control.outcome -cne 'ALLOWED') { throw 'STAGE3_WITNESS_UNVERIFIED' }
+        if ($op -ceq 'Create') {
+          if (-not $FixtureBackend.ContainsKey('RemoveProbe')) { throw 'STAGE3_WITNESS_UNVERIFIED' }
+          $null=& $FixtureBackend.RemoveProbe $fixture $targetId
+          if (& $FixtureBackend.Exists $fixture[$targetId]) { throw 'STAGE3_WITNESS_UNVERIFIED' }
+          $control['removed']=$true
+        }
+      }
+    }
     $read=Invoke-PhaseAActorOperation $Accounts[0] $Tokens[0] $ActorBackend 'Read' $fixture.protectedFile 'allowed'
     if ($read.digest -cne $fixture.initialDigest) { throw 'authorized read mismatch' }; $cases.authorizedRead=$true
     $null=Invoke-PhaseAActorOperation $Accounts[0] $Tokens[0] $ActorBackend 'Create' $fixture.newFile 'allowed'
@@ -93,7 +133,7 @@ function Remove-PhaseAFixture($Fixture) {
   foreach ($dir in @($root,$Fixture.protectedDir,$Fixture.controlDir)) {
     if ([IO.Directory]::Exists($dir) -and ((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'fixture reparse point rejected' }
   }
-  foreach ($file in @($Fixture.protectedFile,$Fixture.newFile,$Fixture.deniedFile,($Fixture.protectedFile+'.renamed'),$Fixture.controlFile)) {
+  foreach ($file in @($Fixture.protectedFile,$Fixture.newFile,$Fixture.deniedFile,($Fixture.protectedFile+'.renamed'),$Fixture.controlFile,$Fixture.authorizedProbeFile,$Fixture.controlProbeFile)) {
     if (Test-Path -LiteralPath $file) {
       $entry=Get-Item -LiteralPath $file -Force -ErrorAction Stop
       if (($entry.Attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0) { throw 'unexpected fixture entry' }
@@ -112,7 +152,7 @@ function New-PhaseAStage3Backend {
       $protectedDir=Join-Path $root 'protected'; $controlDir=Join-Path $root 'control'
       $f=@{parent=$parent;root=$root;protectedDir=$protectedDir;controlDir=$controlDir;
         protectedFile=(Join-Path $protectedDir 'original.bin');newFile=(Join-Path $protectedDir 'committed.bin');
-        deniedFile=(Join-Path $protectedDir 'rejected.bin');controlFile=(Join-Path $controlDir 'original.bin');aclInspected=$false}
+        deniedFile=(Join-Path $protectedDir 'rejected.bin');controlFile=(Join-Path $controlDir 'original.bin');authorizedProbeFile=(Join-Path $protectedDir 'witness-authorized.bin');controlProbeFile=(Join-Path $controlDir 'witness-permissive.bin');aclInspected=$false}
       $created=$false
       try {
         $manager=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -144,6 +184,19 @@ function New-PhaseAStage3Backend {
     }
     Exists={ param($path) [IO.File]::Exists($path) }
     DirectoryExists={ param($path) [IO.Directory]::Exists($path) }
+    RemoveProbe={ param($f,$id)
+      if ($id -cnotin @('authorizedProbeFile','controlProbeFile')) { throw 'probe id rejected' }
+      $path=$f[$id]; if (Test-Path -LiteralPath $path) {
+        $item=Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (($item.Attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0) { throw 'probe entry rejected' }
+        [IO.File]::Delete($path)
+      }
+    }
+    WitnessEvidence='LIVE'
+    Probe={ param($token,$sid,$operation,$path,$root)
+      $r=[EtherPhaseAAccessWitness]::Probe($token.handle.DangerousGetHandle(),$sid,$operation,$path,$root)
+      return @{impersonated=$r.impersonated;sid=$r.sid;operation=$r.operation;attempted=$r.attempted;allowed=$r.allowed;error=$r.error;reverted=$r.reverted;handlesClosed=$r.handlesClosed}
+    }
     CleanupVerified={ param($f) -not (Test-Path -LiteralPath $f.root -ErrorAction Stop) }
     Digest={ param($path) (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
     Inventory={ param($f) Get-PhaseAInventory $f.protectedDir }
