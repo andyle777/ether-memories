@@ -8,3 +8,13 @@ foreach($case in @('clientPid','processPid','sid','nonce','time','operation','ta
  if(Test-PhaseAReadPipeReceipt $r $n 123 $cp 'S-1-5-21-2' $t 'protectedFile' $completed){throw "accepted $case"}
 }
 Write-Output 'PASS pipe receipt positive and ten injected rejection controls'
+foreach($spec in @(@('Overwrite','protectedFile'),@('Create','deniedFile'))) {
+ $r=@($n,'123',$t,'S-1-5-21-2',$spec[0],$spec[1],'ERROR','5')
+ if(-not (Test-PhaseAReadPipeReceipt $r $n 123 123 'S-1-5-21-2' $t $spec[1] $true $spec[0])){throw 'valid access receipt rejected'}
+ foreach($field in @('operation','target','nonce','client','late')) {
+  $bad=$r.Clone();$pidClient=123;$deadline=$true
+  switch($field){'operation' {$bad[4]='Read'} 'target' {$bad[5]='controlFile'} 'nonce' {$bad[0]='b'*32} 'client' {$pidClient=124} 'late' {$deadline=$false}}
+  if(Test-PhaseAReadPipeReceipt $bad $n 123 $pidClient 'S-1-5-21-2' $t $spec[1] $deadline $spec[0]){throw "invalid $field receipt accepted"}
+ }
+}
+Write-Output 'PASS write/create receipt positive and 10 rejection controls'

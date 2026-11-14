@@ -373,6 +373,7 @@ foreach($field in @('sid','impersonated','reverted','handlesClosed','error')) {
  if($v.status -ceq 'OBSERVED'){throw "Invalid witness promoted: $field"}
 }
 Write-Output 'PASS injected trusted witness controls (6)'
+. "$PSScriptRoot/PhaseA.AccessWitness.ps1" # Legacy native type is compiled only by this offline regression.
 if (-not ('EtherPhaseAAccessWitness' -as [type])) { throw 'Native access witness type is missing' }
 Write-Output 'PASS native witness type compiled without privileged access'
 $script:created3=$false;$script:witnessCalls=0

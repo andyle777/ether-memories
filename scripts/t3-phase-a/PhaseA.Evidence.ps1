@@ -251,17 +251,27 @@ function Add-PhaseAInnerJobEvidence($VerdictInput,$HostedJournal,$ActorJournal,[
           $controlsOk=$true
           foreach($cs in @(@($spec[3],$broker.accountSid,$spec[5]),@($spec[4],$probe.accountSid,$spec[6]))) {
             $c=$controls[$cs[0]]
-            if($c -isnot [hashtable] -or $c.status -cne 'OBSERVED' -or $c.reason -cne 'NONE' -or $c.evidence -cne $source -or $c.sid -cne $cs[1] -or $c.operation -cne $spec[1] -or $c.target -cne $cs[2] -or $c.outcome -cne 'ALLOWED' -or $c.nativeError -isnot [int] -or $c.nativeError -ne 0 -or $c.reverted -isnot [bool] -or -not $c.reverted -or $c.handlesClosed -isnot [bool] -or -not $c.handlesClosed -or ($spec[1] -ceq 'Create' -and ($c.removed -isnot [bool] -or -not $c.removed))) {$controlsOk=$false;break}
+            if($c -isnot [hashtable] -or $c.status -cne 'OBSERVED' -or $c.reason -cne 'NONE' -or $c.evidence -cne $source -or $c.sid -cne $cs[1] -or $c.operation -cne $spec[1] -or $c.target -cne $cs[2] -or $c.outcome -cne 'ALLOWED' -or $c.nativeError -isnot [int] -or $c.nativeError -ne 0 -or -not (Test-PhaseAReadWitnessCleanup $c $source) -or $c.handlesClosed -isnot [bool] -or -not $c.handlesClosed -or ($spec[1] -ceq 'Create' -and ($c.removed -isnot [bool] -or -not $c.removed))) {$controlsOk=$false;break}
           }
           if(-not $controlsOk){continue}
           $o=$entry.observation;$w=$entry.witness
           if($o -isnot [hashtable] -or $o.expectedSid -cne $probe.accountSid -or $o.errorCategory -cne 'ACCESS_DENIED' -or $o.errorCode -isnot [int] -or $o.errorCode -ne 5 -or $o.contained -isnot [bool] -or -not $o.contained -or $o.terminated -isnot [bool] -or -not $o.terminated -or -not (Test-ActorObservation $o 'legacy' 'denied')){continue}
-          if($w -isnot [hashtable] -or $w.status -cne 'OBSERVED' -or $w.reason -cne 'NONE' -or $w.evidence -cne $source -or $w.sid -cne $probe.accountSid -or $w.operation -cne $spec[1] -or $w.target -cne $spec[2] -or $w.reverted -isnot [bool] -or -not $w.reverted -or $w.handlesClosed -isnot [bool] -or -not $w.handlesClosed -or $w.nativeError -isnot [int]){continue}
+          if($w -isnot [hashtable] -or $w.status -cne 'OBSERVED' -or $w.reason -cne 'NONE' -or $w.evidence -cne $source -or $w.sid -cne $probe.accountSid -or $w.operation -cne $spec[1] -or $w.target -cne $spec[2] -or -not (Test-PhaseAReadWitnessCleanup $w $source) -or $w.handlesClosed -isnot [bool] -or -not $w.handlesClosed -or $w.nativeError -isnot [int]){continue}
+          if($w.ContainsKey('execution') -and $w.execution -ceq 'PROCESS'){
+            $nonces=@($w.nonce,$controls[$spec[3]].nonce,$controls[$spec[4]].nonce)
+            if(@($nonces | Select-Object -Unique).Count -ne 3){continue}
+          }
           $state='NOT_RUN';$reason='NOT_RUN'
           if($w.outcome -ceq 'ACCESS_DENIED' -and $w.nativeError -eq 5 -and $Evidence.cleanupVerified -and $entry.beforeInventory -ceq $entry.afterInventory -and $entry.afterExists -eq $entry.beforeExists){$state='PASS';$reason='NONE'}
           elseif($w.outcome -ceq 'ALLOWED' -and $w.nativeError -eq 0 -and ($key -cne 'unauthorizedCreate' -or ($entry.afterExists -and $entry.beforeInventory -cne $entry.afterInventory))){$state='FAIL';$reason='VIOLATION'}
           if($state -ceq 'NOT_RUN' -or $VerdictInput.cases[$key].state -cne 'NOT_RUN'){continue}
           $canonical=[ordered]@{control=$key;operation=$entry.operation;target=$entry.target;brokerSid=$broker.accountSid;legacySid=$probe.accountSid;pid=$o.expectedPid;createdAt=$o.observedCreatedAt;nonce=$o.expectedNonce;actorOutcome=$o.outcome;actorError=$o.errorCode;witnessOutcome=$w.outcome;witnessError=$w.nativeError;beforeExists=$entry.beforeExists;afterExists=$entry.afterExists;beforeInventory=$entry.beforeInventory;afterInventory=$entry.afterInventory;acl=$acl.actual;cleanup=$Evidence.cleanupVerified;state=$state}
+          if($w.ContainsKey('execution') -and $w.execution -ceq 'PROCESS'){
+            $canonical['witnessProcess']=[ordered]@{pid=$w.pid;pipeClientPid=$w.pipeClientPid;createdAt=$w.createdAt;nonce=$w.nonce}
+            $a=$controls[$spec[3]];$b=$controls[$spec[4]]
+            $canonical['authorizedProcess']=[ordered]@{pid=$a.pid;pipeClientPid=$a.pipeClientPid;createdAt=$a.createdAt;nonce=$a.nonce}
+            $canonical['permissiveProcess']=[ordered]@{pid=$b.pid;pipeClientPid=$b.pipeClientPid;createdAt=$b.createdAt;nonce=$b.nonce}
+          }
           $sha=[Security.Cryptography.SHA256]::Create();try{$json=ConvertTo-Json -Compress -InputObject $canonical;$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
           $VerdictInput.cases[$key]=@{state=$state;evidence=$EvidenceClass;reason=$reason;proof=$hash}
         }

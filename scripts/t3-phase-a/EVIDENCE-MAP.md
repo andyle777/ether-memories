@@ -105,4 +105,14 @@ account cleanup claims. The helper requests native read access, not proof of the
 original actor request. Same-identity processes may still interfere with the
 helper or deny service; this is not cryptographic authentication of an
 otherwise compromised same-identity process. Cross-identity execution remains
-unverified. WRITE and CREATE retain their earlier unbounded thread path.
+unverified. At that checkpoint WRITE and CREATE retained the earlier unbounded thread path; see the migration update below.
+
+The process-backed helper now covers Read, Overwrite (WRITE_ACCESS without
+writing) and Create (CREATE_NEW). The same pinned source, atomic launcher,
+pipe-client PID binding, nonce, deadline and confirmed cleanup apply to each.
+Create targets are fixed names under a fresh random fixture root; successful
+creates are inventoried and cleaned by the existing fixture cleanup. Live
+Stage 3 has no route to the legacy impersonating thread helper. That source is
+loaded only for the offline legacy regression. Results remain separate from the
+actor report, and an access-open is not proof of an overwrite. Hosted
+cross-identity enforcement remains unverified.

@@ -1,7 +1,6 @@
 Set-StrictMode -Version Latest
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Inventory.ps1"
-. "$PSScriptRoot/PhaseA.AccessWitness.ps1"
 . "$PSScriptRoot/PhaseA.ReadProcess.ps1"
 function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Token,[string]$ExpectedSid,[string]$Operation,[string]$TargetId,[string]$EvidenceClass) {
   $failure=@{status='UNVERIFIED';reason='WITNESS_UNAVAILABLE';evidence=$EvidenceClass}
@@ -15,10 +14,10 @@ function Invoke-PhaseATrustedAccess([hashtable]$Backend,[hashtable]$Fixture,$Tok
     $raw=& $Backend.Probe $Token $ExpectedSid $Operation $path $root
     if ($raw -isnot [hashtable] -or $raw.sid -cne $ExpectedSid -or $raw.operation -cne $Operation -or $raw.attempted -isnot [bool] -or -not $raw.attempted -or $raw.allowed -isnot [bool] -or $raw.error -isnot [int] -or $raw.handlesClosed -isnot [bool] -or -not $raw.handlesClosed) { return $failure }
     $processEvidence=($raw.ContainsKey('execution') -and $raw.execution -ceq 'PROCESS')
-    if($processEvidence) {if($Operation -cne 'Read' -or $raw.processVerified -isnot [bool] -or -not $raw.processVerified -or $raw.terminated -isnot [bool] -or -not $raw.terminated){return $failure}}
+    if($processEvidence) {if($raw.processVerified -isnot [bool] -or -not $raw.processVerified -or $raw.terminated -isnot [bool] -or -not $raw.terminated){return $failure}}
     elseif($raw.impersonated -isnot [bool] -or -not $raw.impersonated -or $raw.reverted -isnot [bool] -or -not $raw.reverted){return $failure}
-    if($EvidenceClass -ceq 'LIVE' -and $Operation -ceq 'Read' -and -not $processEvidence){return $failure}
-    $outcome=if ($raw.allowed -and $raw.error -eq 0) {'ALLOWED'} elseif (-not $raw.allowed -and $raw.error -eq 5) {'ACCESS_DENIED'} elseif (-not $raw.allowed -and $raw.error -in @(2,3,6,32,87,123)) { return @{status='UNVERIFIED';reason='NATIVE_ERROR';evidence=$EvidenceClass;operation=$Operation;target=$TargetId;nativeError=$raw.error} } else { return $failure }
+    if($EvidenceClass -ceq 'LIVE' -and -not $processEvidence){return $failure}
+    $outcome=if ($raw.allowed -and $raw.error -eq 0) {'ALLOWED'} elseif (-not $raw.allowed -and $raw.error -eq 5) {'ACCESS_DENIED'} elseif (-not $raw.allowed -and $raw.error -in @(2,3,6,32,80,87,123,183)) { return @{status='UNVERIFIED';reason='NATIVE_ERROR';evidence=$EvidenceClass;operation=$Operation;target=$TargetId;nativeError=$raw.error} } else { return $failure }
     $result=@{status='OBSERVED';reason='NONE';evidence=$EvidenceClass;sid=$raw.sid;operation=$Operation;target=$TargetId;outcome=$outcome;nativeError=$raw.error;handlesClosed=$raw.handlesClosed}; if($processEvidence){$result.execution='PROCESS';$result.processVerified=$raw.processVerified;$result.terminated=$raw.terminated;$result.pid=$raw.pid;$result.createdAt=$raw.createdAt;$result.pipeClientPid=$raw.pipeClientPid;$result.nonce=$raw.nonce}else{$result.reverted=$raw.reverted};return $result
   } catch { $code=$_.Exception.GetBaseException().Message; if ($code -ceq 'STAGE2_CHILD_UNCONFIRMED') { throw 'STAGE2_CHILD_UNCONFIRMED' }; if($code -cin @('WITNESS_TIMEOUT','WITNESS_CLEANUP_FAILED')) {return @{status='UNVERIFIED';reason=$code;evidence=$EvidenceClass}}; return $failure }
 }
@@ -199,9 +198,8 @@ function New-PhaseAStage3Backend {
     }
     WitnessEvidence='LIVE'
     Probe={ param($token,$sid,$operation,$path,$root)
-      if($operation -ceq 'Read') { $targetId=if([IO.Path]::GetFileName([IO.Path]::GetDirectoryName($path)) -ceq 'protected'){'protectedFile'}else{'controlFile'};return Invoke-PhaseAReadPipeProcess $token $sid $path $targetId $root }
-      $r=[EtherPhaseAAccessWitness]::Probe($token.handle.DangerousGetHandle(),$sid,$operation,$path,$root)
-      return @{impersonated=$r.impersonated;sid=$r.sid;operation=$r.operation;attempted=$r.attempted;allowed=$r.allowed;error=$r.error;reverted=$r.reverted;handlesClosed=$r.handlesClosed}
+      $name=[IO.Path]::GetFileName($path);$directory=[IO.Path]::GetFileName([IO.Path]::GetDirectoryName($path));$targetId=switch($name){'original.bin' {if($directory -ceq 'protected'){'protectedFile'}else{'controlFile'}} 'rejected.bin' {'deniedFile'} 'witness-authorized.bin' {'authorizedProbeFile'} 'witness-permissive.bin' {'controlProbeFile'} default {throw 'WITNESS_ARGUMENT_REJECTED'}}
+      return Invoke-PhaseAReadPipeProcess $token $sid $path $targetId $root $false $false $operation
     }
     CleanupVerified={ param($f) -not (Test-Path -LiteralPath $f.root -ErrorAction Stop) }
     Digest={ param($path) (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }

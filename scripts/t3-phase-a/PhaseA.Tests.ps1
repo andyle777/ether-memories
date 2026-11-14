@@ -531,3 +531,19 @@ $reused=$processRead.Clone();$reused.unauthorizedRead=$processRead.unauthorizedR
 $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $reused 'SIMULATED_PASS' $journal.ToArray()
 if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'reused witness nonce accepted'}
 Write-Output 'PASS process proof recheck and cross-control nonce reuse rejection'
+foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile',6,$true,'authorizedWrite','permissiveWrite'),@('unauthorizedCreate','Create','deniedFile',7,$false,'authorizedCreate','permissiveCreate'))) {
+ $ctrl=$moreControls.Clone()
+ foreach($name in @($spec[5],$spec[6])){$x=$ctrl[$name].Clone();$x.Remove('reverted');$x.execution='PROCESS';$x.processVerified=$true;$x.terminated=$true;$x.pid=123;$x.pipeClientPid=123;$x.createdAt='2026-01-01T00:00:00Z';$x.nonce=if($name -ceq $spec[5]){'b'*32}else{'c'*32};$ctrl[$name]=$x}
+ $rec=$entry.Clone();$rec.control=$spec[0];$rec.operation=$spec[1];$rec.target=$spec[2];$rec.beforeExists=$spec[4];$rec.afterExists=$spec[4];$rec.afterInventory=$rec.beforeInventory;$rec.observation=$journal[$spec[3]].observation.Clone();$rec.observation.errorCategory='ACCESS_DENIED';$rec.observation.errorCode=5
+ $rec.witness=@{status='OBSERVED';reason='NONE';evidence='INJECTED';sid='S-1-5-21-2';operation=$spec[1];target=$spec[2];outcome='ACCESS_DENIED';nativeError=5;execution='PROCESS';processVerified=$true;terminated=$true;handlesClosed=$true;pid=123;pipeClientPid=123;createdAt='2026-01-01T00:00:00Z';nonce=('a'*32)}
+ $fsCase=@{cleanupVerified=$true;aclInspection=$readEvidence.aclInspection;witnessControls=$ctrl};$fsCase[$spec[0]]=$rec
+ $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $fsCase 'SIMULATED_PASS' $journal.ToArray();if($v.cases[$spec[0]].state -cne 'PASS'){throw "process denial not mapped $($spec[0])"}
+ $proofVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $v '1' $true $true 'SIMULATED_PASS' @() @{} $fsCase
+ if(-not (& $proofVerifier $spec[0] $v.cases[$spec[0]] $v)){throw 'process proof not rechecked'}
+ foreach($field in @('nonce','pid','cleanup','inventory','control','parent','error')) {
+  $bad=$fsCase.Clone();$bad.witnessControls=$ctrl.Clone();$bad[$spec[0]]=$rec.Clone();$bad[$spec[0]].witness=$rec.witness.Clone()
+  switch($field){'nonce' {$bad[$spec[0]].witness.nonce='b'*32} 'pid' {$bad[$spec[0]].witness.pipeClientPid=124} 'cleanup' {$bad.cleanupVerified=$false} 'inventory' {$bad[$spec[0]].afterInventory='d'*64} 'control' {$bad.witnessControls.Remove($spec[5])} 'parent' {$bad[$spec[0]].parentExists=$false} 'error' {$bad[$spec[0]].witness.nativeError=2}}
+  $v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $bad 'SIMULATED_PASS' $journal.ToArray();if($v.cases[$spec[0]].state -cne 'NOT_RUN'){throw "invalid process evidence accepted: $field"}
+ }
+}
+Write-Output 'PASS bounded write/create verdict evidence and 14 negative controls'

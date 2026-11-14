@@ -5,17 +5,17 @@ function Confirm-PhaseAReadChildTermination($Child) {
  try { if(-not $Child.Wait(5000)){$Child.Terminate();if(-not $Child.Wait(5000)){throw 'unconfirmed'}} }
  catch {throw 'STAGE2_CHILD_UNCONFIRMED'}
 }
-function Invoke-PhaseAReadPipeProcess($Token,[string]$ExpectedSid,[string]$Target,[string]$TargetId,[string]$FixtureRoot,[bool]$TestCurrentIdentity=$false,[bool]$TestStall=$false) {
+function Invoke-PhaseAReadPipeProcess($Token,[string]$ExpectedSid,[string]$Target,[string]$TargetId,[string]$FixtureRoot,[bool]$TestCurrentIdentity=$false,[bool]$TestStall=$false,[string]$Operation='Read') {
  if($TestStall -and -not $TestCurrentIdentity){throw 'WITNESS_ARGUMENT_REJECTED'}
  $source=Join-Path $PSScriptRoot 'PhaseA.ReadPipeWitness.cs'
- $pin='786c8a9d8b48f1a19bca415e0b665d5e192811e34ff72376863fb192e9f40983'
+ $pin='c3adbdddada140db59b8a8283ec21ecbc60226ff50e6bf8520e9c30f03eded41'
  $sourceText=[IO.File]::ReadAllText($source).Replace("`r`n","`n")
  $sourceSha=[Security.Cryptography.SHA256]::Create();try{$sourceHash=[BitConverter]::ToString($sourceSha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sourceText))).Replace('-','').ToLowerInvariant()}finally{$sourceSha.Dispose()}
  if($sourceHash -cne $pin){throw 'WITNESS_SOURCE_MISMATCH'}
- if($TargetId -cnotin @('protectedFile','controlFile') -or [string]::IsNullOrWhiteSpace($ExpectedSid)){throw 'WITNESS_ARGUMENT_REJECTED'}
+ if((($Operation -cin @('Read','Overwrite') -and $TargetId -cnotin @('protectedFile','controlFile')) -or ($Operation -ceq 'Create' -and $TargetId -cnotin @('deniedFile','authorizedProbeFile','controlProbeFile')) -or $Operation -cnotin @('Read','Overwrite','Create')) -or [string]::IsNullOrWhiteSpace($ExpectedSid)){throw 'WITNESS_ARGUMENT_REJECTED'}
  if(-not $TestCurrentIdentity) {
-  $root=[IO.Path]::GetFullPath($FixtureRoot);$dir=if($TargetId -ceq 'protectedFile'){'protected'}else{'control'}
-  if(-not [IO.Path]::GetFileName($root).StartsWith('ether-phase-a-store-') -or [IO.Path]::GetFullPath($Target) -cne [IO.Path]::Combine($root,$dir,'original.bin')){throw 'WITNESS_ARGUMENT_REJECTED'}
+  $root=[IO.Path]::GetFullPath($FixtureRoot);$dir=if($TargetId -cin @('controlFile','controlProbeFile')){'control'}else{'protected'};$filename=switch($TargetId){'protectedFile' {'original.bin'} 'controlFile' {'original.bin'} 'deniedFile' {'rejected.bin'} 'authorizedProbeFile' {'witness-authorized.bin'} 'controlProbeFile' {'witness-permissive.bin'}}
+  if(-not [IO.Path]::GetFileName($root).StartsWith('ether-phase-a-store-') -or [IO.Path]::GetFullPath($Target) -cne [IO.Path]::Combine($root,$dir,$filename)){throw 'WITNESS_ARGUMENT_REJECTED'}
   if($Token.sid -cne $ExpectedSid -or $Token.handle.IsClosed -or $Token.handle.IsInvalid){throw 'WITNESS_IDENTITY_REJECTED'}
  }
  $common=if($TestCurrentIdentity){[IO.Path]::GetTempPath()}else{[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)}
@@ -35,7 +35,7 @@ function Invoke-PhaseAReadPipeProcess($Token,[string]$ExpectedSid,[string]$Targe
   $pipe=New-Object IO.Pipes.NamedPipeServerStream($name,[IO.Pipes.PipeDirection]::In,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous,4096,4096,$acl)
   $pending=$pipe.BeginWaitForConnection($null,$null);$pendingWait=$pending.AsyncWaitHandle
   if($exe.Contains('"') -or $Target.Contains('"')){throw 'WITNESS_ARGUMENT_REJECTED'}
-  $mode=if($TestStall){'stall'}else{'read'}; $cmd='"'+$exe+'" '+$mode+' "'+$Target+'" '+$name+' '+$nonce+' '+$TargetId
+  $mode=switch($Operation){'Read'{'read'} 'Overwrite'{'write'} 'Create'{'create'}};if($TestStall){$mode='stall-'+$mode}; $cmd='"'+$exe+'" '+$mode+' "'+$Target+'" '+$name+' '+$nonce+' '+$TargetId
   $job=[EtherPhaseAJob]::Create()
   if($TestCurrentIdentity){$child=[EtherPhaseAAtomic]::CreateSelfInDirectory($job,$exe,$cmd,$scratch)}else{$child=[EtherPhaseAAtomic]::CreateWithTokenInDirectory($Token.handle.DangerousGetHandle(),$job,$exe,$cmd,$scratch)}
   if(-not $child.InJob() -or $child.Exited()){throw 'WITNESS_CONTAINMENT_FAILED'}
@@ -51,9 +51,9 @@ function Invoke-PhaseAReadPipeProcess($Token,[string]$ExpectedSid,[string]$Targe
   $count=$pipe.EndRead($read);$parts=[Text.Encoding]::UTF8.GetString($buffer,0,$count).Split('|')
   $remaining=[Math]::Max(0,10000-[int]$clock.ElapsedMilliseconds)
   if(-not $child.Wait([uint32]$remaining)){throw 'WITNESS_TIMEOUT'}
-  if($child.ExitCode() -ne 0 -or -not (Test-PhaseAReadPipeReceipt $parts $nonce $child.Pid $clientPid $ExpectedSid $observed.createdAt $TargetId ($clock.ElapsedMilliseconds -le 10000))){throw 'WITNESS_RECEIPT_REJECTED'}
+  if($child.ExitCode() -ne 0 -or -not (Test-PhaseAReadPipeReceipt $parts $nonce $child.Pid $clientPid $ExpectedSid $observed.createdAt $TargetId ($clock.ElapsedMilliseconds -le 10000) $Operation)){throw 'WITNESS_RECEIPT_REJECTED'}
   if((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $hash){throw 'WITNESS_BINARY_MISMATCH'}
-  return @{execution='PROCESS';sid=$observed.sid;operation='Read';attempted=$true;allowed=($parts[6] -ceq 'ALLOWED');error=[int]$parts[7];processVerified=$true;terminated=$true;handlesClosed=$true;pid=$child.Pid;createdAt=$observed.createdAt;pipeClientPid=[int]$clientPid;nonce=$nonce}
+  return @{execution='PROCESS';sid=$observed.sid;operation=$Operation;attempted=$true;allowed=($parts[6] -ceq 'ALLOWED');error=[int]$parts[7];processVerified=$true;terminated=$true;handlesClosed=$true;pid=$child.Pid;createdAt=$observed.createdAt;pipeClientPid=[int]$clientPid;nonce=$nonce}
  } finally {
   if($pipe){try{$pipe.Dispose()}catch{$cleanupFailed=$true}}
   foreach($waitHandle in @($pendingWait,$readWait)){if($waitHandle){try{if($waitHandle.WaitOne(5000)){$waitHandle.Dispose()}else{$cleanupFailed=$true;$script:PhaseAUnconfirmedPipeResources=@{connection=$pending;read=$read}}}catch [ObjectDisposedException] {} catch {$cleanupFailed=$true}}}
