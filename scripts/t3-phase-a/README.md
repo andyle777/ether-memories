@@ -1,4 +1,4 @@
-﻿# Phase A development checkpoint: incomplete
+# Phase A development checkpoint: incomplete
 
 This is local development scaffolding based on commit
 `42f9b5bdf94e47c4c69c0f87127eb545dff13ed1`. It contains an experimental distinct-identity enforcement path, but the
@@ -102,15 +102,19 @@ change have been independently reviewed and separately authorized. The proposed
 delete and rename addendum remains pending owner acceptance. Current
 workflow behavior remains fail-closed.
 
-Verdict work is incomplete. `phase-a-core-provisional-v1` is an explicit test
-policy; it does not adopt or exclude the proposed delete/rename addendum. The
-standalone evaluator validates a complete, typed per-control record using an
-injected verifier. Its synthetic GREEN is a unit-test result only. The manager
-currently constructs NOT_RUN records because the existing stages do not retain
-the individual corroborated proof that the evaluator requires. Its production
-verifier denies authorization and provenance until a trusted evidence adapter is
-implemented. Therefore the real manager cannot yet return GREEN or RED.
-Environment variables and actor claims are not workflow provenance. A future
-review must establish trusted GitHub run provenance and bind the collected
-observations to that run, as well as preserve independently verifiable per-case
-records and cleanup outcomes. Do not enable the hosted workflow meanwhile.
+Verdict work is incomplete. `phase-a-core-provisional-v1` is a provisional
+30-control policy and does not adopt the proposed delete/rename addendum.
+The manager retains actor observations and independently rechecks eight identity
+controls. The other 22 controls have no retained, independently checkable proof;
+see EVIDENCE-MAP.md. The production authorization decision remains false, so the
+real manager cannot currently return GREEN or RED. Synthetic evaluator outcomes
+are unit-test results, not Windows enforcement evidence.
+
+A GitHub OIDC verifier checks a signed token against the official issuer keys and
+binds its audience to the evidence-record digest and run attempt. It does not
+prove observation correctness, owner authorization, machine attestation, or
+provide a separately verifiable attestation in the report. Raw bearer tokens
+are not saved or logged. This path and the runner endpoint remain untested on a
+hosted run. The current workflow remains unchanged, lacks the required proposed
+`id-token: write` permission and does not enable the live stage switches. Any
+workflow activation and privileged hosted execution require separate approval.

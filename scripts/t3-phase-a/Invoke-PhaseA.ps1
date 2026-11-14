@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][string]$RequiredBase,
   [Parameter(Mandatory=$true)][string]$OutputFile,
@@ -11,6 +11,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/PhaseA.Core.ps1"
 . "$PSScriptRoot/PhaseA.Verdict.ps1"
+. "$PSScriptRoot/PhaseA.Evidence.ps1"
+. "$PSScriptRoot/PhaseA.Oidc.ps1"
 . "$PSScriptRoot/PhaseA.Accounts.ps1"
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Stage3.ps1"
@@ -23,6 +25,7 @@ $config = @{
   base=$RequiredBase
 }
 $repository = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$actorJournal=New-Object 'System.Collections.Generic.List[object]'
 $stage3Result=@{}; $hostedResult=@{}; $stage=$null; $adversarialStatus='NOT_RUN'; $supervision=@{injected='NOT_RUN';sameIdentity='NOT_RUN'}
 $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
   elseif (-not (Test-PhaseACheckout $repository $config.sha $RequiredBase)) { "CHECKOUT_REJECTED" }
@@ -35,7 +38,7 @@ $reason = if (-not (Test-PhaseAConfig $config)) { "CONFIGURATION_REJECTED" }
   else {
     try {
       $backend=New-PhaseAWindowsAccountBackend
-      $launchBackend=if ($EnableActorStage) { New-PhaseAStage2Backend } else { @{} }
+      $launchBackend=if ($EnableActorStage) { New-PhaseAActorJournalBackend (New-PhaseAStage2Backend) $actorJournal } else { @{} }
       $fixtureBackend=if ($EnableFilesystemStage) { New-PhaseAStage3Backend } else { @{} }
       $supervisorBackend=if ($EnableActorStage) { New-PhaseAHostedSupervisorBackend } else { @{} }
       $stage=Invoke-PhaseAStages $true ([bool]$EnableActorStage) $backend $launchBackend ([bool]$EnableFilesystemStage) $fixtureBackend $stage3Result ([bool]$EnableActorStage) $supervisorBackend $hostedResult
@@ -59,16 +62,30 @@ $commit=if ($config.sha -cmatch '^[0-9a-f]{40}$') { $config.sha } else { 'unknow
 $supervisorCases=@{}
 foreach ($mode in @('supervisorDeath','jobClosure','timeout')) { $supervisorCases[$mode]=@{status='NOT_RUN';evidence='LIVE';reason='NOT_RUN'} }
 if ($hostedResult.ContainsKey('cases')) { $supervisorCases=$hostedResult.cases }
-# The existing stages do not retain independent per-control proof, and the
-# environment variables cannot establish workflow provenance. The production
-# verifier therefore denies until a trusted evidence adapter is implemented.
+# Only the actor journal has an evidence adapter. Other controls remain
+# NOT_RUN until their independent producers are connected.
 $runId=[Environment]::GetEnvironmentVariable('GITHUB_RUN_ID')
-$verdictInput=New-PhaseAManagerVerdictInput $commit $runId
-$verdict=Get-PhaseAVerdict $verdictInput { param($kind,$entry,$record) return $false }
-$report = [ordered]@{ schema='ether.t3.phase-a.observations.v1'; status=$verdict.status; source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1'; commit=$commit; reason=$reason; cases=$cases; supervisorCases=$supervisorCases }
-if (-not (Test-PhaseAObservationReport $report)) { Write-Error 'Sanitized Phase A report validation failed.'; exit 2 }
+$runRef=if ($runId -cmatch '^[1-9][0-9]{0,19}$') { $runId } else { 'unknown' }
+$attemptRaw=[Environment]::GetEnvironmentVariable('GITHUB_RUN_ATTEMPT'); $attempt=if ($attemptRaw -cmatch '^[1-9][0-9]{0,9}$') { $attemptRaw } else { 'unknown' }
+$verdictInput=New-PhaseAManagerVerdictInput $commit $runRef
+Add-PhaseAActorEvidence $verdictInput $actorJournal.ToArray() 'LIVE_OBSERVED'
+$liveExecutionRequested=[bool]($EnableAccountStage -and $EnableActorStage -and $EnableFilesystemStage -and $EnableSupervisorProbe -and $null -ne $stage)
+$provenanceVerified=$false
+if ($liveExecutionRequested -and $runRef -cne 'unknown' -and $attempt -cne 'unknown' -and $commit -cne 'unknown') { $provenanceVerified=Test-PhaseAGitHubOidcProvenance $verdictInput $attempt }
+# Signed run provenance and explicit switches do not themselves prove owner approval.
+$ownerAuthorizationVerified=$false
+$evidenceVerifier=New-PhaseAEvidenceVerifier $actorJournal.ToArray() $verdictInput $attempt $provenanceVerified $ownerAuthorizationVerified 'LIVE_OBSERVED'
+$verdict=Get-PhaseAVerdict $verdictInput $evidenceVerifier
+if ($verdict.status -ceq 'GREEN') { $reason='VERDICT_GREEN' }
+elseif ($verdict.status -ceq 'RED') { $reason='VERDICT_RED' }
+$expectedWorkflow='andyle777/Ether-Memories/.github/workflows/t3-windows-phase-a.yml@refs/heads/test/t3-windows-enforcement-run'
+$workflowRaw=[Environment]::GetEnvironmentVariable('GITHUB_WORKFLOW_REF'); $workflowRef=if ($workflowRaw -ceq $expectedWorkflow) { $workflowRaw } else { 'unknown' }
+$finalReport=@{schema='ether.t3.phase-a.final.v1';policy='phase-a-core-provisional-v1';repository=$(if ($config.repository -ceq 'andyle777/Ether-Memories') {$config.repository} else {'unknown'});workflowRef=$workflowRef;ref=$(if ($config.ref -ceq 'refs/heads/test/t3-windows-enforcement-run') {$config.ref} else {'unknown'});event=$(if ($config.event -ceq 'push') {$config.event} else {'unknown'});runner=$(if ($config.runner -ceq 'github-hosted') {$config.runner} else {'unknown'});commit=$commit;runId=$runRef;runAttempt=$attempt;status=$verdict.status;reason=$verdict.reason;cleanup='NOT_RUN';provenance=$(if ($provenanceVerified) {'VERIFIED'} else {'UNVERIFIED'});cases=$verdictInput.cases}
+if ($stage -ceq 'ACCOUNT_CLEANUP_FAILED') { $finalReport.cleanup='UNCONFIRMED' }
+$report = [ordered]@{ schema='ether.t3.phase-a.observations.v1'; status=$verdict.status; source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1'; commit=$commit; reason=$reason; cases=$cases; supervisorCases=$supervisorCases; verdict=$finalReport }
+if (-not (Test-PhaseAObservationReport $report $evidenceVerifier)) { Write-Error 'Sanitized Phase A report validation failed.'; exit 2 }
 try {
-  $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Compress))
+  $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Compress -Depth 8))
   $stream=[IO.File]::Open($OutputFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
   try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
 } catch {

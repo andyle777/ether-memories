@@ -1,13 +1,16 @@
 ﻿$ErrorActionPreference = "Stop"
 $base=[IO.Path]::GetTempPath()
 $reports=@()
+. "$PSScriptRoot/PhaseA.Verdict.ps1"
 . "$PSScriptRoot/PhaseA.Accounts.ps1"
 . "$PSScriptRoot/PhaseA.Stage2.ps1"
 . "$PSScriptRoot/PhaseA.Stage3.ps1"
 $reportCases=@{}
 foreach ($k in @('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead','authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','proposedDelete','proposedRename','inventory','insecureRejected','processCleanup','fixtureCleanup','accountCleanup','adversarialControls','supervisorInjected','supervisorFailure')) { $reportCases[$k]='NOT_RUN' }
 $supervisorCases=@{}; foreach ($mode in @('supervisorDeath','jobClosure','timeout')) { $supervisorCases[$mode]=@{status='NOT_RUN';evidence='LIVE';reason='NOT_RUN'} }
-$reportTest=@{supervisorCases=$supervisorCases;schema='ether.t3.phase-a.observations.v1';status='UNVERIFIED';source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1';commit='unknown';reason='IMPLEMENTATION_INCOMPLETE';cases=$reportCases}
+$emptyVerdictInput=New-PhaseAManagerVerdictInput ('1'*40) '123'
+$emptyFinal=@{schema='ether.t3.phase-a.final.v1';policy='phase-a-core-provisional-v1';repository='unknown';workflowRef='unknown';ref='unknown';event='unknown';runner='unknown';commit='unknown';runId='unknown';runAttempt='unknown';status='UNVERIFIED';reason='MISSING_OR_UNTRUSTED_EVIDENCE';cleanup='NOT_RUN';provenance='UNVERIFIED';cases=$emptyVerdictInput.cases}
+$reportTest=@{verdict=$emptyFinal;supervisorCases=$supervisorCases;schema='ether.t3.phase-a.observations.v1';status='UNVERIFIED';source='42f9b5bdf94e47c4c69c0f87127eb545dff13ed1';commit='unknown';reason='IMPLEMENTATION_INCOMPLETE';cases=$reportCases}
 if (-not (Test-PhaseAObservationReport $reportTest)) { throw 'Valid report rejected' }
 $badReport=$reportTest.Clone(); $badCases=$reportCases.Clone(); $badCases.Remove('inventory'); $badReport.cases=$badCases
 if (Test-PhaseAObservationReport $badReport) { throw 'Report with missing observation accepted' }
@@ -185,10 +188,10 @@ try {
     $value=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
     $expected=if ($mode -eq "valid-looking") { "CHECKOUT_REJECTED" } else { "CONFIGURATION_REJECTED" }
     $names=@($value.PSObject.Properties.Name)
-    if ($names.Count -ne 7 -or $value.status -cne "UNVERIFIED" -or
+    if ($names.Count -ne 8 -or $value.status -cne "UNVERIFIED" -or
         $value.schema -cne "ether.t3.phase-a.observations.v1" -or $value.reason -cne $expected -or
         @($value.cases.PSObject.Properties.Name).Count -ne 22 -or $value.cases.adversarialControls -cne 'NOT_RUN' -or
-        $value.cases.supervisorFailure -cne 'NOT_RUN') { throw "Invalid failure report" }
+        $value.cases.supervisorFailure -cne 'NOT_RUN' -or $value.verdict.provenance -cne 'UNVERIFIED' -or $value.verdict.cases.actorPidBinding.state -cne 'NOT_RUN') { throw "Invalid failure report" }
   }
   Write-Output "PASS invalid and valid-looking context remain UNVERIFIED with sanitized report"
 } finally {
@@ -265,3 +268,35 @@ $badReason.Run={param($a,$t,$mode) @{outcome='FAILED';reason='untrusted details'
 $v=Invoke-PhaseAHostedSupervision @{sid='S-1-5-21-1'} @{sid='S-1-5-21-1'} $badReason 'INJECTED'
 if ($v.cases.supervisorDeath.reason -cne 'MISSING_OBSERVATION') { throw 'Untrusted failure detail accepted' }
 Write-Output 'PASS missing, launch and untrusted supervisor reports (3)'
+. "$PSScriptRoot/PhaseA.Verdict.ps1"
+. "$PSScriptRoot/PhaseA.Evidence.ps1"
+$actorJournal=New-Object 'System.Collections.Generic.List[object]'
+$journalBackend=New-PhaseAActorJournalBackend $stage2fake $actorJournal
+if ((Invoke-PhaseAStage2 $ac $tk $journalBackend) -cne 'STAGE2_COMPLETE' -or $actorJournal.Count -ne 2) { throw 'Actor journal backend did not capture returned observations' }
+$unproven=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $unproven $actorJournal.ToArray() 'SIMULATED_PASS'
+if ($unproven.cases.brokerActorBinding.state -cne 'NOT_RUN') { throw 'Stage COMPLETE alone generated evidence' }
+Write-Output 'PASS manager-connected journal and incomplete-stage control (2)'
+$fullJournal=New-Object 'System.Collections.Generic.List[object]'; $journalBackend=New-PhaseAActorJournalBackend $stage3actors $fullJournal
+$script:events.Clear(); $script:seq=0; $script:created3=$false
+$r=Invoke-PhaseAStages $true $true $fake $journalBackend $true $stage3fixture @{}
+$mapped=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $mapped $fullJournal.ToArray() 'SIMULATED_PASS'
+if ($r -cne 'STAGE3_COMPLETE' -or $fullJournal.Count -ne 11 -or $mapped.cases.brokerActorBinding.state -cne 'PASS' -or $mapped.cases.unauthorizedRead.state -cne 'NOT_RUN') { throw 'Full actor journal bridge failed' }
+Write-Output 'PASS full injected stage path records bounded actor evidence'
+$complete=New-PhaseAManagerVerdictInput ('1'*40) '123'
+foreach ($key in @(Get-PhaseAVerdictPolicy)) { $complete.cases[$key]=@{state='PASS';evidence='LIVE_OBSERVED';reason='NONE';proof=('a'*64)} }
+$final=@{schema='ether.t3.phase-a.final.v1';policy='phase-a-core-provisional-v1';repository='andyle777/Ether-Memories';workflowRef='andyle777/Ether-Memories/.github/workflows/t3-windows-phase-a.yml@refs/heads/test/t3-windows-enforcement-run';ref='refs/heads/test/t3-windows-enforcement-run';event='push';runner='github-hosted';commit=('1'*40);runId='123';runAttempt='1';status='GREEN';reason='ALL_MANDATORY_CONTROLS_VERIFIED';cleanup='COMPLETE';provenance='VERIFIED';cases=$complete.cases}
+$top=$reportTest.Clone(); $top.commit=('1'*40); $top.status='GREEN'; $top.reason='VERDICT_GREEN'; $top.verdict=$final
+$top.cases=$reportCases.Clone(); foreach ($key in @('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead','authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','inventory','insecureRejected','processCleanup','fixtureCleanup','accountCleanup')) { $top.cases[$key]='PASS' }
+$top.supervisorCases=@{}; foreach ($mode in @('supervisorDeath','jobClosure','timeout')) { $top.supervisorCases[$mode]=@{status='LIVE_OBSERVED';evidence='LIVE';reason='NONE'} }
+$trustFake={param($kind,$entry,$record) return $true}
+if (-not (Test-PhaseAObservationReport $top $trustFake)) { throw 'Complete synthetic GREEN report rejected' }
+if (Test-PhaseAObservationReport $top) { throw 'GREEN accepted without trusted verifier' }
+$top.cases.actorIdentity='NOT_RUN'
+if (Test-PhaseAObservationReport $top $trustFake) { throw 'GREEN accepted with missing actor observation' }
+Write-Output 'PASS nested GREEN report consistency controls (3)'
+$redNested=$final.Clone(); $redNested.cases=@{}; foreach ($key in $final.cases.Keys) { $redNested.cases[$key]=$final.cases[$key].Clone() }; $redNested.cases.unauthorizedWrite.state='FAIL'; $redNested.cases.unauthorizedWrite.reason='VIOLATION'; $redNested.status='RED'; $redNested.reason='MANDATORY_CONTROL_FAILED'
+$redTop=$top.Clone(); $redTop.status='RED'; $redTop.reason='VERDICT_RED'; $redTop.verdict=$redNested
+if (-not (Test-PhaseAObservationReport $redTop $trustFake)) { throw 'Verified synthetic RED report rejected' }
+$badRed=$redTop.Clone(); $badRed.status='GREEN'; $badRed.reason='VERDICT_GREEN'
+if (Test-PhaseAObservationReport $badRed $trustFake) { throw 'RED evidence accepted as GREEN' }
+Write-Output 'PASS nested RED report consistency controls (2)'

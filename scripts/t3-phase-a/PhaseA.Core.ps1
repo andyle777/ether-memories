@@ -75,15 +75,15 @@ function Test-PhaseAReport([hashtable]$Report) {
       $Report.cases -isnot [hashtable]) { return $false }
   return (Test-RequiredCases $Report.cases)
 }
-function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
-  $fields=@('schema','status','source','commit','reason','cases','supervisorCases')
+function Test-PhaseAObservationReport([Collections.IDictionary]$Report,[scriptblock]$Verify={param($kind,$entry,$record) return $false}) {
+  $fields=@('schema','status','source','commit','reason','cases','supervisorCases','verdict')
   if ($Report.Count -ne $fields.Count) { return $false }
   foreach ($field in $fields) { if (-not $Report.Contains($field)) { return $false } }
-  if ($Report.schema -cne 'ether.t3.phase-a.observations.v1' -or $Report.status -cne 'UNVERIFIED' -or
+  if ($Report.schema -cne 'ether.t3.phase-a.observations.v1' -or $Report.status -cnotin @('UNVERIFIED','GREEN','RED') -or
       $Report.source -cne '42f9b5bdf94e47c4c69c0f87127eb545dff13ed1' -or
       ($Report.commit -cne 'unknown' -and $Report.commit -cnotmatch '^[0-9a-f]{40}$')) { return $false }
   $reasons=@('CONFIGURATION_REJECTED','CHECKOUT_REJECTED','STAGE2_GUARD_REJECTED','STAGE3_GUARD_REJECTED',
-    'IMPLEMENTATION_INCOMPLETE','SUPERVISOR_LIVE_FAILED','SUPERVISOR_INJECTED_FAILED','SUPERVISOR_PROBE_FAILED','SUPERVISOR_JOB_PROBE_FAILED','SUPERVISOR_DEATH_PROBE_FAILED','SUPERVISOR_PROBE_REQUIRED','ADVERSARIAL_CONTROL_FAILED','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
+    'IMPLEMENTATION_INCOMPLETE','VERDICT_GREEN','VERDICT_RED','SUPERVISOR_LIVE_FAILED','SUPERVISOR_INJECTED_FAILED','SUPERVISOR_PROBE_FAILED','SUPERVISOR_JOB_PROBE_FAILED','SUPERVISOR_DEATH_PROBE_FAILED','SUPERVISOR_PROBE_REQUIRED','ADVERSARIAL_CONTROL_FAILED','ACCOUNT_MANAGEMENT_UNAVAILABLE','ACCOUNT_CREATION_FAILED','ACCOUNT_IDENTITY_REJECTED',
     'ACCOUNT_AUTHENTICATION_FAILED','ACCOUNT_PRIVILEGE_UNAVAILABLE','ACCOUNT_LOGON_RIGHT_UNAVAILABLE','ACCOUNT_CONSUMER_FAILED',
     'ACCOUNT_CLEANUP_FAILED','STAGE2_OBSERVATION_REJECTED','STAGE2_LAUNCH_FAILED','STAGE2_TIMEOUT','STAGE2_CLEANUP_FAILED',
     'STAGE3_SETUP_FAILED','STAGE3_ACL_REJECTED','STAGE3_CASE_FAILED','STAGE3_CLEANUP_FAILED')
@@ -104,6 +104,12 @@ function Test-PhaseAObservationReport([Collections.IDictionary]$Report) {
     $entry=$Report.supervisorCases[$mode]
     if ($entry -isnot [Collections.IDictionary] -or $entry.Count -ne 3 -or -not $entry.Contains('status') -or -not $entry.Contains('reason') -or -not $entry.Contains('evidence') -or $entry.evidence -cne 'LIVE' -or $entry.status -cnotin @('NOT_RUN','LIVE_OBSERVED','FAIL') -or $entry.reason -cnotin $allowedReasons) { return $false }
     if (($entry.status -ceq 'NOT_RUN' -and $entry.reason -cne 'NOT_RUN') -or ($entry.status -ceq 'LIVE_OBSERVED' -and $entry.reason -cne 'NONE') -or ($entry.status -ceq 'FAIL' -and $entry.reason -cin @('NOT_RUN','NONE'))) { return $false }
+  }
+  if (-not (Test-PhaseAFinalReport $Report.verdict $Verify) -or $Report.status -cne $Report.verdict.status -or $Report.commit -cne $Report.verdict.commit) { return $false }
+  if (($Report.status -ceq 'GREEN' -and $Report.reason -cne 'VERDICT_GREEN') -or ($Report.status -ceq 'RED' -and $Report.reason -cne 'VERDICT_RED')) { return $false }
+  if ($Report.status -ceq 'GREEN') {
+    foreach ($key in @('accountIdentity','brokerIdentity','legacyIdentity','actorIdentity','containment','acl','authorizedRead','authorizedCreate','authorizedReadback','unauthorizedRead','unauthorizedWrite','unauthorizedCreate','inventory','insecureRejected','processCleanup','fixtureCleanup','accountCleanup')) { if ($Report.cases[$key] -cne 'PASS') { return $false } }
+    foreach ($mode in @('supervisorDeath','jobClosure','timeout')) { if ($Report.supervisorCases[$mode].status -cne 'LIVE_OBSERVED') { return $false } }
   }
   return $true
 }

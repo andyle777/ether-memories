@@ -199,3 +199,122 @@ foreach ($key in $policy) {
 $x=Copy-VerdictInput $inputRecord; $x.cases.proposedDelete=@{state='PASS';evidence='LIVE_OBSERVED';reason='NONE';proof=('a'*64)}
 if ((Get-PhaseAVerdict $x $verify).status -cne 'UNVERIFIED') { throw 'Unadopted policy field silently accepted' }
 Write-Output "PASS no failed mandatory case can compute GREEN ($($policy.Count)) and addendum remains separate"
+. "$PSScriptRoot/PhaseA.Evidence.ps1"
+$journal=New-Object 'System.Collections.Generic.List[object]'
+foreach ($spec in @(@('broker','probe','allowed'),@('legacy','probe','allowed'),@('broker','Read','allowed'),@('broker','Create','allowed'),@('broker','Read','allowed'),@('legacy','Read','denied'),@('legacy','Overwrite','denied'),@('legacy','Create','denied'),@('legacy','Read','allowed'))) {
+  $sid=if ($spec[0] -ceq 'broker') {'S-1-5-21-1'} else {'S-1-5-21-2'}; $exitCode=if ($spec[2] -ceq 'denied') {20} else {0}
+  $obs=@{role=$spec[0];expectedSid=$sid;observedSid=$sid;reportedSid=$sid;expectedPid=123;reportedPid=123;tokenNonAdmin=$true;tokenObserved=$true;createdAt='2026-01-01T00:00:00Z';observedCreatedAt='2026-01-01T00:00:00Z';expectedNonce='n';reportedNonce='n';exitCode=$exitCode;outcome=$spec[2];contained=$true;terminated=$true}
+  $journal.Add(@{role=$spec[0];operation=$spec[1];accountSid=$sid;tokenSid=$sid;observation=$obs})
+}
+$bridge=New-PhaseAManagerVerdictInput ('1'*40) '123'
+Add-PhaseAActorEvidence $bridge $journal.ToArray() 'SIMULATED_PASS'
+if ($bridge.cases.actorPidBinding.state -cne 'PASS' -or $bridge.cases.actorPidBinding.evidence -cne 'SIMULATED_PASS') { throw 'Valid simulated actor evidence not mapped' }
+if ($bridge.cases.accountCleanup.state -cne 'NOT_RUN') { throw 'Stage completion invented account cleanup' }
+Write-Output 'PASS actor evidence bridge positive and missing controls (2)'
+function Copy-ActorJournal($source) { $copy=New-Object 'System.Collections.Generic.List[object]'; foreach ($item in $source) { $v=$item.Clone(); $v.observation=$item.observation.Clone(); $copy.Add($v) }; return ,$copy.ToArray() }
+foreach ($field in @('reportedPid','reportedSid','createdAt','contained','terminated','outcome')) {
+  $copy=Copy-ActorJournal $journal.ToArray()
+  switch ($field) { 'reportedPid' {$copy[2].observation.reportedPid=124} 'reportedSid' {$copy[2].observation.reportedSid='S-1-5-21-9'} 'createdAt' {$copy[2].observation.createdAt='2026-01-01T00:00:01Z'} 'contained' {$copy[2].observation.contained=$false} 'terminated' {$copy[2].observation.terminated=$false} 'outcome' {$copy[2].observation.outcome='denied'} }
+  $candidate=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $candidate $copy 'SIMULATED_PASS'
+  if ($candidate.cases.actorPidBinding.state -cne 'NOT_RUN') { throw "Bad actor evidence accepted: $field" }
+}
+$candidate=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $candidate @() 'SIMULATED_PASS'
+if ($candidate.cases.actorPidBinding.state -cne 'NOT_RUN') { throw 'Missing journal accepted' }
+$candidate=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $candidate $journal.ToArray() 'SIMULATED_PASS'
+if ((Get-PhaseAVerdict $candidate $verify).status -cne 'UNVERIFIED') { throw 'Simulated bridge evidence accepted as live' }
+Write-Output 'PASS actor evidence bridge negative controls (8)'
+$finalReport=@{schema='ether.t3.phase-a.final.v1';policy='phase-a-core-provisional-v1';repository='andyle777/Ether-Memories';workflowRef='andyle777/Ether-Memories/.github/workflows/t3-windows-phase-a.yml@refs/heads/test/t3-windows-enforcement-run';ref='refs/heads/test/t3-windows-enforcement-run';event='push';runner='github-hosted';commit=('1'*40);runId='123';runAttempt='1';status='GREEN';reason='ALL_MANDATORY_CONTROLS_VERIFIED';cleanup='COMPLETE';provenance='VERIFIED';cases=$inputRecord.cases}
+if (-not (Test-PhaseAFinalReport $finalReport $verify)) { throw 'Verified synthetic final report rejected' }
+$badFinal=$finalReport.Clone(); $badFinal.repository='other/repo'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Wrong repository accepted' }
+$badFinal=$finalReport.Clone(); $badFinal.workflowRef='wrong'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Wrong workflow accepted' }
+$badFinal=$finalReport.Clone(); $badFinal.status='RED'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Forged verdict accepted' }
+Write-Output 'PASS strict final report injected controls (4)'
+$redReport=$finalReport.Clone(); $redCases=@{}; foreach ($key in $finalReport.cases.Keys) { $redCases[$key]=$finalReport.cases[$key].Clone() }; $redCases.unauthorizedRead.state='FAIL'; $redCases.unauthorizedRead.reason='VIOLATION'; $redReport.cases=$redCases; $redReport.status='RED'; $redReport.reason='MANDATORY_CONTROL_FAILED'
+if (-not (Test-PhaseAFinalReport $redReport $verify)) { throw 'Verified synthetic RED report rejected' }
+$badFinal=$redReport.Clone(); $badFinal.status='GREEN'; $badFinal.reason='ALL_MANDATORY_CONTROLS_VERIFIED'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Verified violation became GREEN' }
+$badFinal=$redReport.Clone(); $badFinal.cleanup='UNCONFIRMED'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Incomplete cleanup accepted' }
+$badFinal=$finalReport.Clone(); $badFinal.extra='secret'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Extra final report field accepted' }
+$badFinal=$finalReport.Clone(); $badFinal.status='UNVERIFIED'; $badFinal.reason='MISSING_OR_UNTRUSTED_EVIDENCE'; $badFinal.repository='private-value'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Unsafe unverified metadata accepted' }
+Write-Output 'PASS RED, cleanup and final report safety controls (5)'
+$badFinal=$finalReport.Clone(); $badFinal.status='UNVERIFIED'; $badFinal.reason='MISSING_OR_UNTRUSTED_EVIDENCE'; $badFinal.provenance='UNVERIFIED'; $badFinal.cleanup='COMPLETE'; $badFinal.cases=(New-PhaseAManagerVerdictInput ('1'*40) '123').cases
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'Unproven cleanup accepted' }
+$badFinal=$finalReport.Clone(); $badFinal.provenance='UNVERIFIED'
+if (Test-PhaseAFinalReport $badFinal $verify) { throw 'GREEN accepted without verified provenance' }
+Write-Output 'PASS final report provenance and cleanup distinction (2)'
+. "$PSScriptRoot/PhaseA.Oidc.ps1"
+$rsa=New-Object Security.Cryptography.RSACryptoServiceProvider(2048)
+try {
+  $public=$rsa.ExportParameters($false)
+  function Test-EncodeUrl([byte[]]$bytes) { return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_') }
+  $keys=@(@{kid='test-key';kty='RSA';alg='RS256';use='sig';n=(Test-EncodeUrl $public.Modulus);e=(Test-EncodeUrl $public.Exponent)})
+  $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $expect=@{audience='urn:ether:phase-a:test';repository='andyle777/Ether-Memories';repositoryId='1345912571';workflowRef='andyle777/Ether-Memories/.github/workflows/t3-windows-phase-a.yml@refs/heads/test/t3-windows-enforcement-run';ref='refs/heads/test/t3-windows-enforcement-run';event='push';runner='github-hosted';sha=('1'*40);runId='123';runAttempt='1'}
+  $claims=@{iss='https://token.actions.githubusercontent.com';aud=$expect.audience;repository=$expect.repository;repository_id=$expect.repositoryId;workflow_ref=$expect.workflowRef;ref=$expect.ref;event_name=$expect.event;runner_environment=$expect.runner;sha=$expect.sha;workflow_sha=$expect.sha;jti='synthetic-id';run_id=$expect.runId;run_attempt=$expect.runAttempt;iat=$now;nbf=($now-1);exp=($now+300)}
+  function New-TestOidc($claims) { $h=Test-EncodeUrl ([Text.Encoding]::UTF8.GetBytes((@{alg='RS256';kid='test-key'} | ConvertTo-Json -Compress))); $p=Test-EncodeUrl ([Text.Encoding]::UTF8.GetBytes(($claims | ConvertTo-Json -Compress))); $data=[Text.Encoding]::ASCII.GetBytes($h+'.'+$p); $signature=$rsa.SignData($data,[Security.Cryptography.CryptoConfig]::MapNameToOID('SHA256')); return $h+'.'+$p+'.'+(Test-EncodeUrl $signature) }
+  $jwt=New-TestOidc $claims
+  if (-not (Test-PhaseAOidcToken $jwt $keys $expect $now)) { throw 'Valid test-signed OIDC token rejected' }
+  Write-Output 'PASS synthetic signed OIDC positive control'
+  $oidcChecks=0
+  foreach ($case in @(@('repository','other/repo'),@('repository_id','9'),@('workflow_ref','wrong'),@('sha',('2'*40)),@('workflow_sha',('2'*40)),@('ref','refs/heads/main'),@('event_name','pull_request'),@('run_id','124'),@('run_attempt','2'),@('runner_environment','self-hosted'),@('aud','wrong'),@('iss','https://wrong.invalid'))) {
+    $bad=$claims.Clone(); $bad[$case[0]]=$case[1]
+    if (Test-PhaseAOidcToken (New-TestOidc $bad) $keys $expect $now) { throw "Wrong signed claim accepted: $($case[0])" }; $oidcChecks++
+  }
+  $bad=$claims.Clone(); $bad.exp=$now-1
+  if (Test-PhaseAOidcToken (New-TestOidc $bad) $keys $expect $now) { throw 'Expired token accepted' }; $oidcChecks++
+  $bad=$claims.Clone(); $bad.nbf=$now+60
+  if (Test-PhaseAOidcToken (New-TestOidc $bad) $keys $expect $now) { throw 'Future token accepted' }; $oidcChecks++
+  $parts=$jwt.Split('.'); $signature=ConvertFrom-PhaseABase64Url $parts[2]; $signature[0]=$signature[0] -bxor 1; $forged=$parts[0]+'.'+$parts[1]+'.'+(Test-EncodeUrl $signature)
+  if (Test-PhaseAOidcToken $forged $keys $expect $now) { throw 'Forged signature accepted' }; $oidcChecks++
+  if (Test-PhaseAOidcToken ($parts[0]+'.'+$parts[1]+'.') $keys $expect $now) { throw 'Unsigned claims accepted' }; $oidcChecks++
+  if (Test-PhaseAOidcToken $jwt @() $expect $now) { throw 'Untrusted key accepted' }; $oidcChecks++
+  Write-Output "PASS synthetic OIDC signature, claims and lifetime negative controls ($oidcChecks)"
+
+} finally { $rsa.Dispose() }
+$aud1=Get-PhaseAEvidenceAudience $inputRecord '1'
+$changedInput=Copy-VerdictInput $inputRecord; $changedInput.cases.actorPidBinding.proof=('b'*64)
+$aud2=Get-PhaseAEvidenceAudience $changedInput '1'
+$aud3=Get-PhaseAEvidenceAudience $inputRecord '2'
+if ($aud1 -cnotmatch '^urn:ether:phase-a:[0-9a-f]{64}$' -or $aud1 -ceq $aud2 -or $aud1 -ceq $aud3) { throw 'OIDC audience did not bind evidence and attempt' }
+Write-Output 'PASS evidence and run-attempt audience binding'
+$priorUrl=[Environment]::GetEnvironmentVariable('ACTIONS_ID_TOKEN_REQUEST_URL','Process'); $priorToken=[Environment]::GetEnvironmentVariable('ACTIONS_ID_TOKEN_REQUEST_TOKEN','Process')
+try {
+  [Environment]::SetEnvironmentVariable('ACTIONS_ID_TOKEN_REQUEST_URL','https://example.invalid/oidc','Process')
+  [Environment]::SetEnvironmentVariable('ACTIONS_ID_TOKEN_REQUEST_TOKEN','synthetic','Process')
+  if (Test-PhaseAGitHubOidcProvenance $inputRecord '1') { throw 'Untrusted OIDC request endpoint accepted' }
+} finally {
+  [Environment]::SetEnvironmentVariable('ACTIONS_ID_TOKEN_REQUEST_URL',$priorUrl,'Process')
+  [Environment]::SetEnvironmentVariable('ACTIONS_ID_TOKEN_REQUEST_TOKEN',$priorToken,'Process')
+}
+Write-Output 'PASS OIDC request endpoint rejection'
+$bridged=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $bridged $journal.ToArray() 'SIMULATED_PASS'
+$bridgeVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $bridged '1' $true $true 'SIMULATED_PASS'
+if (-not (& $bridgeVerifier 'actorPidBinding' $bridged.cases.actorPidBinding $bridged)) { throw 'Valid journal proof not independently rechecked' }
+$forgedEntry=$bridged.cases.actorPidBinding.Clone(); $forgedEntry.proof=('f'*64)
+if (& $bridgeVerifier 'actorPidBinding' $forgedEntry $bridged) { throw 'Forged journal proof accepted' }
+$wrongContext=$bridged.Clone(); $wrongContext.commit=('2'*40)
+if (& $bridgeVerifier 'workflow_provenance' $null $wrongContext) { throw 'Provenance not bound to commit' }
+if (& $bridgeVerifier 'accountCleanup' $bridged.cases.accountCleanup $bridged) { throw 'Missing producer accepted' }
+Write-Output 'PASS independently rechecked journal and provenance binding (4)'
+$bridgeFinal=@{schema='ether.t3.phase-a.final.v1';policy=$bridged.policy;repository='andyle777/Ether-Memories';workflowRef='andyle777/Ether-Memories/.github/workflows/t3-windows-phase-a.yml@refs/heads/test/t3-windows-enforcement-run';ref='refs/heads/test/t3-windows-enforcement-run';event='push';runner='github-hosted';commit=$bridged.commit;runId=$bridged.runId;runAttempt='1';status='UNVERIFIED';reason='MISSING_OR_UNTRUSTED_EVIDENCE';cleanup='NOT_RUN';provenance='VERIFIED';cases=$bridged.cases}
+if (-not (Test-PhaseAFinalReport $bridgeFinal $bridgeVerifier)) { throw 'Bound synthetic provenance report rejected' }
+$badFinal=$bridgeFinal.Clone(); $badFinal.runAttempt='2'
+if (Test-PhaseAFinalReport $badFinal $bridgeVerifier) { throw 'Wrong attempt accepted with verified provenance' }
+$badFinal=$bridgeFinal.Clone(); $badFinal.cases=@{}; foreach ($key in $bridgeFinal.cases.Keys) { $badFinal.cases[$key]=$bridgeFinal.cases[$key].Clone() }; $badFinal.cases.actorPidBinding.proof=('c'*64)
+if (Test-PhaseAFinalReport $badFinal $bridgeVerifier) { throw 'Altered evidence set accepted with verified provenance' }
+if (Test-PhaseAFinalReport $bridgeFinal {param($kind,$entry,$report) return $false}) { throw 'Unverified OIDC claims accepted' }
+Write-Output 'PASS final report provenance binding and forged evidence controls (4)'
+$same=Copy-ActorJournal $journal.ToArray()
+foreach ($item in $same) { if ($item.role -ceq 'legacy') { $item.accountSid='S-1-5-21-1'; $item.tokenSid='S-1-5-21-1'; $item.observation.expectedSid='S-1-5-21-1'; $item.observation.observedSid='S-1-5-21-1'; $item.observation.reportedSid='S-1-5-21-1' } }
+$test=New-PhaseAManagerVerdictInput ('1'*40) '123'; Add-PhaseAActorEvidence $test $same 'SIMULATED_PASS'
+if ($test.cases.identityDistinct.state -cne 'NOT_RUN') { throw 'Same SID was accepted by evidence bridge' }
+Write-Output 'PASS evidence bridge rejects identical identities'
+$provenanceOnly=New-PhaseAEvidenceVerifier $journal.ToArray() $bridged '1' $true $false 'SIMULATED_PASS'
+if (-not (& $provenanceOnly 'workflow_provenance' $null $bridged) -or (& $provenanceOnly 'authorization' $null $bridged)) { throw 'OIDC provenance was mistaken for owner authorization' }
+Write-Output 'PASS provenance does not imply owner authorization'
