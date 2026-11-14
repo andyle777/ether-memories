@@ -513,3 +513,21 @@ foreach($spec in @(@('unauthorizedWrite','Overwrite','protectedFile',6,$true),@(
  if($v.cases[$spec[0]].state -cne 'FAIL' -or $v.cases[$spec[0]].reason -cne 'VIOLATION'){throw "Trusted unexpected grant was lost: $($spec[0])"}
 }
 Write-Output 'PASS trusted write and create grants survive unconfirmed cleanup (2)'
+$processRead=$readEvidence.Clone();$processRead.unauthorizedRead=$readEvidence.unauthorizedRead.Clone();$processRead.witnessControls=$wControls.Clone()
+foreach($where in @('witness','authorizedRead','permissiveRead')) {
+ if($where -ceq 'witness'){$c=$processRead.unauthorizedRead.witness.Clone();$processRead.unauthorizedRead.witness=$c}else{$c=$processRead.witnessControls[$where].Clone();$processRead.witnessControls[$where]=$c}
+ $c.Remove('reverted');$c.execution='PROCESS';$c.processVerified=$true;$c.terminated=$true;$c.pid=123;$c.pipeClientPid=123;$c.createdAt='2026-01-01T00:00:00Z';$c.nonce=if($where -ceq 'witness'){'a'*32}elseif($where -ceq 'authorizedRead'){'b'*32}else{'c'*32}
+}
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $processRead 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'PASS'){throw 'process witness was not mapped'}
+$bad=$processRead.Clone();$bad.unauthorizedRead=$processRead.unauthorizedRead.Clone();$bad.unauthorizedRead.witness=$processRead.unauthorizedRead.witness.Clone();$bad.unauthorizedRead.witness.pipeClientPid=124
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $bad 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'wrong client PID accepted'}
+Write-Output 'PASS process read evidence and wrong pipe PID rejection'
+$processBound=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $processBound $processRead 'SIMULATED_PASS' $journal.ToArray()
+$processVerifier=New-PhaseAEvidenceVerifier $journal.ToArray() $processBound '1' $true $true 'SIMULATED_PASS' @() @{} $processRead
+if(-not (& $processVerifier 'unauthorizedRead' $processBound.cases.unauthorizedRead $processBound)){throw 'process proof failed recheck'}
+$reused=$processRead.Clone();$reused.unauthorizedRead=$processRead.unauthorizedRead.Clone();$reused.unauthorizedRead.witness=$processRead.unauthorizedRead.witness.Clone();$reused.unauthorizedRead.witness.nonce=$processRead.witnessControls.authorizedRead.nonce
+$v=New-PhaseAManagerVerdictInput ('1'*40) '123';Add-PhaseAStage3Evidence $v $reused 'SIMULATED_PASS' $journal.ToArray()
+if($v.cases.unauthorizedRead.state -cne 'NOT_RUN'){throw 'reused witness nonce accepted'}
+Write-Output 'PASS process proof recheck and cross-control nonce reuse rejection'

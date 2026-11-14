@@ -90,3 +90,19 @@ behavior and real impersonation are UNVERIFIED until authorized hosted runs.
 Setup, context restoration, unrelated native errors and cleanup failures fail
 closed. The worker join has no timeout; an indefinitely stalled filesystem
 operation can block the manager and is a remaining source limitation.
+
+Bounded read update: the manager compiles a source-pinned helper into a
+manager-controlled scratch directory, prevents writes to the compiled image
+while it runs, and launches it suspended with the existing atomic Job Object
+launcher. Before resuming, the manager queries its process token SID, PID and
+creation time and confirms membership. The one-shot pipe grants the expected
+identity access, denies NETWORK, and the manager checks the operating-system
+pipe-client PID against the held child. The receipt binds nonce, PID, creation
+time, SID, operation, target identifier and native result. Connection, read and
+exit are deadline-bound; job closure and child wait precede cleanup. A child
+whose termination is unconfirmed keeps the dependent resources and prevents
+account cleanup claims. The helper requests native read access, not proof of the
+original actor request. Same-identity processes may still interfere with the
+helper or deny service; this is not cryptographic authentication of an
+otherwise compromised same-identity process. Cross-identity execution remains
+unverified. WRITE and CREATE retain their earlier unbounded thread path.

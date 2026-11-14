@@ -415,3 +415,11 @@ $uResult=Invoke-PhaseAStages $true $true $fake $wActors $true $unconfirmedFixtur
 if($uResult -cne 'ACCOUNT_CLEANUP_FAILED' -or $script:events.Contains('close:broker') -or $script:events.Contains('remove:broker') -or $script:stage3events.Contains('cleanup')) {throw 'Witness unconfirmed-child did not retain dependent resources'}
 if($script:PhaseAUnconfirmedResources.accounts.Count -ne 2 -or $script:PhaseAUnconfirmedResources.tokens.Count -ne 2){throw 'Unconfirmed account resources not retained'}
 Write-Output 'PASS manager witness failure retains dependent fixture accounts and tokens'
+$timeoutBackend=@{Exists={param($p) $true};DirectoryExists={param($p) $true};Probe={param($t,$s,$o,$p,$r) throw 'WITNESS_TIMEOUT'}}
+$timeoutResult=Invoke-PhaseATrustedAccess $timeoutBackend @{protectedFile='existing'} @{sid='S-1-5-21-2'} 'S-1-5-21-2' 'Read' 'protectedFile' 'INJECTED'
+if($timeoutResult.status -cne 'UNVERIFIED' -or $timeoutResult.reason -cne 'WITNESS_TIMEOUT'){throw 'sanitized timeout not retained'}
+Write-Output 'PASS manager retains timeout as UNVERIFIED'
+$legacyBackend=@{Exists={param($p) $true};DirectoryExists={param($p) $true};Probe={param($t,$sid,$op,$target,$root) @{impersonated=$true;sid=$sid;operation=$op;attempted=$true;allowed=$false;error=5;reverted=$true;handlesClosed=$true}}}
+$legacyResult=Invoke-PhaseATrustedAccess $legacyBackend @{protectedFile='existing'} @{sid='S-1-5-21-2'} 'S-1-5-21-2' 'Read' 'protectedFile' 'LIVE'
+if($legacyResult.status -ceq 'OBSERVED'){throw 'unbounded live read accepted'}
+Write-Output 'PASS unbounded thread evidence cannot satisfy live READ'
